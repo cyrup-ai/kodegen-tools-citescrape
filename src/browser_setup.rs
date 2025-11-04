@@ -133,10 +133,22 @@ fn expand_windows_env_vars(path: &str) -> String {
 
     while let Some(ch) = chars.next() {
         if ch == '%' {
-            // Found start of potential environment variable
-            let var_name: String = chars.by_ref().take_while(|&c| c != '%').collect();
+            // Collect characters until next '%' or end of string
+            let mut var_name = String::new();
+            let mut found_closing = false;
 
-            if !var_name.is_empty() {
+            // Explicitly iterate to track whether we found the delimiter
+            for c in chars.by_ref() {
+                if c == '%' {
+                    found_closing = true;
+                    break;
+                }
+                var_name.push(c);
+            }
+
+            // Handle three distinct cases
+            if found_closing && !var_name.is_empty() {
+                // Case 1: Valid %VAR% token
                 // Try to expand the variable
                 if let Ok(value) = std::env::var(&var_name) {
                     result.push_str(&value);
@@ -146,9 +158,15 @@ fn expand_windows_env_vars(path: &str) -> String {
                     result.push_str(&var_name);
                     result.push('%');
                 }
-            } else {
-                // Empty %% sequence, keep single %
+            } else if found_closing && var_name.is_empty() {
+                // Case 2: Empty %% sequence, treat as single %
                 result.push('%');
+            } else {
+                // Case 3: No closing % found - malformed token
+                // Preserve as-is: opening % and consumed characters
+                result.push('%');
+                result.push_str(&var_name);
+                // Do NOT add closing % since it wasn't in the input
             }
         } else {
             result.push(ch);
