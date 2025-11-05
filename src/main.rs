@@ -23,6 +23,7 @@ impl ShutdownHook for BrowserManagerWrapper {
 #[tokio::main]
 async fn main() -> Result<()> {
     run_http_server("citescrape", |_config, _tracker| {
+        Box::pin(async move {
         let mut tool_router = ToolRouter::new();
         let mut prompt_router = PromptRouter::new();
         let mut managers = Managers::new();
@@ -68,6 +69,7 @@ async fn main() -> Result<()> {
         engine_cache.start_cleanup_task();
 
         Ok(RouterSet::new(tool_router, prompt_router, managers))
+        })
     })
     .await
 }
