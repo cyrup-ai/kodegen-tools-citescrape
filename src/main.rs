@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
         Box::pin(async move {
         let mut tool_router = ToolRouter::new();
         let mut prompt_router = PromptRouter::new();
-        let mut managers = Managers::new();
+        let managers = Managers::new();
 
         // Create managers
         let session_manager = Arc::new(kodegen_tools_citescrape::CrawlSessionManager::new());
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
         let browser_manager = Arc::new(kodegen_tools_citescrape::BrowserManager::new());
 
         // Register browser manager for shutdown (closes Chrome)
-        managers.register(BrowserManagerWrapper(browser_manager.clone()));
+        managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
 
         // Register all 4 citescrape tools
         use kodegen_tools_citescrape::*;
