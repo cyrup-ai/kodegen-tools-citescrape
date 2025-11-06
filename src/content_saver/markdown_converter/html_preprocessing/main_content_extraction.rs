@@ -1,17 +1,14 @@
-//! HTML preprocessing functionality for markdown conversion.
+//! Main content extraction from HTML documents.
 //!
-//! This module provides two main functions:
-//! 1. `extract_main_content` - Intelligently extracts the primary content from HTML
-//! 2. `clean_html_content` - Removes scripts, styles, ads, and other non-content elements
-//!
-//! These functions prepare HTML for optimal markdown conversion.
+//! This module intelligently extracts the primary content from HTML pages by:
+//! 1. Looking for semantic containers in priority order: `<main>`, `<article>`, content-specific divs
+//! 2. Removing navigation, headers, footers, sidebars, and other non-content elements
+//! 3. Falling back to `<body>` tag if no semantic containers are found
+//! 4. Preserving HTML structure, attributes, and element nesting
 
 use anyhow::Result;
 use ego_tree::NodeId;
-use html_escape::decode_html_entities;
-use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
@@ -22,15 +19,15 @@ use std::sync::LazyLock;
 /// - Typical documentation: 1-2 MB  
 /// - Blog posts: 100-500 KB
 /// - 99.9% of real HTML is under 10 MB
-const MAX_HTML_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+pub(super) const MAX_HTML_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 // ============================================================================
-// PART 1: Main Content Extraction
-// ============================================================================
-
 // CSS Selectors for main content extraction
+// ============================================================================
+
 // These are parsed once at first access and cached forever.
 // Hardcoded selectors should NEVER fail to parse - if they do, it's a compile-time bug.
+
 static MAIN_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
     Selector::parse("main").expect("BUG: hardcoded CSS selector 'main' is invalid")
 });
@@ -89,6 +86,10 @@ static STORY_BODY_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
 static BODY_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
     Selector::parse("body").expect("BUG: hardcoded CSS selector 'body' is invalid")
 });
+
+// ============================================================================
+// Element Removal Utilities
+// ============================================================================
 
 /// Efficiently remove elements matching selectors from an element's subtree.
 ///
@@ -225,6 +226,10 @@ fn serialize_html_excluding(
     }
 }
 
+// ============================================================================
+// Main Content Extraction
+// ============================================================================
+
 /// Extract main content from HTML by identifying semantic containers
 ///
 /// This function intelligently extracts the primary content from an HTML page by:
@@ -325,194 +330,6 @@ pub fn extract_main_content(html: &str) -> Result<String> {
 }
 
 // ============================================================================
-// PART 2: HTML Cleaning
-// ============================================================================
-
-// Compile regex patterns once at first use
-// These are hardcoded patterns that will never fail to compile
-static SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<script[^>]*>.*?</script>").expect("SCRIPT_RE: hardcoded regex is valid")
-});
-
-static STYLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<style[^>]*>.*?</style>").expect("STYLE_RE: hardcoded regex is valid")
-});
-
-static EVENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"on\w+="[^"]*""#).expect("EVENT_RE: hardcoded regex is valid"));
-
-static COMMENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<!--.*?-->").expect("COMMENT_RE: hardcoded regex is valid"));
-
-static FORM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<form[^>]*>.*?</form>").expect("FORM_RE: hardcoded regex is valid")
-});
-
-static IFRAME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<iframe[^>]*>.*?</iframe>").expect("IFRAME_RE: hardcoded regex is valid")
-});
-
-static SOCIAL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<div[^>]*class="[^"]*(?:social|share|follow)[^"]*"[^>]*>.*?</div>"#)
-        .expect("SOCIAL_RE: hardcoded regex is valid")
-});
-
-static COOKIE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?s)<div[^>]*(?:id|class)="[^"]*(?:cookie|popup|modal|overlay)[^"]*"[^>]*>.*?</div>"#,
-    )
-    .expect("COOKIE_RE: hardcoded regex is valid")
-});
-
-static AD_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<div[^>]*(?:id|class)="[^"]*(?:ad-|ads-|advertisement)[^"]*"[^>]*>.*?</div>"#)
-        .expect("AD_RE: hardcoded regex is valid")
-});
-
-// Matches elements with display:none in style attribute (supports single/double quotes)
-static HIDDEN_DISPLAY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<[^>]+style\s*=\s*["'][^"']*display\s*:\s*none[^"']*["'][^>]*>.*?</[^>]+>"#)
-        .expect("HIDDEN_DISPLAY: hardcoded regex is valid")
-});
-
-// Matches elements with boolean hidden attribute
-static HIDDEN_ATTR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<[^>]+\bhidden(?:\s|>|/|=)[^>]*>.*?</[^>]+>")
-        .expect("HIDDEN_ATTR: hardcoded regex is valid")
-});
-
-// Matches elements with visibility:hidden in style attribute
-static HIDDEN_VISIBILITY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?s)<[^>]+style\s*=\s*["'][^"']*visibility\s*:\s*hidden[^"']*["'][^>]*>.*?</[^>]+>"#,
-    )
-    .expect("HIDDEN_VISIBILITY: hardcoded regex is valid")
-});
-
-static DETAILS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<details[^>]*>(.*?)</details>").expect("DETAILS_RE: hardcoded regex is valid")
-});
-
-static SEMANTIC_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"<(/?)(?:article|section|aside|nav|header|footer|figure|figcaption|mark|time)[^>]*>",
-    )
-    .expect("SEMANTIC_RE: hardcoded regex is valid")
-});
-
-// Special case: needs to be compiled for closure captures in details processing
-static SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<summary[^>]*>(.*?)</summary>").expect("SUMMARY_RE: hardcoded regex is valid")
-});
-
-/// Clean HTML content by removing scripts, styles, ads, tracking, and other non-content elements
-///
-/// This function performs aggressive cleaning including:
-/// - Removing `<script>` and `<style>` tags and their contents
-/// - Removing inline event handlers (onclick, onload, etc.)
-/// - Removing HTML comments  
-/// - Removing `<form>`, `<iframe>` elements
-/// - Removing social media widgets, cookie notices, and ads
-/// - Removing hidden elements (display:none, visibility:hidden)
-/// - Converting `<details>`/`<summary>` to markdown-friendly format
-/// - Removing semantic HTML5 elements without markdown equivalents
-/// - **Decoding HTML entities** (&amp; → &, &lt; → <, etc.)
-///
-/// # Arguments
-/// * `html` - HTML string to clean
-///
-/// # Returns
-/// * `Ok(String)` - Cleaned HTML string
-/// * `Err(anyhow::Error)` - If input exceeds size limit
-///
-/// # Example
-/// ```
-/// let html = r#"<div><script>alert('xss')</script><p>Hello &amp; goodbye</p></div>"#;
-/// let clean = clean_html_content(html);
-/// // Result: <div><p>Hello & goodbye</p></div>
-/// ```
-pub fn clean_html_content(html: &str) -> Result<String> {
-    // Validate input size to prevent memory exhaustion
-    if html.len() > MAX_HTML_SIZE {
-        return Err(anyhow::anyhow!(
-            "HTML input too large: {} bytes ({:.2} MB). Maximum allowed: {} bytes ({} MB). \
-             This protects against memory exhaustion attacks.",
-            html.len(),
-            html.len() as f64 / 1_000_000.0,
-            MAX_HTML_SIZE,
-            MAX_HTML_SIZE / (1024 * 1024)
-        ));
-    }
-
-    // Use Cow to avoid unnecessary allocations
-    // Start with borrowed reference, only allocate when modifications occur
-    let result = Cow::Borrowed(html);
-
-    // Remove script tags and their contents
-    let result = SCRIPT_RE.replace_all(&result, "");
-
-    // Remove style tags and their contents
-    let result = STYLE_RE.replace_all(&result, "");
-
-    // Remove inline event handlers
-    let result = EVENT_RE.replace_all(&result, "");
-
-    // Remove comments
-    let result = COMMENT_RE.replace_all(&result, "");
-
-    // Remove forms
-    let result = FORM_RE.replace_all(&result, "");
-
-    // Remove iframes
-    let result = IFRAME_RE.replace_all(&result, "");
-
-    // Remove social media widgets and buttons
-    let result = SOCIAL_RE.replace_all(&result, "");
-
-    // Remove cookie notices and popups
-    let result = COOKIE_RE.replace_all(&result, "");
-
-    // Remove ads
-    let result = AD_RE.replace_all(&result, "");
-
-    // Remove hidden elements (multiple patterns for comprehensive matching)
-    let result = HIDDEN_DISPLAY.replace_all(&result, "");
-    let result = HIDDEN_ATTR.replace_all(&result, "");
-    let result = HIDDEN_VISIBILITY.replace_all(&result, "");
-
-    // Handle HTML5 details/summary elements by extracting their content
-    // These don't convert well to markdown
-    let result = Cow::Owned(
-        DETAILS_RE
-            .replace_all(&result, |caps: &regex::Captures| {
-                let content = &caps[1];
-                // Extract summary text if present
-                if let Some(summary_match) = SUMMARY_RE.captures(content) {
-                    let summary_text = &summary_match[1];
-                    let remaining = SUMMARY_RE.replace(content, "");
-                    format!(
-                        "\n\n**{}**\n\n{}\n\n",
-                        summary_text.trim(),
-                        remaining.trim()
-                    )
-                } else {
-                    format!("\n\n{}\n\n", content.trim())
-                }
-            })
-            .into_owned(),
-    );
-
-    // Remove any remaining HTML5 semantic elements that don't have markdown equivalents
-    let result = SEMANTIC_RE.replace_all(&result, "");
-
-    // Decode HTML entities
-    let result = decode_html_entities(&result);
-
-    // Convert final Cow to owned String for return
-    Ok(result.into_owned())
-}
-
-// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -520,7 +337,6 @@ pub fn clean_html_content(html: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    // Tests from extract_main_content.rs
     #[test]
     fn test_removes_navigation() -> Result<()> {
         let html = r"
