@@ -7,20 +7,24 @@
 // Sub-modules
 pub mod circuit_breaker;
 pub mod cleanup;
-pub mod core;
 pub mod crawl_types;
 pub mod crawler;
 pub mod domain_limiter;
 pub mod execution;
 pub mod link_processor;
+pub mod orchestrator;
 pub mod page_enhancer;
+pub mod page_processor;
+pub mod page_timeout;
+pub mod progress;
 pub mod rate_limiter;
 
 // Re-exports for public API
 pub use execution::crawl_impl;
 
-// Re-export core types for advanced usage
-pub use core::{NoOpProgress, ProgressReporter, crawl_pages};
+// Re-export orchestration and progress types for advanced usage
+pub use orchestrator::crawl_pages;
+pub use progress::{NoOpProgress, ProgressReporter};
 
 // Re-export rate limiter types
 pub use rate_limiter::{RateLimitDecision, check_crawl_rate_limit, check_http_rate_limit};

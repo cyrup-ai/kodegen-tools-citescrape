@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use crate::config::CrawlConfig;
 use crate::page_extractor::link_rewriter::LinkRewriter;
 
-use super::core::{NoOpProgress, crawl_pages};
+use super::orchestrator::crawl_pages;
+use super::progress::NoOpProgress;
 
 /// Core crawling implementation that handles browser setup, page processing, and cleanup
 ///

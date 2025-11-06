@@ -1,219 +1,25 @@
-//! MCP manager implementations for session tracking, search caching, and manifest persistence
+//! Search engine caching with LRU eviction and lock-free timestamp tracking
+//!
+//! Provides efficient caching of Tantivy search engines with automatic cleanup
+//! of idle engines and LRU eviction when cache reaches capacity.
 
-use super::types::{ActiveCrawlSession, CrawlManifest, CrawlStatus};
+use super::timestamp_utils::{instant_to_nanos, nanos_to_instant};
 use crate::config::CrawlConfig;
 use crate::search::{IndexingSender, SearchEngine};
 use kodegen_mcp_tool::error::McpError;
 use log;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use url::Url;
-
-// =============================================================================
-// TIMESTAMP UTILITIES FOR LOCK-FREE CACHE
-// =============================================================================
-
-/// Global epoch for converting Instant to/from u64 nanoseconds for atomic storage
-///
-/// Initialized once at first access. Uses `LazyLock` for initialization.
-/// All Instant values are stored as nanoseconds relative to this epoch.
-fn get_timestamp_epoch() -> &'static Instant {
-    use std::sync::LazyLock;
-    static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
-    &EPOCH
-}
-
-/// Convert Instant to nanoseconds since epoch for atomic storage
-///
-/// Uses (seconds * `1_000_000_000` + `subsec_nanos`) to avoid u128→u64 truncation.
-/// This gives us ~584 years of nanosecond precision before saturation.
-#[inline]
-fn instant_to_nanos(instant: Instant) -> u64 {
-    let duration = instant.saturating_duration_since(*get_timestamp_epoch());
-
-    // Use seconds + subsec_nanos to avoid truncating u128→u64
-    // This safely represents up to ~584 years in nanoseconds
-    let secs = duration.as_secs();
-    let nanos = u64::from(duration.subsec_nanos());
-
-    secs.saturating_mul(1_000_000_000).saturating_add(nanos)
-}
-
-/// Convert nanoseconds since epoch back to Instant
-#[inline]
-// APPROVED BY DAVID MAPLE 10/17/2025 - False positive: planned for future timestamp comparison features
-#[allow(dead_code)]
-fn nanos_to_instant(nanos: u64) -> Instant {
-    *get_timestamp_epoch() + std::time::Duration::from_nanos(nanos)
-}
-
-// =============================================================================
-// CACHE CAPACITY CONSTANTS
-// =============================================================================
-
-/// Initial capacity for crawl session `HashMap`
-///
-/// Pre-allocates space for this many active sessions to reduce allocations.
-/// Based on typical usage: users run 5-20 concurrent crawls per server instance.
-const SESSION_CACHE_INITIAL_CAPACITY: usize = 16;
 
 /// Initial capacity for search engine cache `HashMap`
 ///
 /// Pre-allocates space for this many cached engines to reduce allocations.
 /// Based on typical usage: users crawl 5-10 different sites per session.
 const SEARCH_CACHE_INITIAL_CAPACITY: usize = 10;
-
-/// Manager for tracking active crawl sessions
-///
-/// Uses `tokio::sync::Mutex` for async-safe concurrent access.
-/// Sessions automatically tracked by `crawl_id` (UUID v4).
-#[derive(Clone)]
-pub struct CrawlSessionManager {
-    sessions: Arc<Mutex<HashMap<String, ActiveCrawlSession>>>,
-}
-
-impl CrawlSessionManager {
-    /// Create a new session manager
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            sessions: Arc::new(Mutex::new(HashMap::with_capacity(
-                SESSION_CACHE_INITIAL_CAPACITY,
-            ))),
-        }
-    }
-
-    /// Register a new crawl session
-    pub async fn register(&self, crawl_id: String, session: ActiveCrawlSession) {
-        let mut sessions = self.sessions.lock().await;
-        sessions.insert(crawl_id, session);
-    }
-
-    /// Update status for a crawl session
-    pub async fn update_status(&self, crawl_id: &str, status: CrawlStatus) {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(session) = sessions.get_mut(crawl_id) {
-            session.status = status;
-        }
-    }
-
-    /// Update progress counters for a crawl session
-    pub async fn update_progress(
-        &self,
-        crawl_id: &str,
-        total_pages: usize,
-        current_url: Option<String>,
-    ) {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(session) = sessions.get_mut(crawl_id) {
-            session.total_pages = total_pages;
-            if let Some(url) = current_url {
-                session.current_url = Some(url);
-            }
-        }
-    }
-
-    /// Get a clone of a crawl session
-    pub async fn get_session(&self, crawl_id: &str) -> Option<ActiveCrawlSession> {
-        let sessions = self.sessions.lock().await;
-        sessions.get(crawl_id).cloned()
-    }
-
-    /// Remove and return a crawl session
-    pub async fn remove_session(&self, crawl_id: &str) -> Option<ActiveCrawlSession> {
-        let mut sessions = self.sessions.lock().await;
-        sessions.remove(crawl_id)
-    }
-
-    /// List all active crawl IDs
-    pub async fn list_active(&self) -> Vec<String> {
-        let sessions = self.sessions.lock().await;
-        sessions.keys().cloned().collect()
-    }
-
-    /// Cleanup completed/failed sessions older than retention period
-    ///
-    /// Removes sessions that are in Completed or Failed status and older than 5 minutes.
-    /// This prevents unbounded growth of the sessions `HashMap` over time.
-    /// Also aborts task handles for removed sessions to free up resources.
-    // APPROVED BY DAVID MAPLE 10/17/2025 - False positive: called via start_cleanup_task background task
-    #[allow(dead_code)]
-    async fn cleanup_sessions(&self) {
-        use std::time::Duration;
-
-        let cutoff = Duration::from_secs(5 * 60); // 5 minutes
-        let now = chrono::Utc::now();
-        let mut sessions = self.sessions.lock().await;
-        let initial_count = sessions.len();
-
-        sessions.retain(|crawl_id, session| {
-            let age = now.signed_duration_since(session.start_time);
-            let is_terminal = matches!(
-                session.status,
-                CrawlStatus::Completed | CrawlStatus::Failed { .. }
-            );
-
-            // Keep running sessions, remove terminal sessions older than cutoff
-            let should_keep = !is_terminal || age.to_std().unwrap_or(Duration::ZERO) < cutoff;
-
-            if !should_keep {
-                log::debug!(
-                    "Removing old crawl session {}: {:?} (age: {:?})",
-                    crawl_id,
-                    session.status,
-                    age
-                );
-
-                // Abort task handle if present (cleanup background tasks)
-                if let Some(handle) = &session.task_handle {
-                    handle.abort();
-                }
-            }
-
-            should_keep
-        });
-
-        let cleaned = initial_count - sessions.len();
-        if cleaned > 0 {
-            log::info!("Cleaned up {cleaned} crawl sessions");
-        }
-    }
-
-    /// Start background cleanup task (call once at initialization)
-    ///
-    /// Spawns a tokio task that runs cleanup every 60 seconds.
-    /// Follows the same pattern as `TerminalManager` and `SearchManager`.
-    ///
-    /// # Usage
-    /// Called from main.rs after wrapping manager in Arc:
-    /// ```rust,no_run
-    /// use std::sync::Arc;
-    ///
-    /// let session_manager = Arc::new(CrawlSessionManager::new());
-    /// session_manager.clone().start_cleanup_task();
-    /// ```
-    pub fn start_cleanup_task(self: Arc<Self>) {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                self.cleanup_sessions().await;
-            }
-        });
-    }
-}
-
-impl Default for CrawlSessionManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Entry in the `SearchEngineCache` containing both engine and indexing sender
 ///
@@ -262,6 +68,12 @@ pub struct SearchEngineCache {
 }
 
 impl SearchEngineCache {
+    /// Maximum number of cached search engines before LRU eviction
+    const MAX_ENGINES: usize = 5;
+
+    /// Idle timeout after which engines are eligible for cleanup (30 minutes)
+    const ENGINE_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
+
     /// Create a new search engine cache
     #[must_use]
     pub fn new() -> Self {
@@ -435,12 +247,6 @@ impl SearchEngineCache {
         self.engines.lock().await.len()
     }
 
-    /// Maximum number of cached search engines before LRU eviction
-    const MAX_ENGINES: usize = 5;
-
-    /// Idle timeout after which engines are eligible for cleanup (30 minutes)
-    const ENGINE_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
-
     /// Cleanup idle engines and enforce LRU eviction policy
     ///
     /// This method:
@@ -539,123 +345,4 @@ impl Default for SearchEngineCache {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Manager for crawl manifest persistence
-///
-/// Provides atomic file writes to prevent corruption.
-/// Uses write-to-temp-then-rename pattern for atomicity.
-pub struct ManifestManager;
-
-impl ManifestManager {
-    const MANIFEST_FILENAME: &'static str = "manifest.json";
-
-    /// Save manifest atomically to {`output_dir}/manifest.json`
-    ///
-    /// Uses atomic write pattern: write to temp file, sync, rename
-    pub async fn save(manifest: &CrawlManifest) -> Result<(), McpError> {
-        let manifest_path = manifest.output_dir.join(Self::MANIFEST_FILENAME);
-
-        // Ensure output directory exists
-        if let Some(parent) = manifest_path.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| {
-                McpError::Manifest(format!("Failed to create manifest directory: {e}"))
-            })?;
-        }
-
-        // Serialize to JSON with pretty formatting
-        let json = serde_json::to_string_pretty(manifest)
-            .map_err(|e| McpError::Manifest(format!("Failed to serialize manifest: {e}")))?;
-
-        // Atomic write pattern: temp file + rename
-        let temp_path = manifest_path.with_extension("json.tmp");
-
-        let mut file = fs::File::create(&temp_path)
-            .await
-            .map_err(|e| McpError::Manifest(format!("Failed to create temp manifest file: {e}")))?;
-
-        file.write_all(json.as_bytes())
-            .await
-            .map_err(|e| McpError::Manifest(format!("Failed to write manifest: {e}")))?;
-
-        // Sync to disk before rename (ensures durability)
-        file.sync_all()
-            .await
-            .map_err(|e| McpError::Manifest(format!("Failed to sync manifest to disk: {e}")))?;
-
-        // Atomic rename (overwrites existing file)
-        fs::rename(&temp_path, &manifest_path)
-            .await
-            .map_err(|e| McpError::Manifest(format!("Failed to rename manifest file: {e}")))?;
-
-        Ok(())
-    }
-
-    /// Load manifest from {`output_dir}/manifest.json`
-    pub async fn load(output_dir: &Path) -> Result<CrawlManifest, McpError> {
-        let manifest_path = output_dir.join(Self::MANIFEST_FILENAME);
-
-        if !manifest_path.exists() {
-            return Err(McpError::Manifest(format!(
-                "Manifest not found at {manifest_path:?}"
-            )));
-        }
-
-        let contents = fs::read_to_string(&manifest_path)
-            .await
-            .map_err(|e| McpError::Manifest(format!("Failed to read manifest: {e}")))?;
-
-        let manifest: CrawlManifest = serde_json::from_str(&contents)
-            .map_err(|e| McpError::Manifest(format!("Failed to parse manifest JSON: {e}")))?;
-
-        Ok(manifest)
-    }
-
-    /// Check if manifest exists for `output_dir`
-    pub async fn exists(output_dir: &Path) -> bool {
-        let manifest_path = output_dir.join(Self::MANIFEST_FILENAME);
-        manifest_path.exists()
-    }
-}
-
-/// Convert URL to filesystem-safe output directory path
-///
-/// Extracts domain from URL and sanitizes for filesystem use.
-/// Default base directory is "docs".
-///
-/// # Examples
-/// ```
-/// url_to_output_dir("https://ratatui.rs/concepts/layout", None)
-/// // => Ok(PathBuf::from("docs/ratatui.rs"))
-///
-/// url_to_output_dir("https://example.com:8080/path", Some("output"))
-/// // => Ok(PathBuf::from("output/example.com_8080"))
-/// ```
-pub fn url_to_output_dir(url: &str, base_dir: Option<&str>) -> Result<PathBuf, McpError> {
-    let parsed_url =
-        Url::parse(url).map_err(|e| McpError::InvalidUrl(format!("Invalid URL '{url}': {e}")))?;
-
-    let domain = parsed_url
-        .host_str()
-        .ok_or_else(|| McpError::InvalidUrl(format!("URL '{url}' has no host")))?;
-
-    // Sanitize domain for filesystem
-    // Replace characters that are problematic in file paths
-    let safe_domain = domain
-        .replace([':', '/', '\\'], "_") // Windows path separator
-        .replace("..", "_"); // Directory traversal protection
-
-    let base = base_dir.unwrap_or("docs");
-    let output_dir = PathBuf::from(base).join(safe_domain);
-
-    // Convert to absolute path to avoid CWD issues in indexing
-    let output_dir = if output_dir.is_absolute() {
-        output_dir
-    } else {
-        std::env::current_dir()
-            .map_err(|e| McpError::InvalidUrl(format!("Failed to get current directory: {e}")))?
-            .join(&output_dir)
-    };
-
-    Ok(output_dir)
 }
