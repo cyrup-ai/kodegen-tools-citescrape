@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use reqwest::Client;
 use scraper::{Html, Selector};
 
-use super::core::{InliningError, InliningResult, ResourceType};
+use super::types::{InliningError, InliningResult, ResourceType};
 use super::downloaders::{
     InlineConfig, download_and_encode_image_async, download_css_async, download_svg_async,
 };
