@@ -69,7 +69,6 @@ impl BrowserWrapper {
     /// Prevent automatic cleanup (for debugging)
     ///
     /// Useful when investigating Chrome crashes - preserves profile for inspection
-    #[allow(dead_code)]
     pub fn keep_temp_dir(mut self) {
         self.user_data_dir = None;
     }

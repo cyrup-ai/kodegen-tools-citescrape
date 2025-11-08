@@ -29,7 +29,6 @@ use crate::mcp::types::{ActiveCrawlSession, CrawlManifest, CrawlStatus};
 #[derive(Clone)]
 pub struct StartCrawlTool {
     session_manager: Arc<CrawlSessionManager>,
-    #[allow(dead_code)]
     engine_cache: Arc<SearchEngineCache>,
 }
 

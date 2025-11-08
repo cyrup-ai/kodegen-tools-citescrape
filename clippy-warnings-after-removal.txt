@@ -1,0 +1,53 @@
+    Checking kodegen_tools_citescrape v0.1.0 (/Users/davidmaple/kodegen-workspace/kodegen-tools-citescrape)
+error: function `save_markdown_content` is never used
+  --> src/crawl_engine/crawler.rs:20:10
+   |
+20 | async fn save_markdown_content(content: &str, url: &str, output_dir: &Path) -> Result<()> {
+   |          ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(dead_code)]`
+
+error: fields `sender`, `completion_callbacks`, `next_completion_id`, `pending_operations`, `is_running`, and `stats` are never read
+  --> src/search/incremental/service.rs:26:5
+   |
+25 | pub struct IncrementalIndexingService {
+   |            -------------------------- fields in this struct
+26 |     sender: mpsc::UnboundedSender<IndexingMessage>,
+   |     ^^^^^^
+27 |     completion_callbacks: Arc<Mutex<ahash::AHashMap<u64, CompletionCallback>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^
+28 |     next_completion_id: Arc<AtomicUsize>,
+   |     ^^^^^^^^^^^^^^^^^^
+29 |     pending_operations: Arc<AtomicUsize>,
+   |     ^^^^^^^^^^^^^^^^^^
+30 |     is_running: Arc<AtomicBool>,
+   |     ^^^^^^^^^^
+31 |     stats: Arc<IndexingStats>,
+   |     ^^^^^
+
+error: function `remove_list_marker` is never used
+   --> src/search/indexer/markdown/helpers.rs:103:15
+    |
+103 | pub(crate) fn remove_list_marker(
+    |               ^^^^^^^^^^^^^^^^^^
+
+error: this function has too many arguments (9/7)
+  --> src/crawl_engine/page_processor.rs:59:1
+   |
+59 | / pub async fn process_single_page(
+60 | |     browser: Arc<Browser>,
+61 | |     item: CrawlQueue,
+62 | |     config: CrawlConfig,
+...  |
+68 | |     indexing_sender: Option<Arc<crate::search::IndexingSender>>,
+69 | | ) -> Result<String> {
+   | |___________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+   = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: could not compile `kodegen_tools_citescrape` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `kodegen_tools_citescrape` (lib test) due to 4 previous errors

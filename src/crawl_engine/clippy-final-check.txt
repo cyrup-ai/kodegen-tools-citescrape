@@ -1,0 +1,19 @@
+    Checking kodegen_tools_citescrape v0.1.0 (/Users/davidmaple/kodegen-workspace/kodegen-tools-citescrape)
+error: expected one of `::`, `;`, or `as`, found `.`
+  --> src/crawl_engine/page_processor.rs:25:15
+   |
+25 | use crate::ctx.config::CrawlConfig;
+   |               ^ expected one of `::`, `;`, or `as`
+
+error: unused import: `Path`
+ --> src/crawl_engine/crawler.rs:2:17
+  |
+2 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+  |
+  = note: `-D unused-imports` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `kodegen_tools_citescrape` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `kodegen_tools_citescrape` (lib test) due to 2 previous errors

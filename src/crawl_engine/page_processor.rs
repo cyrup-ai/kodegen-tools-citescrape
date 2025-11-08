@@ -29,6 +29,17 @@ use crate::crawl_events::{CrawlEventBus, types::{CrawlEvent, PageCrawlMetadata}}
 use crate::page_extractor;
 use crate::page_extractor::link_rewriter::LinkRewriter;
 
+/// Context for page processing containing shared crawler state
+pub struct PageProcessorContext {
+    pub config: CrawlConfig,
+    pub link_rewriter: LinkRewriter,
+    pub event_bus: Option<Arc<CrawlEventBus>>,
+    pub circuit_breaker: Option<Arc<tokio::sync::Mutex<CircuitBreaker>>>,
+    pub total_pages: Arc<AtomicUsize>,
+    pub queue: Arc<tokio::sync::Mutex<VecDeque<CrawlQueue>>>,
+    pub indexing_sender: Option<Arc<crate::search::IndexingSender>>,
+}
+
 /// Process a single page concurrently
 ///
 /// This function handles all aspects of crawling a single URL:
@@ -38,40 +49,27 @@ use crate::page_extractor::link_rewriter::LinkRewriter;
 /// 4. Navigate to URL and wait for page load
 /// 5. Extract page data (HTML, metadata, links)
 /// 6. Save content in requested formats (markdown, JSON, screenshots)
-/// 7. Process discovered links and add them to crawl queue
+/// 7. Process discovered links and add them to crawl ctx.queue
 /// 8. Publish crawl events for monitoring
 /// 9. Update circuit breaker with success/failure status
 ///
 /// # Arguments
 /// * `browser` - Shared browser instance
-/// * `item` - Current crawl queue item (URL + depth)
-/// * `config` - Crawl configuration
-/// * `link_rewriter` - Link rewriting manager for offline navigation
-/// * `event_bus` - Optional event bus for progress tracking
-/// * `circuit_breaker` - Optional circuit breaker for failure management
-/// * `total_pages` - Atomic counter for total pages crawled
-/// * `queue` - Thread-safe crawl queue for discovered links
-/// * `indexing_sender` - Optional sender for search indexing
+/// * `item` - Current crawl ctx.queue item (URL + depth)
+/// * `ctx` - Page processor context containing crawler state and configuration
 ///
 /// # Returns
 /// * `Ok(String)` - Successfully crawled URL
 /// * `Err` - Any error during page processing
-#[allow(clippy::too_many_arguments)]
 pub async fn process_single_page(
     browser: Arc<Browser>,
     item: CrawlQueue,
-    config: CrawlConfig,
-    link_rewriter: LinkRewriter,
-    event_bus: Option<Arc<CrawlEventBus>>,
-    circuit_breaker: Option<Arc<tokio::sync::Mutex<CircuitBreaker>>>,
-    total_pages: Arc<AtomicUsize>,
-    queue: Arc<tokio::sync::Mutex<VecDeque<CrawlQueue>>>,
-    indexing_sender: Option<Arc<crate::search::IndexingSender>>,
+    ctx: PageProcessorContext,
 ) -> Result<String> {
     let page_start = Instant::now();
 
     // Apply rate limiting
-    if let Some(rate) = config.crawl_rate_rps {
+    if let Some(rate) = ctx.config.crawl_rate_rps {
         use super::rate_limiter::{RateLimitDecision, check_crawl_rate_limit};
         match check_crawl_rate_limit(&item.url, rate).await {
             RateLimitDecision::Deny { retry_after } => {
@@ -83,7 +81,7 @@ pub async fn process_single_page(
     }
 
     // Check circuit breaker
-    if let Some(ref cb) = circuit_breaker {
+    if let Some(ref cb) = ctx.circuit_breaker {
         let domain = extract_domain(&item.url).map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut cb_guard = cb.lock().await;
         if !cb_guard.should_attempt(&domain) {
@@ -99,7 +97,7 @@ pub async fn process_single_page(
         Ok(p) => p,
         Err(e) => {
             warn!("Failed to create page for {}: {}", item.url, e);
-            if let Some(ref cb) = circuit_breaker
+            if let Some(ref cb) = ctx.circuit_breaker
                 && let Ok(domain) = extract_domain(&item.url)
             {
                 let mut cb_guard = cb.lock().await;
@@ -116,7 +114,7 @@ pub async fn process_single_page(
     }
 
     // Navigate to page
-    let page_load_timeout = config.page_load_timeout_secs();
+    let page_load_timeout = ctx.config.page_load_timeout_secs();
     if let Err(e) = with_page_timeout(
         async {
             page.goto(&item.url)
@@ -129,7 +127,7 @@ pub async fn process_single_page(
     .await
     {
         warn!("Navigation failed for {}: {}", item.url, e);
-        if let Some(ref cb) = circuit_breaker
+        if let Some(ref cb) = ctx.circuit_breaker
             && let Ok(domain) = extract_domain(&item.url)
         {
             let mut cb_guard = cb.lock().await;
@@ -139,7 +137,7 @@ pub async fn process_single_page(
     }
 
     // Wait for page load
-    let navigation_timeout = config.navigation_timeout_secs();
+    let navigation_timeout = ctx.config.navigation_timeout_secs();
     if let Err(e) = with_page_timeout(
         async {
             page.wait_for_navigation()
@@ -152,7 +150,7 @@ pub async fn process_single_page(
     .await
     {
         warn!("Page load failed for {}: {}", item.url, e);
-        if let Some(ref cb) = circuit_breaker
+        if let Some(ref cb) = ctx.circuit_breaker
             && let Ok(domain) = extract_domain(&item.url)
         {
             let mut cb_guard = cb.lock().await;
@@ -163,11 +161,11 @@ pub async fn process_single_page(
 
     // Extract page data
     let extract_config = crate::page_extractor::page_data::ExtractPageDataConfig {
-        output_dir: config.storage_dir.clone(),
-        link_rewriter: link_rewriter.clone(),
-        max_inline_image_size_bytes: config.max_inline_image_size_bytes,
-        crawl_rate_rps: config.crawl_rate_rps,
-        save_html: config.save_raw_html(),
+        output_dir: ctx.config.storage_dir.clone(),
+        link_rewriter: ctx.link_rewriter.clone(),
+        max_inline_image_size_bytes: ctx.config.max_inline_image_size_bytes,
+        crawl_rate_rps: ctx.config.crawl_rate_rps,
+        save_html: ctx.config.save_raw_html(),
     };
 
     let page_data =
@@ -181,7 +179,7 @@ pub async fn process_single_page(
     let html_size = page_data.content.len();
 
     // Save markdown if requested
-    if config.save_markdown() {
+    if ctx.config.save_markdown() {
         let conversion_options = ConversionOptions::default();
 
         let processed_markdown =
@@ -196,10 +194,10 @@ pub async fn process_single_page(
         match content_saver::save_markdown_content(
             processed_markdown,
             item.url.clone(),
-            config.storage_dir.clone(),
+            ctx.config.storage_dir.clone(),
             crate::search::MessagePriority::Normal,
-            indexing_sender.clone(),
-            config.compress_output,
+            ctx.indexing_sender.clone(),
+            ctx.config.compress_output,
         )
         .await
         {
@@ -209,11 +207,11 @@ pub async fn process_single_page(
     }
 
     // Save JSON if requested
-    if config.save_json() {
+    if ctx.config.save_json() {
         match content_saver::save_page_data(
             Arc::new(page_data.clone()),
             item.url.clone(),
-            config.storage_dir.clone(),
+            ctx.config.storage_dir.clone(),
         )
         .await
         {
@@ -224,8 +222,8 @@ pub async fn process_single_page(
 
     // Capture screenshot if requested
     let mut screenshot_captured = false;
-    if config.save_screenshots() {
-        match page_extractor::capture_screenshot(page.clone(), &item.url, config.storage_dir())
+    if ctx.config.save_screenshots() {
+        match page_extractor::capture_screenshot(page.clone(), &item.url, ctx.config.storage_dir())
             .await
         {
             Ok(()) => {
@@ -247,17 +245,17 @@ pub async fn process_single_page(
             }
         };
 
-        let q_snapshot = queue.lock().await.clone();
+        let q_snapshot = ctx.queue.lock().await.clone();
         let crawl_state = CrawlState {
             queue: q_snapshot,
             visited_urls: temp_bloom,
-            max_depth: config.max_depth,
+            max_depth: ctx.config.max_depth,
         };
 
-        match process_page_links(page.clone(), item.clone(), crawl_state, &config).await {
+        match process_page_links(page.clone(), item.clone(), crawl_state, &ctx.config).await {
             Ok((new_queue, _)) => {
-                // Add new discovered links to shared queue
-                let mut q = queue.lock().await;
+                // Add new discovered links to shared ctx.queue
+                let mut q = ctx.queue.lock().await;
                 let mut added = 0;
                 for new_item in new_queue {
                     if !q.iter().any(|existing| existing.url == new_item.url) {
@@ -275,10 +273,10 @@ pub async fn process_single_page(
     };
 
     // Increment total pages counter
-    total_pages.fetch_add(1, Ordering::Relaxed);
+    ctx.total_pages.fetch_add(1, Ordering::Relaxed);
 
     // Record circuit breaker success
-    if let Some(ref cb) = circuit_breaker
+    if let Some(ref cb) = ctx.circuit_breaker
         && let Ok(domain) = extract_domain(&item.url)
     {
         let mut cb_guard = cb.lock().await;
@@ -286,7 +284,7 @@ pub async fn process_single_page(
     }
 
     // Publish PageCrawled event
-    if let Some(bus) = &event_bus {
+    if let Some(bus) = &ctx.event_bus {
         let metadata = PageCrawlMetadata {
             html_size,
             compressed_size: 0,
@@ -298,7 +296,7 @@ pub async fn process_single_page(
 
         let local_path = match crate::content_saver::get_mirror_path_sync(
             &item.url,
-            &config.storage_dir,
+            &ctx.config.storage_dir,
             "index.md",
         ) {
             Ok(path) => path,
@@ -311,7 +309,7 @@ pub async fn process_single_page(
                     item.url.hash(&mut hasher);
                     hasher.finish()
                 };
-                config
+                ctx.config
                     .storage_dir
                     .join("parse-failed")
                     .join(format!("{url_hash}.md"))

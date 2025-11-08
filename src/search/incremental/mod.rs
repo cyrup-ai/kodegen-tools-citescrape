@@ -25,7 +25,7 @@
 //! use crate::search::incremental::{IncrementalIndexingService, MessagePriority};
 //!
 //! let engine = SearchEngine::new(index_path).await?;
-//! let sender = IncrementalIndexingService::start(engine).await?;
+//! let (_service, sender) = IncrementalIndexingService::start(engine).await?;
 //!
 //! // Add document to index
 //! sender.add_or_update(

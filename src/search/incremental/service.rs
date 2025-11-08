@@ -22,7 +22,6 @@ use super::stats::IndexingStats;
 use super::sender::IndexingSender;
 
 /// Incremental indexing service with lock-free coordination
-#[allow(dead_code)]
 pub struct IncrementalIndexingService {
     sender: mpsc::UnboundedSender<IndexingMessage>,
     completion_callbacks: Arc<Mutex<ahash::AHashMap<u64, CompletionCallback>>>,
@@ -34,7 +33,7 @@ pub struct IncrementalIndexingService {
 
 impl IncrementalIndexingService {
     /// Create and start the incremental indexing service
-    pub async fn start(engine: SearchEngine) -> Result<IndexingSender> {
+    pub async fn start(engine: SearchEngine) -> Result<(IncrementalIndexingService, IndexingSender)> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let completion_callbacks = Arc::new(Mutex::new(ahash::AHashMap::with_capacity(1024)));
         let next_completion_id = Arc::new(AtomicUsize::new(1));
@@ -60,7 +59,7 @@ impl IncrementalIndexingService {
             .await;
         });
 
-        let _service = IncrementalIndexingService {
+        let service = IncrementalIndexingService {
             sender: sender.clone(),
             completion_callbacks: completion_callbacks.clone(),
             next_completion_id: next_completion_id.clone(),
@@ -69,13 +68,15 @@ impl IncrementalIndexingService {
             stats: stats.clone(),
         };
 
-        Ok(IndexingSender {
+        let sender = IndexingSender {
             sender,
             completion_callbacks,
             next_completion_id,
             pending_operations,
             stats,
-        })
+        };
+
+        Ok((service, sender))
     }
 
     /// Background worker loop with batching and error handling
@@ -442,5 +443,38 @@ impl IncrementalIndexingService {
             || error_str.contains("timeout")
             || error_str.contains("temporary")
             || error_str.contains("resource temporarily unavailable")
+    }
+
+    /// Check if the service is running
+    pub fn is_running(&self) -> bool {
+        self.is_running.load(Ordering::Relaxed)
+    }
+
+    /// Get current count of pending operations
+    pub fn pending_operations(&self) -> usize {
+        self.pending_operations.load(Ordering::Relaxed)
+    }
+
+    /// Get indexing statistics
+    pub fn stats(&self) -> Arc<IndexingStats> {
+        Arc::clone(&self.stats)
+    }
+
+    /// Shutdown the service gracefully
+    pub async fn shutdown(&self) -> Result<()> {
+        self.sender
+            .send(IndexingMessage::Shutdown)
+            .map_err(|e| anyhow::anyhow!("Failed to send shutdown message: {e}"))?;
+        Ok(())
+    }
+
+    /// Get count of pending completion callbacks
+    pub async fn pending_callbacks(&self) -> usize {
+        self.completion_callbacks.lock().await.len()
+    }
+
+    /// Get next completion ID that will be assigned
+    pub fn next_completion_id(&self) -> usize {
+        self.next_completion_id.load(Ordering::Relaxed)
     }
 }

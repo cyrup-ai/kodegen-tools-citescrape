@@ -24,7 +24,7 @@ pub(crate) fn clean_inline_formatting(mut text: String) -> String {
 }
 
 /// Process inline code blocks (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
+// Library code: allocating version kept for compatibility
 #[inline]
 fn process_inline_code(text: String) -> String {
     let mut result = String::with_capacity(text.len());
@@ -62,7 +62,7 @@ fn process_inline_code(text: String) -> String {
 }
 
 /// Process links and images (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
+// Library code: allocating version kept for compatibility
 #[inline]
 fn process_links_and_images(text: String) -> String {
     let mut result = String::with_capacity(text.len());
@@ -102,7 +102,7 @@ fn process_links_and_images(text: String) -> String {
 }
 
 /// Extract content within brackets, handling nesting (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
+// Library code: allocating version kept for compatibility
 #[inline]
 fn extract_bracketed_content(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
     let mut content = String::new();
@@ -137,7 +137,7 @@ fn extract_bracketed_content(chars: &mut std::iter::Peekable<std::str::Chars>) -
 }
 
 /// Skip content within parentheses (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
+// Library code: allocating version kept for compatibility
 #[inline]
 fn skip_parenthetical_content(chars: &mut std::iter::Peekable<std::str::Chars>) {
     let mut depth = 1;
@@ -164,7 +164,7 @@ fn skip_parenthetical_content(chars: &mut std::iter::Peekable<std::str::Chars>) 
 }
 
 /// Remove emphasis markers intelligently (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
+// Library code: allocating version kept for compatibility
 #[inline]
 fn remove_emphasis_markers(mut text: String) -> String {
     // Order matters: process longest patterns first
@@ -188,7 +188,7 @@ fn remove_emphasis_markers(mut text: String) -> String {
 }
 
 /// Remove italic markers while preserving intra-word underscores (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
+// Library code: allocating version kept for compatibility
 #[inline]
 fn remove_italic_markers(text: String) -> String {
     let mut result = String::with_capacity(text.len());
@@ -229,7 +229,7 @@ fn remove_italic_markers(text: String) -> String {
 }
 
 /// Process other inline elements (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
+// Library code: allocating version kept for compatibility
 #[inline]
 fn process_other_inline_elements(mut text: String) -> String {
     use super::footnote::remove_footnote_markers;

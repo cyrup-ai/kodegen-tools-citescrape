@@ -52,7 +52,6 @@ pub struct ActiveCrawlSession {
     /// Similar to `TerminalManager`'s pattern, we store the `JoinHandle` to ensure
     /// the background crawl task remains tracked and alive for the session's lifetime.
     /// This prevents the browser WebSocket from being prematurely dropped.
-    #[allow(dead_code)]
     pub task_handle: Option<std::sync::Arc<tokio::task::JoinHandle<()>>>,
 }
 

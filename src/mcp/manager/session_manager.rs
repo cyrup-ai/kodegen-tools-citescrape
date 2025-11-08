@@ -88,7 +88,6 @@ impl CrawlSessionManager {
     /// This prevents unbounded growth of the sessions `HashMap` over time.
     /// Also aborts task handles for removed sessions to free up resources.
     // APPROVED BY DAVID MAPLE 10/17/2025 - False positive: called via start_cleanup_task background task
-    #[allow(dead_code)]
     async fn cleanup_sessions(&self) {
         use std::time::Duration;
 

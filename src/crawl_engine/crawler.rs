@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::sync::oneshot;
 use url::Url;
 
@@ -16,35 +16,7 @@ pub use content_saver::CacheMetadata;
 // save_html_content is now in content_saver module
 
 // save_html_content_with_resources is now in content_saver module
-
-#[allow(dead_code)]
-async fn save_markdown_content(content: &str, url: &str, output_dir: &Path) -> Result<()> {
-    use crate::search::MessagePriority;
-
-    // Note: This helper function does not have access to an IndexingSender,
-    // so markdown will be saved without indexing. For indexed saves, use
-    // content_saver::save_markdown_content directly with an IndexingSender.
-    match content_saver::save_markdown_content(
-        content.to_string(),
-        url.to_string(),
-        output_dir.to_path_buf(),
-        MessagePriority::Normal,
-        None,  // No indexing sender available
-        false, // Default to uncompressed for this helper
-    )
-    .await
-    {
-        Ok(()) => {
-            eprintln!("Markdown content saved successfully");
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Failed to save markdown content: {e}");
-            Err(e)
-        }
-    }
-}
-
+// save_markdown_content is now in content_saver module
 // save_screenshot is now in PageProcessor module
 
 pub struct ChromiumoxideCrawler {

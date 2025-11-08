@@ -34,7 +34,6 @@ pub fn instant_to_nanos(instant: Instant) -> u64 {
 /// Convert nanoseconds since epoch back to Instant
 #[inline]
 // APPROVED BY DAVID MAPLE 10/17/2025 - False positive: planned for future timestamp comparison features
-#[allow(dead_code)]
 pub fn nanos_to_instant(nanos: u64) -> Instant {
     *get_timestamp_epoch() + std::time::Duration::from_nanos(nanos)
 }

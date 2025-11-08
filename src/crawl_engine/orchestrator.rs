@@ -21,7 +21,7 @@ use tokio::sync::Semaphore;
 
 use super::crawl_types::CrawlQueue;
 use super::{CircuitBreaker, DomainLimiter, extract_domain};
-use super::page_processor::process_single_page;
+use super::page_processor::{PageProcessorContext, process_single_page};
 use super::progress::ProgressReporter;
 use crate::browser_setup::launch_browser;
 use crate::config::CrawlConfig;
@@ -195,9 +195,7 @@ pub async fn crawl_pages<P: ProgressReporter>(
                 let _domain_permit = domain_permit; // Hold until task completes
 
                 // Process single page with full error handling
-                match process_single_page(
-                    browser,
-                    item,
+                let ctx = PageProcessorContext {
                     config,
                     link_rewriter,
                     event_bus,
@@ -205,9 +203,9 @@ pub async fn crawl_pages<P: ProgressReporter>(
                     total_pages,
                     queue,
                     indexing_sender,
-                )
-                .await
-                {
+                };
+
+                match process_single_page(browser, item, ctx).await {
                     Ok(url) => {
                         debug!("Successfully crawled: {url}");
                         Ok(url)

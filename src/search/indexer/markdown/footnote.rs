@@ -8,7 +8,7 @@ thread_local! {
 }
 
 /// Remove footnote markers `[^1]` style (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
+// Library code: allocating version kept for compatibility
 pub(crate) fn remove_footnote_markers(text: String) -> String {
     FOOTNOTE_REGEX.with(|re_cell| {
         let mut re_ref = re_cell.borrow_mut();

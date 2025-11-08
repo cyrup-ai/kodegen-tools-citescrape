@@ -97,58 +97,6 @@ pub(crate) fn normalize_whitespace(text: &str) -> String {
     result
 }
 
-/// Remove list markers with proper nesting support (legacy allocating version - prefer _inplace variant)
-#[allow(dead_code)] // Library code: allocating version kept for compatibility
-#[inline]
-pub(crate) fn remove_list_marker(
-    line: &str,
-    indent_level: usize,
-    list_depth: &mut usize,
-) -> String {
-    let trimmed = line.trim_start();
-
-    // Unordered list markers
-    for marker in &["- ", "* ", "+ "] {
-        if let Some(content) = trimmed.strip_prefix(marker) {
-            *list_depth = (indent_level / 2) + 1;
-            return content.to_string();
-        }
-    }
-
-    // Ordered list markers (with various formats)
-    if let Some(dot_pos) = trimmed.find(". ") {
-        let prefix = &trimmed[..dot_pos];
-        if prefix.chars().all(char::is_numeric) && !prefix.is_empty() && prefix.len() <= 9 {
-            *list_depth = (indent_level / 2) + 1;
-            return trimmed[dot_pos + 2..].to_string();
-        }
-    }
-
-    // Parenthetical lists: 1) or a)
-    if let Some(paren_pos) = trimmed.find(") ") {
-        let prefix = &trimmed[..paren_pos];
-        if (prefix.chars().all(char::is_numeric)
-            || (prefix.len() == 1 && prefix.chars().next().is_some_and(char::is_alphabetic)))
-            && !prefix.is_empty()
-        {
-            *list_depth = (indent_level / 2) + 1;
-            return trimmed[paren_pos + 2..].to_string();
-        }
-    }
-
-    // Task lists
-    for marker in &[
-        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-    ] {
-        if let Some(content) = trimmed.strip_prefix(marker) {
-            *list_depth = (indent_level / 2) + 1;
-            return content.to_string();
-        }
-    }
-
-    line.to_string()
-}
-
 /// Remove list markers in-place (zero-allocation version)
 #[inline]
 pub(crate) fn remove_list_marker_inplace(

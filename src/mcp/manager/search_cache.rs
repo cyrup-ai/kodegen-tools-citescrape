@@ -147,7 +147,7 @@ impl SearchEngineCache {
         let engine_for_indexing = engine.clone();
         let indexing_sender =
             match crate::search::IncrementalIndexingService::start(engine_for_indexing).await {
-                Ok(sender) => {
+                Ok((_service, sender)) => {
                     log::info!(
                         "Incremental indexing service started for output_dir: {output_dir:?}"
                     );
@@ -259,7 +259,6 @@ impl SearchEngineCache {
     /// Uses atomic timestamp reads (no lock contention) for determining idle time and LRU ordering.
     /// This ensures cleanup never blocks concurrent cache access operations.
     // APPROVED BY DAVID MAPLE 10/17/2025 - False positive: called via start_cleanup_task background task
-    #[allow(dead_code)]
     async fn cleanup_idle_engines(&self) {
         use std::time::Duration;
 

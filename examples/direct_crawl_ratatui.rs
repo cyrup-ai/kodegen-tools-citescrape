@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize search engine and incremental indexing (exactly like MCP path)
     log::info!("🔧 Initializing search engine and incremental indexing...");
     let engine = SearchEngine::create(&config).await?;
-    let indexing_sender = IncrementalIndexingService::start(engine).await?;
+    let (_service, indexing_sender) = IncrementalIndexingService::start(engine).await?;
 
     // Attach indexing sender to config (exactly like MCP does in start_crawl.rs)
     let config = config.with_indexing_sender(Arc::new(indexing_sender));
