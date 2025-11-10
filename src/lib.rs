@@ -94,111 +94,79 @@ impl kodegen_server_http::ShutdownHook for BrowserManagerWrapper {
     }
 }
 
-/// Start the citescrape tools HTTP server programmatically.
+/// Start the citescrape tools HTTP server programmatically
 ///
-/// This function is designed to be called from kodegend for embedded server mode.
-/// It replicates the logic from main.rs but as a library function.
+/// Returns a ServerHandle for graceful shutdown control.
+/// This function is non-blocking - the server runs in background tasks.
 ///
 /// # Arguments
-/// * `addr` - The socket address to bind to
+/// * `addr` - Socket address to bind to (e.g., "127.0.0.1:30445")
 /// * `tls_cert` - Optional path to TLS certificate file
 /// * `tls_key` - Optional path to TLS private key file
 ///
 /// # Returns
-/// Returns `Ok(())` when the server shuts down gracefully, or an error if startup/shutdown fails.
+/// ServerHandle for graceful shutdown, or error if startup fails
 pub async fn start_server(
     addr: std::net::SocketAddr,
     tls_cert: Option<std::path::PathBuf>,
     tls_key: Option<std::path::PathBuf>,
-) -> anyhow::Result<()> {
-    use kodegen_server_http::{Managers, RouterSet, register_tool};
-    use kodegen_tools_config::ConfigManager;
+) -> anyhow::Result<kodegen_server_http::ServerHandle> {
+    use kodegen_server_http::{create_http_server, Managers, RouterSet, register_tool};
     use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
     use std::sync::Arc;
+    use std::time::Duration;
 
-    let _ = env_logger::try_init();
-    
-    let config = ConfigManager::new();
-    config.init().await?;
-    
-    let timestamp = chrono::Utc::now();
-    let pid = std::process::id();
-    let instance_id = format!("{}-{}", timestamp.format("%Y%m%d-%H%M%S-%9f"), pid);
-    kodegen_mcp_tool::tool_history::init_global_history(instance_id.clone()).await;
-    
-    let mut tool_router = ToolRouter::new();
-    let mut prompt_router = PromptRouter::new();
-    let managers = Managers::new();
-    
-    // Create three managers (all local instances)
-    let session_manager = Arc::new(crate::CrawlSessionManager::new());
-    let engine_cache = Arc::new(crate::SearchEngineCache::new());
-    let browser_manager = Arc::new(crate::BrowserManager::new());
-    
-    // Register browser manager for shutdown (closes Chrome)
-    managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
-    
-    // Register all 4 citescrape tools
-    (tool_router, prompt_router) = register_tool(
-        tool_router,
-        prompt_router,
-        crate::StartCrawlTool::new(session_manager.clone(), engine_cache.clone()),
-    );
-
-    (tool_router, prompt_router) = register_tool(
-        tool_router,
-        prompt_router,
-        crate::GetCrawlResultsTool::new(session_manager.clone()),
-    );
-
-    (tool_router, prompt_router) = register_tool(
-        tool_router,
-        prompt_router,
-        crate::SearchCrawlResultsTool::new(session_manager.clone(), engine_cache.clone()),
-    );
-
-    (tool_router, prompt_router) = register_tool(
-        tool_router,
-        prompt_router,
-        crate::WebSearchTool::new(browser_manager.clone()),
-    );
-
-    // CRITICAL: Start cleanup tasks after all tools are registered
-    session_manager.start_cleanup_task();
-    engine_cache.start_cleanup_task();
-    
-    let router_set = RouterSet::new(tool_router, prompt_router, managers);
-    
-    let session_config = rmcp::transport::streamable_http_server::session::local::SessionConfig {
-        channel_capacity: 16,
-        keep_alive: Some(std::time::Duration::from_secs(3600)),
+    let tls_config = match (tls_cert, tls_key) {
+        (Some(cert), Some(key)) => Some((cert, key)),
+        _ => None,
     };
-    let session_manager_http = Arc::new(
-        rmcp::transport::streamable_http_server::session::local::LocalSessionManager {
-            sessions: Default::default(),
-            session_config,
-        }
-    );
-    
-    let usage_tracker = kodegen_utils::usage_tracker::UsageTracker::new(
-        format!("citescrape-{}", instance_id)
-    );
-    
-    let server = kodegen_server_http::HttpServer::new(
-        router_set.tool_router,
-        router_set.prompt_router,
-        usage_tracker,
-        config,
-        router_set.managers,
-        session_manager_http,
-    );
-    
-    let shutdown_timeout = std::time::Duration::from_secs(30);
-    let tls_config = tls_cert.zip(tls_key);
-    let handle = server.serve_with_tls(addr, tls_config, shutdown_timeout).await?;
-    
-    handle.wait_for_completion(shutdown_timeout).await
-        .map_err(|e| anyhow::anyhow!("Server shutdown error: {}", e))?;
-    
-    Ok(())
+
+    let shutdown_timeout = Duration::from_secs(30);
+
+    create_http_server("citescrape", addr, tls_config, shutdown_timeout, |_config, _tracker| {
+        Box::pin(async move {
+            let mut tool_router = ToolRouter::new();
+            let mut prompt_router = PromptRouter::new();
+            let managers = Managers::new();
+
+            // Create three managers (all local instances)
+            let session_manager = Arc::new(crate::CrawlSessionManager::new());
+            let engine_cache = Arc::new(crate::SearchEngineCache::new());
+            let browser_manager = Arc::new(crate::BrowserManager::new());
+
+            // Register browser manager for shutdown (closes Chrome)
+            managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
+
+            // Register all 4 citescrape tools
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                crate::StartCrawlTool::new(session_manager.clone(), engine_cache.clone()),
+            );
+
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                crate::GetCrawlResultsTool::new(session_manager.clone()),
+            );
+
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                crate::SearchCrawlResultsTool::new(session_manager.clone(), engine_cache.clone()),
+            );
+
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                crate::WebSearchTool::new(browser_manager.clone()),
+            );
+
+            // CRITICAL: Start cleanup tasks after all tools are registered
+            session_manager.start_cleanup_task();
+            engine_cache.start_cleanup_task();
+
+            Ok(RouterSet::new(tool_router, prompt_router, managers))
+        })
+    }).await
 }
