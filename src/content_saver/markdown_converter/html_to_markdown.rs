@@ -12,40 +12,40 @@ use std::sync::LazyLock;
 // These are syntactically valid hardcoded patterns - if they fail, it's a compile-time bug
 static EMPTY_LINES: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\n{3,}")
-        .expect("BUG: hardcoded regex r\"\\n{3,}\" is invalid - this is a compile-time bug")
+        .expect("SAFETY: hardcoded regex r\"\\n{3,}\" is statically valid")
 });
 
 static SPACE_AFTER_LIST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^(\s*[-*+])\s*").expect(
-        "BUG: hardcoded regex r\"(?m)^(\\s*[-*+])\\s*\" is invalid - this is a compile-time bug",
+        "SAFETY: hardcoded regex r\"(?m)^(\\s*[-*+])\\s*\" is statically valid",
     )
 });
 
 static HEADING_SPACE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^(#+)([^ ])")
-        .expect("BUG: hardcoded regex r\"(?m)^(#+)([^ ])\" is invalid - this is a compile-time bug")
+        .expect("SAFETY: hardcoded regex r\"(?m)^(#+)([^ ])\" is statically valid")
 });
 
 static TABLE_ALIGN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\|(\s*:?-+:?\s*\|)+").expect(
-        "BUG: hardcoded regex r\"\\|(\\s*:?-+:?\\s*\\|)+\" is invalid - this is a compile-time bug",
+        "SAFETY: hardcoded regex r\"\\|(\\s*:?-+:?\\s*\\|)+\" is statically valid",
     )
 });
 
 static CODE_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"```([a-zA-Z]*)\n").expect(
-        "BUG: hardcoded regex r\"```([a-zA-Z]*)\\n\" is invalid - this is a compile-time bug",
+        "SAFETY: hardcoded regex r\"```([a-zA-Z]*)\\n\" is statically valid",
     )
 });
 
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[([^\]]+)\]\([^\)]+\)")
-        .expect("BUG: hardcoded regex r\"\\[([^\\]]+)\\]\\([^\\)]+\\)\" is invalid - this is a compile-time bug")
+        .expect("SAFETY: hardcoded regex r\"\\[([^\\]]+)\\]\\([^\\)]+\\)\" is statically valid")
 });
 
 static IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"!\[[^\]]*\]\([^\)]+\)")
-        .expect("BUG: hardcoded regex r\"!\\[[^\\]]*\\]\\([^\\)]+\\)\" is invalid - this is a compile-time bug")
+        .expect("SAFETY: hardcoded regex r\"!\\[[^\\]]*\\]\\([^\\)]+\\)\" is statically valid")
 });
 
 /// HTML to Markdown converter with configurable options

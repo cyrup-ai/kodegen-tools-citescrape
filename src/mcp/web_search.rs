@@ -5,8 +5,8 @@
 use kodegen_mcp_schema::citescrape::{WebSearchArgs, WebSearchPromptArgs};
 use kodegen_mcp_tool::Tool;
 use kodegen_mcp_tool::error::McpError;
-use rmcp::model::{PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
-use serde_json::{Value, json};
+use rmcp::model::{Content, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
+use serde_json::json;
 use std::sync::Arc;
 
 // =============================================================================
@@ -61,7 +61,7 @@ impl Tool for WebSearchTool {
         true
     }
 
-    async fn execute(&self, args: Self::Args) -> Result<Value, McpError> {
+    async fn execute(&self, args: Self::Args) -> Result<Vec<Content>, McpError> {
         // Validate query is not empty
         if args.query.trim().is_empty() {
             return Err(McpError::invalid_arguments("Search query cannot be empty"));
@@ -72,8 +72,30 @@ impl Tool for WebSearchTool {
             .await
             .map_err(McpError::Other)?;
 
-        // Convert to JSON response
-        Ok(json!({
+        // Build dual-content response
+        let mut contents = Vec::new();
+        
+        // Content[0]: Human summary
+        let summary = if results.results.is_empty() {
+            format!("🔍 No results found for query: '{}'", results.query)
+        } else {
+            let preview = results.results.iter()
+                .take(3)
+                .enumerate()
+                .map(|(i, r)| format!("  {}. {} - {}", i + 1, r.title, r.url))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "🔍 Found {} search results for '{}'\n\nTop results:\n{}",
+                results.results.len(),
+                results.query,
+                preview
+            )
+        };
+        contents.push(Content::text(summary));
+        
+        // Content[1]: Full machine-readable data
+        let metadata = json!({
             "query": results.query,
             "result_count": results.results.len(),
             "results": results.results.iter().map(|r| json!({
@@ -82,7 +104,12 @@ impl Tool for WebSearchTool {
                 "url": r.url,
                 "snippet": r.snippet,
             })).collect::<Vec<_>>(),
-        }))
+        });
+        let json_str = serde_json::to_string_pretty(&metadata)
+            .unwrap_or_else(|_| "{}".to_string());
+        contents.push(Content::text(json_str));
+        
+        Ok(contents)
     }
 
     fn prompt_arguments() -> Vec<PromptArgument> {

@@ -139,28 +139,27 @@ pub async fn wait_for_results(page: &Page) -> Result<()> {
                     .flatten()
                     .unwrap_or_else(|| "unknown".to_string());
 
-                // Get page HTML for debugging
-                let html = page
-                    .content()
-                    .await
-                    .unwrap_or_else(|_| "Failed to retrieve page HTML".to_string());
+                // Log timeout with structured logging
+                tracing::debug!(
+                    url = %url,
+                    selector = SEARCH_RESULT_SELECTOR,
+                    "Timeout waiting for search results - selector not found"
+                );
 
-                eprintln!("\n========== PAGE HTML DEBUG ==========");
-                eprintln!("URL: {url}");
-                eprintln!("Expected selector: {SEARCH_RESULT_SELECTOR}");
-                eprintln!("HTML length: {} bytes", html.len());
-                eprintln!("\n--- First 2000 chars of HTML ---");
-                eprintln!("{}", &html[..html.len().min(2000)]);
-                eprintln!("\n--- Last 2000 chars of HTML ---");
-                let start_idx = html.len().saturating_sub(2000);
-                eprintln!("{}", &html[start_idx..]);
-                eprintln!("========== END HTML DEBUG ==========\n");
-
-                // Also save full HTML to file for inspection
-                if let Err(e) = tokio::fs::write("/tmp/search_page_debug.html", &html).await {
-                    eprintln!("Failed to write debug HTML to /tmp/search_page_debug.html: {e}");
-                } else {
-                    eprintln!("Full HTML saved to: /tmp/search_page_debug.html");
+                // Only save HTML at TRACE level for deep debugging
+                if tracing::enabled!(tracing::Level::TRACE)
+                    && let Ok(html) = page.content().await
+                {
+                    use chrono::Utc;
+                    let timestamp = Utc::now().timestamp();
+                    let debug_path = std::env::temp_dir()
+                        .join(format!("search_debug_{timestamp}.html"));
+                    
+                    if let Err(e) = tokio::fs::write(&debug_path, &html).await {
+                        tracing::trace!("Failed to write debug HTML: {e}");
+                    } else {
+                        tracing::trace!(path = %debug_path.display(), "Debug HTML saved");
+                    }
                 }
 
                 return Err(anyhow!(

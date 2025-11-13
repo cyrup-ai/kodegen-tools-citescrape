@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
 
 The server provides four tools for AI agents:
 
-### 1. `start_crawl`
+### 1. `scrape_url`
 
 Initiates a background web crawl with automatic search indexing.
 
@@ -94,12 +94,12 @@ Initiates a background web crawl with automatic search indexing.
 }
 ```
 
-### 2. `get_crawl_results`
+### 2. `scrape_check_results`
 
 Retrieves markdown content from a crawl session.
 
 **Arguments:**
-- `crawl_id` (required): UUID from `start_crawl`
+- `crawl_id` (required): UUID from `scrape_url`
 - `offset` (optional): Pagination offset (default: 0)
 - `limit` (optional): Max results to return (default: 10)
 - `include_progress` (optional): Include crawl progress stats (default: false)
@@ -110,12 +110,12 @@ Retrieves markdown content from a crawl session.
 - `total_pages`: Total pages crawled
 - `progress` (if requested): Crawl statistics
 
-### 3. `search_crawl_results`
+### 3. `scrape_search_results`
 
 Performs full-text search on indexed crawl content.
 
 **Arguments:**
-- `crawl_id` (required): UUID from `start_crawl`
+- `crawl_id` (required): UUID from `scrape_url`
 - `query` (required): Search query string
 - `limit` (optional): Max results (default: 10)
 - `search_type` (optional): "markdown" or "plaintext" (default: "plaintext")

@@ -1,13 +1,13 @@
-//! `start_crawl` MCP tool implementation
+//! `scrape_url` MCP tool implementation
 //!
 //! Initiates background web crawls with automatic search indexing.
 
 use chrono::Utc;
-use kodegen_mcp_schema::citescrape::{StartCrawlArgs, StartCrawlPromptArgs};
+use kodegen_mcp_schema::citescrape::{ScrapeUrlArgs, ScrapeUrlPromptArgs};
 use kodegen_mcp_tool::Tool;
 use kodegen_mcp_tool::error::McpError;
-use rmcp::model::{PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
-use serde_json::{Value, json};
+use rmcp::model::{Content, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use url::Url;
@@ -27,12 +27,12 @@ use crate::mcp::types::{ActiveCrawlSession, CrawlManifest, CrawlStatus};
 // =============================================================================
 
 #[derive(Clone)]
-pub struct StartCrawlTool {
+pub struct ScrapeUrlTool {
     session_manager: Arc<CrawlSessionManager>,
     engine_cache: Arc<SearchEngineCache>,
 }
 
-impl StartCrawlTool {
+impl ScrapeUrlTool {
     #[must_use]
     pub fn new(
         session_manager: Arc<CrawlSessionManager>,
@@ -76,7 +76,7 @@ impl StartCrawlTool {
         Ok(())
     }
 
-    fn resolve_output_dir(args: &StartCrawlArgs) -> Result<PathBuf, McpError> {
+    fn resolve_output_dir(args: &ScrapeUrlArgs) -> Result<PathBuf, McpError> {
         if let Some(ref dir) = args.output_dir {
             Ok(PathBuf::from(dir))
         } else {
@@ -85,7 +85,7 @@ impl StartCrawlTool {
     }
 
     fn build_config(
-        args: &StartCrawlArgs,
+        args: &ScrapeUrlArgs,
         output_dir: &Path,
         content_types: Option<Vec<String>>,
     ) -> Result<CrawlConfig, McpError> {
@@ -130,18 +130,18 @@ impl StartCrawlTool {
 // Tool Trait Implementation
 // =============================================================================
 
-impl Tool for StartCrawlTool {
-    type Args = StartCrawlArgs;
-    type PromptArgs = StartCrawlPromptArgs;
+impl Tool for ScrapeUrlTool {
+    type Args = ScrapeUrlArgs;
+    type PromptArgs = ScrapeUrlPromptArgs;
 
     fn name() -> &'static str {
-        "start_crawl"
+        "scrape_url"
     }
 
     fn description() -> &'static str {
         "Start a background web crawl that saves content to markdown/HTML/JSON \
          and optionally indexes for full-text search. Returns immediately with \
-         crawl_id for status tracking via get_crawl_results.\n\n\
+         crawl_id for status tracking via scrape_check_results.\n\n\
          Features:\n\
          - Background processing (non-blocking)\n\
          - Automatic search indexing (Tantivy)\n\
@@ -157,7 +157,7 @@ impl Tool for StartCrawlTool {
          Content types are case-insensitive (\"markdown\", \"Markdown\", \"MARKDOWN\" all work).\n\
          Empty arrays are rejected with error.\n\
          Invalid types return clear error messages.\n\n\
-         Example: start_crawl({\"url\": \"https://ratatui.rs\", \"content_types\": [\"markdown\", \"html\", \"png\"]})"
+         Example: scrape_url({\"url\": \"https://ratatui.rs\", \"content_types\": [\"markdown\", \"html\", \"png\"]})"
     }
 
     fn read_only() -> bool {
@@ -172,7 +172,7 @@ impl Tool for StartCrawlTool {
         true
     }
 
-    async fn execute(&self, args: Self::Args) -> Result<Value, McpError> {
+    async fn execute(&self, args: Self::Args) -> Result<Vec<Content>, McpError> {
         // 1. Validate input
         Self::validate_url(&args.url)?;
 
@@ -206,9 +206,10 @@ impl Tool for StartCrawlTool {
         // 6.5. Create unique Chrome user data directory for this crawl session
         // Using crawl_id ensures profile isolation between concurrent/sequential crawls
         let chrome_data_dir = std::env::temp_dir().join(format!("enigo_chrome_{crawl_id}"));
-        eprintln!(
-            "DEBUG start_crawl: Created chrome_data_dir: {}",
-            chrome_data_dir.display()
+        tracing::debug!(
+            chrome_data_dir = %chrome_data_dir.display(),
+            crawl_id = %crawl_id,
+            "Created isolated Chrome user data directory for crawl session"
         );
 
         // 7. Create event bus for this crawl
@@ -219,9 +220,9 @@ impl Tool for StartCrawlTool {
             .with_event_bus(event_bus.clone())
             .with_chrome_data_dir(chrome_data_dir.clone());
 
-        eprintln!(
-            "DEBUG start_crawl: After with_chrome_data_dir, config.chrome_data_dir = {:?}",
-            config.chrome_data_dir
+        tracing::debug!(
+            chrome_data_dir = ?config.chrome_data_dir,
+            "Chrome data directory configured in crawl config"
         );
 
         // 8.5. Subscribe to events for real-time progress tracking
@@ -299,7 +300,7 @@ impl Tool for StartCrawlTool {
                             manifest.fail(error_msg);
 
                             if let Err(e) = ManifestManager::save(&manifest).await {
-                                eprintln!("Failed to save manifest: {e}");
+                                tracing::error!(error = %e, "Failed to save manifest");
                             }
                         }
                     } else {
@@ -316,7 +317,7 @@ impl Tool for StartCrawlTool {
                             manifest.complete(total_pages);
 
                             if let Err(e) = ManifestManager::save(&manifest).await {
-                                eprintln!("Failed to save manifest: {e}");
+                                tracing::error!(error = %e, "Failed to save manifest");
                             }
                         }
                     }
@@ -340,7 +341,7 @@ impl Tool for StartCrawlTool {
                         manifest.fail(error_msg);
 
                         if let Err(e) = ManifestManager::save(&manifest).await {
-                            eprintln!("Failed to save manifest: {e}");
+                            tracing::error!(error = %e, "Failed to save manifest");
                         }
                     }
                 }
@@ -365,26 +366,49 @@ impl Tool for StartCrawlTool {
             .await;
 
         // 7. Return immediately with crawl info
-        let search_index_dir = if args.enable_search {
-            output_dir
-                .join(".search_index")
-                .to_string_lossy()
-                .to_string()
-        } else {
-            "disabled".to_string()
-        };
-
-        Ok(json!({
+        let mut contents = Vec::new();
+        
+        // Content[0]: Human summary
+        let summary = format!(
+            "🚀 Started background crawl\n\n\
+             Crawl ID: {}\n\
+             Target URL: {}\n\
+             Output: {}\n\
+             Max depth: {}\n\
+             Rate limit: {:.1} req/sec\n\
+             Search indexing: {}\n\n\
+             Use get_crawl_results({{\"crawl_id\": \"{}\"}}) to check status.",
+            crawl_id,
+            args.url,
+            output_dir.display(),
+            args.max_depth,
+            args.crawl_rate_rps,
+            if args.enable_search { "enabled" } else { "disabled" },
+            crawl_id
+        );
+        contents.push(Content::text(summary));
+        
+        // Content[1]: Machine-readable metadata
+        let metadata = json!({
             "crawl_id": crawl_id,
             "status": "running",
             "output_dir": output_dir.to_string_lossy(),
-            "search_index_dir": search_index_dir,
-            "message": format!(
-                "Crawl started for {}. Use get_crawl_results with crawl_id '{}' to check status.",
-                args.url,
-                crawl_id
-            )
-        }))
+            "config": {
+                "url": args.url,
+                "max_depth": args.max_depth,
+                "max_pages": args.limit,
+                "crawl_rate_rps": args.crawl_rate_rps,
+                "enable_search": args.enable_search,
+                "save_markdown": args.save_markdown,
+                "save_screenshots": args.save_screenshots
+            },
+            "message": "Background crawl started successfully"
+        });
+        let json_str = serde_json::to_string_pretty(&metadata)
+            .unwrap_or_else(|_| "{}".to_string());
+        contents.push(Content::text(json_str));
+        
+        Ok(contents)
     }
 
     fn prompt_arguments() -> Vec<PromptArgument> {

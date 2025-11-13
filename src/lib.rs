@@ -40,12 +40,12 @@ pub use mcp::{
     // Managers
     CrawlSessionManager,
     CrawlStatus,
-    GetCrawlResultsTool,
     ManifestManager,
-    SearchCrawlResultsTool,
     SearchEngineCache,
     // Tools
-    StartCrawlTool,
+    ScrapeCheckResultsTool,
+    ScrapeSearchResultsTool,
+    ScrapeUrlTool,
     WebSearchTool,
     // Utilities
     url_to_output_dir,
@@ -58,7 +58,7 @@ macro_rules! on_chunk {
         move |chunk| match chunk {
             Ok(data) => $closure(data),
             Err(e) => {
-                eprintln!("Chunk error: {:?}", e);
+                tracing::warn!(error = ?e, "Chunk processing error");
             }
         }
     };
@@ -71,7 +71,7 @@ macro_rules! on_error {
         move |error| match error {
             Some(e) => $closure(e),
             None => {
-                eprintln!("Unknown error occurred");
+                tracing::error!("Unknown error occurred in event handler");
             }
         }
     };
@@ -122,8 +122,15 @@ pub async fn start_server(
     };
 
     let shutdown_timeout = Duration::from_secs(30);
+    let session_keep_alive = Duration::ZERO;  // Infinite keep-alive for MCP sessions
 
-    create_http_server("citescrape", addr, tls_config, shutdown_timeout, |_config, _tracker| {
+    create_http_server(
+        "citescrape",
+        addr,
+        tls_config,
+        shutdown_timeout,
+        session_keep_alive,
+        |_config, _tracker| {
         Box::pin(async move {
             let mut tool_router = ToolRouter::new();
             let mut prompt_router = PromptRouter::new();
@@ -141,19 +148,19 @@ pub async fn start_server(
             (tool_router, prompt_router) = register_tool(
                 tool_router,
                 prompt_router,
-                crate::StartCrawlTool::new(session_manager.clone(), engine_cache.clone()),
+                crate::ScrapeUrlTool::new(session_manager.clone(), engine_cache.clone()),
             );
 
             (tool_router, prompt_router) = register_tool(
                 tool_router,
                 prompt_router,
-                crate::GetCrawlResultsTool::new(session_manager.clone()),
+                crate::ScrapeCheckResultsTool::new(session_manager.clone()),
             );
 
             (tool_router, prompt_router) = register_tool(
                 tool_router,
                 prompt_router,
-                crate::SearchCrawlResultsTool::new(session_manager.clone(), engine_cache.clone()),
+                crate::ScrapeSearchResultsTool::new(session_manager.clone(), engine_cache.clone()),
             );
 
             (tool_router, prompt_router) = register_tool(

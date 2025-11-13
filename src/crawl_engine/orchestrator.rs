@@ -109,13 +109,7 @@ pub async fn crawl_pages<P: ProgressReporter>(
     // - Spawning handler task to drive CDP connection
     // - Using unique chrome_data_dir per session (if configured) to prevent profile lock contention
 
-    // DEBUG: Log chrome_data_dir from config
-    eprintln!(
-        "DEBUG orchestrator.rs: config.chrome_data_dir() = {:?}",
-        config.chrome_data_dir()
-    );
     let chrome_dir_param = config.chrome_data_dir().cloned();
-    eprintln!("DEBUG orchestrator.rs: Passing to launch_browser: {chrome_dir_param:?}");
 
     let (browser, handler_task) = launch_browser(config.headless(), chrome_dir_param)
         .await

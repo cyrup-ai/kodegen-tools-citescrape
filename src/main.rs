@@ -42,19 +42,19 @@ async fn main() -> Result<()> {
         (tool_router, prompt_router) = register_tool(
             tool_router,
             prompt_router,
-            StartCrawlTool::new(session_manager.clone(), engine_cache.clone()),
+            ScrapeUrlTool::new(session_manager.clone(), engine_cache.clone()),
         );
 
         (tool_router, prompt_router) = register_tool(
             tool_router,
             prompt_router,
-            GetCrawlResultsTool::new(session_manager.clone()),
+            ScrapeCheckResultsTool::new(session_manager.clone()),
         );
 
         (tool_router, prompt_router) = register_tool(
             tool_router,
             prompt_router,
-            SearchCrawlResultsTool::new(session_manager.clone(), engine_cache.clone()),
+            ScrapeSearchResultsTool::new(session_manager.clone(), engine_cache.clone()),
         );
 
         (tool_router, prompt_router) = register_tool(

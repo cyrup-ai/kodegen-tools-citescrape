@@ -1,13 +1,13 @@
-//! `get_crawl_results` MCP tool implementation
+//! `scrape_check_results` MCP tool implementation
 //!
 //! Retrieves crawl status and results for active or completed crawls.
 
 use chrono::Utc;
-use kodegen_mcp_schema::citescrape::{GetCrawlResultsArgs, GetCrawlResultsPromptArgs};
+use kodegen_mcp_schema::citescrape::{ScrapeCheckResultsArgs, ScrapeCheckResultsPromptArgs};
 use kodegen_mcp_tool::Tool;
 use kodegen_mcp_tool::error::McpError;
-use rmcp::model::{PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
-use serde_json::{Value, json};
+use rmcp::model::{Content, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
@@ -20,11 +20,11 @@ use crate::mcp::types::{ActiveCrawlSession, CrawlManifest, CrawlStatus};
 // =============================================================================
 
 #[derive(Clone)]
-pub struct GetCrawlResultsTool {
+pub struct ScrapeCheckResultsTool {
     session_manager: Arc<CrawlSessionManager>,
 }
 
-impl GetCrawlResultsTool {
+impl ScrapeCheckResultsTool {
     #[must_use]
     pub fn new(session_manager: Arc<CrawlSessionManager>) -> Self {
         Self { session_manager }
@@ -57,7 +57,7 @@ impl GetCrawlResultsTool {
         Ok(normalized)
     }
 
-    fn validate_args(args: &GetCrawlResultsArgs) -> Result<(), McpError> {
+    fn validate_args(args: &ScrapeCheckResultsArgs) -> Result<(), McpError> {
         if args.crawl_id.is_none() && args.output_dir.is_none() {
             return Err(McpError::InvalidArguments(
                 "Either crawl_id or output_dir must be provided".to_string(),
@@ -137,16 +137,35 @@ impl GetCrawlResultsTool {
 
     async fn format_active_response(
         session: &ActiveCrawlSession,
-        args: &GetCrawlResultsArgs,
-    ) -> Result<Value, McpError> {
+        args: &ScrapeCheckResultsArgs,
+    ) -> Result<Vec<Content>, McpError> {
         let elapsed_secs = (Utc::now() - session.start_time).num_seconds();
-
         let status_str = match &session.status {
             CrawlStatus::Running => "running",
             CrawlStatus::Completed => "completed",
             CrawlStatus::Failed { .. } => "failed",
         };
-
+        
+        let mut contents = Vec::new();
+        
+        // Content[0]: Human summary
+        let summary = format!(
+            "📊 Crawl Status: {}\n\n\
+             Crawl ID: {}\n\
+             Pages crawled: {}\n\
+             Elapsed: {}s\n\
+             Output: {}\n\
+             Current URL: {}",
+            status_str.to_uppercase(),
+            session.crawl_id,
+            session.total_pages,
+            elapsed_secs,
+            session.output_dir.display(),
+            session.current_url.as_deref().unwrap_or("N/A")
+        );
+        contents.push(Content::text(summary));
+        
+        // Content[1]: Full machine-readable data
         let mut response = json!({
             "crawl_id": session.crawl_id,
             "status": status_str,
@@ -154,122 +173,89 @@ impl GetCrawlResultsTool {
             "total_pages": session.total_pages,
             "elapsed_seconds": elapsed_secs,
         });
-
-        // Add progress if requested
-        if args.include_progress {
-            let phase = if let Some(ref p) = session.progress {
-                format!("{p:?}")
-            } else {
-                "Initializing".to_string()
-            };
-
-            if let Some(obj) = response.as_object_mut() {
-                obj.insert(
-                    "progress".to_string(),
-                    json!({
-                        "phase": phase,
-                        "current_url": session.current_url,
-                    }),
-                );
-            }
-        }
-
-        // Add message
-        if let Some(obj) = response.as_object_mut() {
-            obj.insert(
-                "message".to_string(),
-                json!(format!(
-                    "Crawl {}. {} pages crawled so far.",
-                    status_str, session.total_pages
-                )),
-            );
-        }
-
-        // Add error for failed crawls
-        if let CrawlStatus::Failed { ref error } = session.status
+        
+        if args.include_progress
             && let Some(obj) = response.as_object_mut()
         {
-            obj.insert("error".to_string(), json!(error));
-            obj.insert(
-                "message".to_string(),
-                json!(format!("Crawl failed: {}", error)),
-            );
+            obj.insert("progress".to_string(), json!({
+                "phase": format!("{:?}", session.progress),
+                "current_url": session.current_url,
+            }));
         }
-
-        Ok(response)
+        
+        let json_str = serde_json::to_string_pretty(&response)
+            .unwrap_or_else(|_| "{}".to_string());
+        contents.push(Content::text(json_str));
+        
+        Ok(contents)
     }
 
     async fn format_manifest_response_with_types(
         manifest: &CrawlManifest,
-        args: &GetCrawlResultsArgs,
+        args: &ScrapeCheckResultsArgs,
         file_types: Option<Vec<String>>,
-    ) -> Result<Value, McpError> {
+    ) -> Result<Vec<Content>, McpError> {
         let status_str = match &manifest.status {
             CrawlStatus::Running => "running",
             CrawlStatus::Completed => "completed",
             CrawlStatus::Failed { .. } => "failed",
         };
-
-        let mut response = json!({
-            "crawl_id": manifest.crawl_id,
+        
+        let mut contents = Vec::new();
+        
+        // Calculate duration from timestamps
+        let duration_secs = if let Some(end_time) = manifest.end_time {
+            (end_time - manifest.start_time).num_seconds()
+        } else {
+            0
+        };
+        
+        // Get file list if requested
+        let files = if args.list_files {
+            Self::list_crawled_files(&manifest.output_dir, file_types.as_deref()).await?
+        } else {
+            Vec::new()
+        };
+        
+        // Content[0]: Human summary
+        let file_summary = if args.list_files {
+            format!("\n\nFiles generated: {} files", files.len())
+        } else {
+            String::new()
+        };
+        
+        let summary = format!(
+            "📊 Crawl Completed\n\n\
+             Status: {}\n\
+             Total pages: {}\n\
+             Duration: {}s\n\
+             Output: {}{}",
+            status_str.to_uppercase(),
+            manifest.total_pages,
+            duration_secs,
+            manifest.output_dir.display(),
+            file_summary
+        );
+        contents.push(Content::text(summary));
+        
+        // Content[1]: Full machine-readable data
+        let file_count = files.len();
+        let response = json!({
             "status": status_str,
             "output_dir": manifest.output_dir.to_string_lossy(),
+            "total_pages": manifest.total_pages,
+            "duration_seconds": duration_secs,
+            "start_time": manifest.start_time,
+            "end_time": manifest.end_time,
+            "files": if args.list_files { files } else { Vec::new() },
+            "file_count": if args.list_files { file_count } else { 0 }
         });
-
-        // Add summary for completed crawls
-        if let CrawlStatus::Completed = manifest.status {
-            let duration_secs = if let Some(end_time) = manifest.end_time {
-                (end_time - manifest.start_time).num_seconds()
-            } else {
-                0
-            };
-
-            if let Some(obj) = response.as_object_mut() {
-                obj.insert(
-                    "search_index_dir".to_string(),
-                    json!(manifest.search_index_dir.to_string_lossy()),
-                );
-
-                obj.insert(
-                    "summary".to_string(),
-                    json!({
-                        "total_pages": manifest.total_pages,
-                        "duration_seconds": duration_secs,
-                        "start_time": manifest.start_time.to_rfc3339(),
-                        "end_time": manifest.end_time.map(|t| t.to_rfc3339()),
-                    }),
-                );
-
-                // List files if requested
-                if args.list_files {
-                    let files =
-                        Self::list_crawled_files(&manifest.output_dir, file_types.as_deref())
-                            .await?;
-                    obj.insert("files".to_string(), json!(files));
-                }
-
-                obj.insert(
-                    "message".to_string(),
-                    json!(format!(
-                        "Crawl completed. {} pages indexed and searchable.",
-                        manifest.total_pages
-                    )),
-                );
-            }
-        }
-
-        // Add error for failed crawls
-        if let CrawlStatus::Failed { ref error } = manifest.status
-            && let Some(obj) = response.as_object_mut()
-        {
-            obj.insert("error".to_string(), json!(error));
-            obj.insert(
-                "message".to_string(),
-                json!(format!("Crawl failed: {}", error)),
-            );
-        }
-
-        Ok(response)
+        
+        let json_str = serde_json::to_string_pretty(&response)
+            .unwrap_or_else(|_| "{}".to_string());
+        contents.push(Content::text(json_str));
+        
+        Ok(contents)
     }
 }
 
@@ -277,12 +263,12 @@ impl GetCrawlResultsTool {
 // Tool Trait Implementation
 // =============================================================================
 
-impl Tool for GetCrawlResultsTool {
-    type Args = GetCrawlResultsArgs;
-    type PromptArgs = GetCrawlResultsPromptArgs;
+impl Tool for ScrapeCheckResultsTool {
+    type Args = ScrapeCheckResultsArgs;
+    type PromptArgs = ScrapeCheckResultsPromptArgs;
 
     fn name() -> &'static str {
-        "get_crawl_results"
+        "scrape_check_results"
     }
 
     fn description() -> &'static str {
@@ -300,7 +286,7 @@ impl Tool for GetCrawlResultsTool {
          Default (no filter): Returns all file types\n\
          File types are case-insensitive (\"md\", \"MD\" both work).\n\
          Empty arrays are rejected with error.\n\n\
-         Example: get_crawl_results({\"crawl_id\": \"...\", \"file_types\": [\"md\", \"html\"]})"
+         Example: scrape_check_results({\"crawl_id\": \"...\", \"file_types\": [\"md\", \"html\"]})"
     }
 
     fn read_only() -> bool {
@@ -315,7 +301,7 @@ impl Tool for GetCrawlResultsTool {
         false
     }
 
-    async fn execute(&self, args: Self::Args) -> Result<Value, McpError> {
+    async fn execute(&self, args: Self::Args) -> Result<Vec<Content>, McpError> {
         // 1. Validate arguments
         Self::validate_args(&args)?;
 

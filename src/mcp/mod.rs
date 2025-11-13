@@ -140,7 +140,7 @@ pub use manager::{CrawlSessionManager, ManifestManager, SearchEngineCache, url_t
 pub use validation::ErrorContext;
 
 // Re-export tools
-pub use get_crawl_results::GetCrawlResultsTool;
-pub use search_crawl_results::SearchCrawlResultsTool;
-pub use start_crawl::StartCrawlTool;
+pub use get_crawl_results::ScrapeCheckResultsTool;
+pub use search_crawl_results::ScrapeSearchResultsTool;
+pub use start_crawl::ScrapeUrlTool;
 pub use web_search::WebSearchTool;

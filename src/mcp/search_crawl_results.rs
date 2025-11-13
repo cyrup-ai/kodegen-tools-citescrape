@@ -1,12 +1,12 @@
-//! `search_crawl_results` MCP tool implementation
+//! `scrape_search_results` MCP tool implementation
 //!
 //! Full-text search across crawled documentation using Tantivy.
 
-use kodegen_mcp_schema::citescrape::{SearchCrawlResultsArgs, SearchCrawlResultsPromptArgs};
+use kodegen_mcp_schema::citescrape::{ScrapeSearchResultsArgs, ScrapeSearchResultsPromptArgs};
 use kodegen_mcp_tool::Tool;
 use kodegen_mcp_tool::error::McpError;
-use rmcp::model::{PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
-use serde_json::{Value, json};
+use rmcp::model::{Content, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,12 +31,12 @@ const MAX_SEARCH_RESULTS_PER_PAGE: usize = 1000;
 // =============================================================================
 
 #[derive(Clone)]
-pub struct SearchCrawlResultsTool {
+pub struct ScrapeSearchResultsTool {
     session_manager: Arc<CrawlSessionManager>,
     engine_cache: Arc<SearchEngineCache>,
 }
 
-impl SearchCrawlResultsTool {
+impl ScrapeSearchResultsTool {
     #[must_use]
     pub fn new(
         session_manager: Arc<CrawlSessionManager>,
@@ -52,7 +52,7 @@ impl SearchCrawlResultsTool {
     // Helper Methods
     // =========================================================================
 
-    fn validate_args(args: &SearchCrawlResultsArgs) -> Result<(), McpError> {
+    fn validate_args(args: &ScrapeSearchResultsArgs) -> Result<(), McpError> {
         if args.crawl_id.is_none() && args.output_dir.is_none() {
             return Err(McpError::InvalidArguments(
                 "Either crawl_id or output_dir must be provided".to_string(),
@@ -75,7 +75,7 @@ impl SearchCrawlResultsTool {
         Ok(())
     }
 
-    async fn resolve_output_dir(&self, args: &SearchCrawlResultsArgs) -> Result<PathBuf, McpError> {
+    async fn resolve_output_dir(&self, args: &ScrapeSearchResultsArgs) -> Result<PathBuf, McpError> {
         // Try crawl_id first
         if let Some(ref crawl_id) = args.crawl_id {
             if let Some(session) = self.session_manager.get_session(crawl_id).await {
@@ -121,12 +121,12 @@ impl SearchCrawlResultsTool {
 // Tool Trait Implementation
 // =============================================================================
 
-impl Tool for SearchCrawlResultsTool {
-    type Args = SearchCrawlResultsArgs;
-    type PromptArgs = SearchCrawlResultsPromptArgs;
+impl Tool for ScrapeSearchResultsTool {
+    type Args = ScrapeSearchResultsArgs;
+    type PromptArgs = ScrapeSearchResultsPromptArgs;
 
     fn name() -> &'static str {
-        "search_crawl_results"
+        "scrape_search_results"
     }
 
     fn description() -> &'static str {
@@ -143,7 +143,7 @@ impl Tool for SearchCrawlResultsTool {
          - results: array of {url, title, path, excerpt, score}\n\
          - total_count: total matching documents\n\
          - pagination: offset, limit, has_more, next_offset\n\n\
-         Example: search_crawl_results({\"query\": \"layout components\", \"output_dir\": \"docs/ratatui.rs\"})"
+         Example: scrape_search_results({\"query\": \"layout components\", \"output_dir\": \"docs/ratatui.rs\"})"
     }
 
     fn read_only() -> bool {
@@ -158,7 +158,7 @@ impl Tool for SearchCrawlResultsTool {
         false
     }
 
-    async fn execute(&self, args: Self::Args) -> Result<Value, McpError> {
+    async fn execute(&self, args: Self::Args) -> Result<Vec<Content>, McpError> {
         // 1. Validate arguments
         Self::validate_args(&args)?;
 
@@ -216,8 +216,51 @@ impl Tool for SearchCrawlResultsTool {
         let has_more = search_results.has_more();
         let next_offset = search_results.next_offset();
 
-        // 11. Return complete response
-        Ok(json!({
+        // 11. Build dual-content response
+        let mut contents = Vec::new();
+        
+        // Content[0]: Human summary
+        let summary = if results.is_empty() {
+            format!("🔎 No results found for query: '{}'", args.query)
+        } else {
+            let preview = search_results.results.iter()
+                .take(3)
+                .map(|r| {
+                    let excerpt_preview = if r.excerpt.len() > 100 {
+                        format!("{}...", &r.excerpt[..100])
+                    } else {
+                        r.excerpt.clone()
+                    };
+                    format!(
+                        "  • {} (score: {:.2})\n    {}",
+                        r.title,
+                        r.score,
+                        excerpt_preview
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            
+            format!(
+                "🔎 Found {} results for '{}' in {}ms\n\n{}\n\n\
+                 Showing {} of {} total results{}",
+                search_results.total_count,
+                args.query,
+                search_time_ms,
+                preview,
+                results.len(),
+                search_results.total_count,
+                if has_more {
+                    format!("\n\nMore results available. Use offset: {} to continue.", next_offset.unwrap_or(0))
+                } else {
+                    String::new()
+                }
+            )
+        };
+        contents.push(Content::text(summary));
+        
+        // Content[1]: Full machine-readable data
+        let metadata = json!({
             "query": args.query,
             "total_count": search_results.total_count,
             "results": results,
@@ -228,12 +271,12 @@ impl Tool for SearchCrawlResultsTool {
                 "next_offset": next_offset,
             },
             "search_time_ms": search_time_ms,
-            "message": format!(
-                "Found {} results in {}ms",
-                search_results.total_count,
-                search_time_ms
-            ),
-        }))
+        });
+        let json_str = serde_json::to_string_pretty(&metadata)
+            .unwrap_or_else(|_| "{}".to_string());
+        contents.push(Content::text(json_str));
+        
+        Ok(contents)
     }
 
     fn prompt_arguments() -> Vec<PromptArgument> {
