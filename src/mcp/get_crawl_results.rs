@@ -268,7 +268,7 @@ impl Tool for ScrapeCheckResultsTool {
     type PromptArgs = ScrapeCheckResultsPromptArgs;
 
     fn name() -> &'static str {
-        "scrape_check_results"
+        kodegen_mcp_schema::citescrape::SCRAPE_CHECK_RESULTS
     }
 
     fn description() -> &'static str {

@@ -126,7 +126,7 @@ impl Tool for ScrapeSearchResultsTool {
     type PromptArgs = ScrapeSearchResultsPromptArgs;
 
     fn name() -> &'static str {
-        "scrape_search_results"
+        kodegen_mcp_schema::citescrape::SCRAPE_SEARCH_RESULTS
     }
 
     fn description() -> &'static str {

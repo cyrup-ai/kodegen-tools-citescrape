@@ -135,7 +135,7 @@ impl Tool for ScrapeUrlTool {
     type PromptArgs = ScrapeUrlPromptArgs;
 
     fn name() -> &'static str {
-        "scrape_url"
+        kodegen_mcp_schema::citescrape::SCRAPE_URL
     }
 
     fn description() -> &'static str {

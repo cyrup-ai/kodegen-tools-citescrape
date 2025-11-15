@@ -34,7 +34,7 @@ impl Tool for WebSearchTool {
     type PromptArgs = WebSearchPromptArgs;
 
     fn name() -> &'static str {
-        "web_search"
+        kodegen_mcp_schema::citescrape::WEB_SEARCH
     }
 
     fn description() -> &'static str {
