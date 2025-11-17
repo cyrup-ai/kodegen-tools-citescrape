@@ -10,6 +10,15 @@ use serde_json::json;
 use std::sync::Arc;
 
 // =============================================================================
+// ANSI Color Constants
+// =============================================================================
+
+const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_RESET: &str = "\x1b[0m";
+const ICON_SEARCH: &str = "󰍉";
+const ICON_LIST: &str = "󰮒";
+
+// =============================================================================
 // Tool Struct
 // =============================================================================
 
@@ -74,24 +83,19 @@ impl Tool for WebSearchTool {
 
         // Build dual-content response
         let mut contents = Vec::new();
-        
-        // Content[0]: Human summary
-        let summary = if results.results.is_empty() {
-            format!("🔍 No results found for query: '{}'", results.query)
+
+        // Content[0]: Human summary (two-line format with ANSI colors and Nerd Font icons)
+        let count = results.results.len();
+        let first_title = if results.results.is_empty() {
+            "No results"
         } else {
-            let preview = results.results.iter()
-                .take(3)
-                .enumerate()
-                .map(|(i, r)| format!("  {}. {} - {}", i + 1, r.title, r.url))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!(
-                "🔍 Found {} search results for '{}'\n\nTop results:\n{}",
-                results.results.len(),
-                results.query,
-                preview
-            )
+            &results.results[0].title
         };
+
+        let line1 = format!("{}{} Web Search: {}{}", ANSI_CYAN, ICON_SEARCH, results.query, ANSI_RESET);
+        let line2 = format!("  {} Results: {} · Top: {}", ICON_LIST, count, first_title);
+        let summary = format!("{}\n{}", line1, line2);
+
         contents.push(Content::text(summary));
         
         // Content[1]: Full machine-readable data

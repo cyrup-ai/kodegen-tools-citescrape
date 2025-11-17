@@ -218,43 +218,27 @@ impl Tool for ScrapeSearchResultsTool {
 
         // 11. Build dual-content response
         let mut contents = Vec::new();
-        
-        // Content[0]: Human summary
+
+        // Content[0]: Human summary (2-line format with ANSI colors and Nerd Font icons)
         let summary = if results.is_empty() {
-            format!("🔎 No results found for query: '{}'", args.query)
-        } else {
-            let preview = search_results.results.iter()
-                .take(3)
-                .map(|r| {
-                    let excerpt_preview = if r.excerpt.len() > 100 {
-                        format!("{}...", &r.excerpt[..100])
-                    } else {
-                        r.excerpt.clone()
-                    };
-                    format!(
-                        "  • {} (score: {:.2})\n    {}",
-                        r.title,
-                        r.score,
-                        excerpt_preview
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            
             format!(
-                "🔎 Found {} results for '{}' in {}ms\n\n{}\n\n\
-                 Showing {} of {} total results{}",
-                search_results.total_count,
+                "\x1b[36m Search: {}\x1b[0m\n\
+                 Results: 0 · No matches",
+                args.query
+            )
+        } else {
+            let first_result_title = if let Some(first) = search_results.results.first() {
+                &first.title
+            } else {
+                "Unknown"
+            };
+
+            format!(
+                "\x1b[36m Search: {}\x1b[0m\n\
+                 Results: {} · Top: {}",
                 args.query,
-                search_time_ms,
-                preview,
-                results.len(),
                 search_results.total_count,
-                if has_more {
-                    format!("\n\nMore results available. Use offset: {} to continue.", next_offset.unwrap_or(0))
-                } else {
-                    String::new()
-                }
+                first_result_title
             )
         };
         contents.push(Content::text(summary));
@@ -272,8 +256,10 @@ impl Tool for ScrapeSearchResultsTool {
             },
             "search_time_ms": search_time_ms,
         });
-        let json_str = serde_json::to_string_pretty(&metadata)
-            .unwrap_or_else(|_| "{}".to_string());
+        let json_str = match serde_json::to_string_pretty(&metadata) {
+            Ok(s) => s,
+            Err(_) => "{}".to_string(),
+        };
         contents.push(Content::text(json_str));
         
         Ok(contents)

@@ -368,23 +368,18 @@ impl Tool for ScrapeUrlTool {
         // 7. Return immediately with crawl info
         let mut contents = Vec::new();
         
-        // Content[0]: Human summary
+        // Content[0]: Human summary (2-line ANSI formatted)
+        let max_pages_display = if let Some(limit) = args.limit {
+            limit.to_string()
+        } else {
+            "unlimited".to_string()
+        };
         let summary = format!(
-            "🚀 Started background crawl\n\n\
-             Crawl ID: {}\n\
-             Target URL: {}\n\
-             Output: {}\n\
-             Max depth: {}\n\
-             Rate limit: {:.1} req/sec\n\
-             Search indexing: {}\n\n\
-             Use get_crawl_results({{\"crawl_id\": \"{}\"}}) to check status.",
-            crawl_id,
+            "\x1b[32m🕷️ Crawl Started: {}\x1b[0m\nℹ️  Session: {} · Max pages: {} · Depth: {}",
             args.url,
-            output_dir.display(),
-            args.max_depth,
-            args.crawl_rate_rps,
-            if args.enable_search { "enabled" } else { "disabled" },
-            crawl_id
+            crawl_id,
+            max_pages_display,
+            args.max_depth
         );
         contents.push(Content::text(summary));
         
