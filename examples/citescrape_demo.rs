@@ -1,7 +1,8 @@
 mod common;
 
 use anyhow::{Context, Result};
-use kodegen_mcp_client::{responses::StartCrawlResponse, tools};
+use kodegen_mcp_client::responses::StartCrawlResponse;
+use kodegen_mcp_schema::citescrape::{SCRAPE_URL, SCRAPE_CHECK_RESULTS, SCRAPE_SEARCH_RESULTS, WEB_SEARCH};
 use serde_json::json;
 use tokio::time::{Duration, sleep};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -32,7 +33,7 @@ async fn wait_for_crawl_completion(
     loop {
         let result = client
             .call_tool(
-                tools::GET_CRAWL_RESULTS,
+                SCRAPE_CHECK_RESULTS,
                 json!({
                     "crawl_id": crawl_id,
                     "include_progress": false
@@ -112,7 +113,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let response: StartCrawlResponse = client
             .call_tool_typed(
-                tools::START_CRAWL,
+                SCRAPE_URL,
                 json!({
                     "url": "https://ratatui.rs/",
                     "limit": 5,
@@ -135,7 +136,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let result = client
             .call_tool(
-                tools::GET_CRAWL_RESULTS,
+                SCRAPE_CHECK_RESULTS,
                 json!({
                     "crawl_id": crawl_id,
                     "include_progress": true,
@@ -176,7 +177,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
         // start_crawl succeeds (returns crawl_id) because validation only checks URL syntax
         let response_invalid: StartCrawlResponse = client
             .call_tool_typed(
-                tools::START_CRAWL,
+                SCRAPE_URL,
                 json!({
                     "url": "https://invalid-domain-that-does-not-exist-12345.com/",
                     "limit": 1
@@ -217,7 +218,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let result = client
             .call_tool(
-                tools::GET_CRAWL_RESULTS,
+                SCRAPE_CHECK_RESULTS,
                 json!({
                     "crawl_id": crawl_id,
                     "include_progress": false,
@@ -244,7 +245,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let result = client
             .call_tool(
-                tools::SEARCH_CRAWL_RESULTS,
+                SCRAPE_SEARCH_RESULTS,
                 json!({
                     "crawl_id": crawl_id,
                     "query": "ratatui",
@@ -287,7 +288,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         match client
             .call_tool(
-                tools::WEB_SEARCH,
+                WEB_SEARCH,
                 json!({
                     "query": "rust async programming tutorial"
                 }),
@@ -326,7 +327,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let response_2: StartCrawlResponse = client
             .call_tool_typed(
-                tools::START_CRAWL,
+                SCRAPE_URL,
                 json!({
                     "url": "https://tokio.rs/",
                     "limit": 3,
@@ -346,7 +347,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let _result = client
             .call_tool(
-                tools::GET_CRAWL_RESULTS,
+                SCRAPE_CHECK_RESULTS,
                 json!({
                     "crawl_id": crawl_id_2,
                     "include_progress": false,

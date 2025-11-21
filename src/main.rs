@@ -48,12 +48,6 @@ async fn main() -> Result<()> {
         (tool_router, prompt_router) = register_tool(
             tool_router,
             prompt_router,
-            ScrapeCheckResultsTool::new(session_manager.clone()),
-        );
-
-        (tool_router, prompt_router) = register_tool(
-            tool_router,
-            prompt_router,
             ScrapeSearchResultsTool::new(session_manager.clone(), engine_cache.clone()),
         );
 

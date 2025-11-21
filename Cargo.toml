@@ -1,7 +1,7 @@
 
 [package]
 name = "kodegen_tools_citescrape"
-version = "0.2.4"
+version = "0.3.1"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 authors = ["KODEGEN.ᴀɪ"]
@@ -31,11 +31,11 @@ macos = "public.app-category.developer-tools"
 
 [dependencies]
 
-kodegen_mcp_schema = { version = "0.2", path = "../kodegen-mcp-schema" }
-kodegen_mcp_tool = { version = "0.2", path = "../kodegen-mcp-tool" }
-kodegen_server_http = { version = "0.2", path = "../kodegen-server-http" }
-kodegen_config_manager = { version = "0.2", path = "../kodegen-config-manager" }
-kodegen_utils = { version = "0.2", path = "../kodegen-utils" }
+kodegen_mcp_schema = { version = "0.3" }
+kodegen_mcp_tool = { version = "0.3" }
+kodegen_server_http = { version = "0.3" }
+kodegen_config_manager = { version = "0.3" }
+kodegen_utils = { version = "0.3" }
 
 log = "0.4"
 env_logger = "0.11"
@@ -53,7 +53,7 @@ anyhow = "1"
 lru = "0.16"
 
 # MCP tool dependencies
-rmcp = { version = "0.8", features = ["client", "schemars", "server", "transport-child-process", "transport-io", "transport-sse-client", "transport-sse-client-reqwest", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "0.9", features = ["client", "schemars", "server", "transport-child-process", "transport-io", "transport-sse-client", "transport-sse-client-reqwest", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -103,7 +103,7 @@ rayon = "1"
 bloomfilter = "3"
 
 [dev-dependencies]
-kodegen_mcp_client = { version = "0.2", path = "../kodegen-mcp-client" }
+kodegen_mcp_client = { version = "0.3" }
 assert_fs = "1"
 mockito = "1"
 proptest = "1"

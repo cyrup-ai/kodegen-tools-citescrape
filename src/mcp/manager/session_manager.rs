@@ -114,10 +114,8 @@ impl CrawlSessionManager {
                     age
                 );
 
-                // Abort task handle if present (cleanup background tasks)
-                if let Some(handle) = &session.task_handle {
-                    handle.abort();
-                }
+                // No background tasks to abort in long-running pattern
+                // Sessions are only retained during execute() and for post-crawl search queries
             }
 
             should_keep

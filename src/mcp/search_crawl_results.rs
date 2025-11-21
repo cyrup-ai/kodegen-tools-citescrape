@@ -3,7 +3,7 @@
 //! Full-text search across crawled documentation using Tantivy.
 
 use kodegen_mcp_schema::citescrape::{ScrapeSearchResultsArgs, ScrapeSearchResultsPromptArgs};
-use kodegen_mcp_tool::Tool;
+use kodegen_mcp_tool::{Tool, ToolExecutionContext};
 use kodegen_mcp_tool::error::McpError;
 use rmcp::model::{Content, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
 use serde_json::{json, Value};
@@ -158,7 +158,7 @@ impl Tool for ScrapeSearchResultsTool {
         false
     }
 
-    async fn execute(&self, args: Self::Args) -> Result<Vec<Content>, McpError> {
+    async fn execute(&self, args: Self::Args, _ctx: ToolExecutionContext) -> Result<Vec<Content>, McpError> {
         // 1. Validate arguments
         Self::validate_args(&args)?;
 

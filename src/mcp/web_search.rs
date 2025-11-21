@@ -3,7 +3,7 @@
 //! Performs web searches and returns structured results with titles, URLs, and snippets.
 
 use kodegen_mcp_schema::citescrape::{WebSearchArgs, WebSearchPromptArgs};
-use kodegen_mcp_tool::Tool;
+use kodegen_mcp_tool::{Tool, ToolExecutionContext};
 use kodegen_mcp_tool::error::McpError;
 use rmcp::model::{Content, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
 use serde_json::json;
@@ -70,7 +70,7 @@ impl Tool for WebSearchTool {
         true
     }
 
-    async fn execute(&self, args: Self::Args) -> Result<Vec<Content>, McpError> {
+    async fn execute(&self, args: Self::Args, _ctx: ToolExecutionContext) -> Result<Vec<Content>, McpError> {
         // Validate query is not empty
         if args.query.trim().is_empty() {
             return Err(McpError::invalid_arguments("Search query cannot be empty"));

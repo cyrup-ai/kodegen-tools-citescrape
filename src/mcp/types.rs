@@ -46,13 +46,6 @@ pub struct ActiveCrawlSession {
 
     /// Current URL being processed
     pub current_url: Option<String>,
-
-    /// Background task handle (keeps task alive)
-    ///
-    /// Similar to `TerminalManager`'s pattern, we store the `JoinHandle` to ensure
-    /// the background crawl task remains tracked and alive for the session's lifetime.
-    /// This prevents the browser WebSocket from being prematurely dropped.
-    pub task_handle: Option<std::sync::Arc<tokio::task::JoinHandle<()>>>,
 }
 
 /// Lightweight configuration summary for manifest storage

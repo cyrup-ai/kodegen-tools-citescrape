@@ -43,7 +43,6 @@ pub use mcp::{
     ManifestManager,
     SearchEngineCache,
     // Tools
-    ScrapeCheckResultsTool,
     ScrapeSearchResultsTool,
     ScrapeUrlTool,
     WebSearchTool,
@@ -144,17 +143,11 @@ pub async fn start_server(
             // Register browser manager for shutdown (closes Chrome)
             managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
 
-            // Register all 4 citescrape tools
+            // Register all 3 citescrape tools
             (tool_router, prompt_router) = register_tool(
                 tool_router,
                 prompt_router,
                 crate::ScrapeUrlTool::new(session_manager.clone(), engine_cache.clone()),
-            );
-
-            (tool_router, prompt_router) = register_tool(
-                tool_router,
-                prompt_router,
-                crate::ScrapeCheckResultsTool::new(session_manager.clone()),
             );
 
             (tool_router, prompt_router) = register_tool(

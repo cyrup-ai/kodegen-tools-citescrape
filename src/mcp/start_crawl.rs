@@ -4,7 +4,7 @@
 
 use chrono::Utc;
 use kodegen_mcp_schema::citescrape::{ScrapeUrlArgs, ScrapeUrlPromptArgs};
-use kodegen_mcp_tool::Tool;
+use kodegen_mcp_tool::{Tool, ToolExecutionContext};
 use kodegen_mcp_tool::error::McpError;
 use rmcp::model::{Content, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole};
 use serde_json::json;
@@ -124,6 +124,86 @@ impl ScrapeUrlTool {
 
         Ok(config)
     }
+
+    /// List all crawled files recursively
+    /// 
+    /// Extracted from get_crawl_results.rs for file listing functionality
+    async fn list_crawled_files(
+        dir: &PathBuf,
+        file_types: Option<&[String]>,
+    ) -> Result<Vec<String>, McpError> {
+        use tokio::fs;
+        
+        let mut files = Vec::new();
+        
+        if !dir.exists() {
+            return Ok(files);
+        }
+        
+        let mut entries = fs::read_dir(dir).await?;
+        
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            
+            if path.is_dir() {
+                // Skip .search_index directory
+                if path.file_name().and_then(|n| n.to_str()) == Some(".search_index") {
+                    continue;
+                }
+                
+                // Recursively list subdirectories - CRITICAL: Use Box::pin
+                let subfiles = Box::pin(Self::list_crawled_files(&path, file_types)).await?;
+                files.extend(subfiles);
+            } else if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy().to_lowercase();
+                
+                // Skip temporary files and manifest
+                if ext_str == "tmp" {
+                    continue;
+                }
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str())
+                    && filename == "manifest.json"
+                {
+                    continue;
+                }
+                
+                // Filter by file type if specified
+                let should_include = match file_types {
+                    Some(types) if !types.is_empty() => {
+                        types.iter().any(|t| t.to_lowercase() == ext_str)
+                    }
+                    _ => {
+                        // Include markdown, html, json, png
+                        ext_str == "md" || ext_str == "html" 
+                            || ext_str == "json" || ext_str == "png"
+                    }
+                };
+                
+                if should_include {
+                    files.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+        
+        files.sort();
+        Ok(files)
+    }
+    
+    /// Extract unique file types from file list
+    fn get_file_types(files: &[String]) -> Vec<String> {
+        use std::collections::HashSet;
+        
+        let mut types = HashSet::new();
+        for file in files {
+            if let Some(ext) = std::path::Path::new(file).extension() {
+                types.insert(ext.to_string_lossy().to_lowercase());
+            }
+        }
+        
+        let mut result: Vec<_> = types.into_iter().collect();
+        result.sort();
+        result
+    }
 }
 
 // =============================================================================
@@ -139,25 +219,30 @@ impl Tool for ScrapeUrlTool {
     }
 
     fn description() -> &'static str {
-        "Start a background web crawl that saves content to markdown/HTML/JSON \
-         and optionally indexes for full-text search. Returns immediately with \
-         crawl_id for status tracking via scrape_check_results.\n\n\
-         Features:\n\
-         - Background processing (non-blocking)\n\
-         - Automatic search indexing (Tantivy)\n\
+        "Execute a complete web crawl that blocks until finished, returning comprehensive \
+         results with all crawled files and metadata. This is a long-running operation \
+         that may take 30 seconds to 10 minutes depending on site size and depth.\n\n\
+         **Execution Model:**\n\
+         - Blocks until crawl completes or timeout reached\n\
+         - Returns full results immediately (no polling needed)\n\
+         - Default timeout: 600 seconds (10 minutes)\n\
+         - Partial results returned if timeout reached\n\n\
+         **Features:**\n\
+         - Automatic Tantivy search indexing\n\
          - Rate limiting (default 2 req/sec)\n\
-         - Markdown/HTML/JSON output\n\
+         - Multiple output formats: Markdown, HTML, JSON\n\
          - Screenshot capture support\n\
-         - Content type selection via content_types parameter\n\n\
-         Content Types:\n\
-         - \"markdown\": Save markdown files (.md)\n\
-         - \"html\": HTML files (always saved, informational only for filtering)\n\
-         - \"json\": JSON metadata (always saved, informational only for filtering)\n\
-         - \"png\": Enable screenshot capture (.png)\n\
-         Content types are case-insensitive (\"markdown\", \"Markdown\", \"MARKDOWN\" all work).\n\
-         Empty arrays are rejected with error.\n\
-         Invalid types return clear error messages.\n\n\
-         Example: scrape_url({\"url\": \"https://ratatui.rs\", \"content_types\": [\"markdown\", \"html\", \"png\"]})"
+         - Configurable timeout with partial result handling\n\n\
+         **Returns:**\n\
+         - crawl_id: For use with scrape_search_results\n\
+         - pages_crawled: Total pages successfully crawled\n\
+         - output_dir: Directory containing all crawled files\n\
+         - files: Absolute paths to all generated files\n\
+         - file_types: Types of files generated (md, html, json, png)\n\
+         - elapsed_seconds: Total crawl duration\n\
+         - timeout_reached: Whether timeout interrupted crawl\n\n\
+         **Example:**\n\
+         scrape_url({\"url\": \"https://ratatui.rs\", \"max_depth\": 2, \"timeout_seconds\": 300})"
     }
 
     fn read_only() -> bool {
@@ -172,7 +257,10 @@ impl Tool for ScrapeUrlTool {
         true
     }
 
-    async fn execute(&self, args: Self::Args) -> Result<Vec<Content>, McpError> {
+    async fn execute(&self, args: Self::Args, _ctx: ToolExecutionContext) -> Result<Vec<Content>, McpError> {
+        use tokio::time::{timeout, Duration};
+        use std::time::Instant;
+        
         // 1. Validate input
         Self::validate_url(&args.url)?;
 
@@ -203,8 +291,7 @@ impl Tool for ScrapeUrlTool {
         // 6. Generate unique crawl ID
         let crawl_id = Uuid::new_v4().to_string();
 
-        // 6.5. Create unique Chrome user data directory for this crawl session
-        // Using crawl_id ensures profile isolation between concurrent/sequential crawls
+        // 7. Create unique Chrome user data directory for this crawl session
         let chrome_data_dir = std::env::temp_dir().join(format!("enigo_chrome_{crawl_id}"));
         tracing::debug!(
             chrome_data_dir = %chrome_data_dir.display(),
@@ -212,10 +299,10 @@ impl Tool for ScrapeUrlTool {
             "Created isolated Chrome user data directory for crawl session"
         );
 
-        // 7. Create event bus for this crawl
+        // 8. Create event bus for this crawl
         let event_bus = std::sync::Arc::new(crate::crawl_events::CrawlEventBus::new(1000));
 
-        // 8. Attach event bus and chrome data dir to config
+        // 9. Attach event bus and chrome data dir to config
         let config = config
             .with_event_bus(event_bus.clone())
             .with_chrome_data_dir(chrome_data_dir.clone());
@@ -225,7 +312,7 @@ impl Tool for ScrapeUrlTool {
             "Chrome data directory configured in crawl config"
         );
 
-        // 8.5. Subscribe to events for real-time progress tracking
+        // 10. Subscribe to events for real-time progress tracking
         let mut event_receiver = event_bus.subscribe();
         let progress_session_manager = self.session_manager.clone();
         let progress_crawl_id = crawl_id.clone();
@@ -241,7 +328,6 @@ impl Tool for ScrapeUrlTool {
                             .await;
                     }
                     crate::crawl_events::CrawlEvent::Shutdown { .. } => {
-                        // Crawler called shutdown_gracefully, exit subscriber
                         break;
                     }
                     _ => {}
@@ -249,106 +335,11 @@ impl Tool for ScrapeUrlTool {
             }
         });
 
-        // 6. Start background crawl (crawler.crawl() spawns internally)
-        let session_manager = self.session_manager.clone();
-        let crawl_id_clone = crawl_id.clone();
-
-        // DEBUG: Verify chrome_data_dir is set before passing to crawler
-        if let Some(ref dir) = config.chrome_data_dir {
-            tracing::info!("✅ Config has chrome_data_dir: {}", dir.display());
-        } else {
-            tracing::warn!("⚠️  Config chrome_data_dir is None!");
-        }
-
-        // Create crawler and start crawl (internally spawns via tokio::spawn)
+        // 11. Create crawler and get request
         let crawler = ChromiumoxideCrawler::new(config.clone());
         let request: CrawlRequest = crawler.crawl();
 
-        // Spawn result handling task and STORE the JoinHandle
-        let task_handle = tokio::spawn(async move {
-            let result = request.await;
-
-            // Handle result
-            match result {
-                Ok(()) => {
-                    // Crawl completed without errors
-                    let total_pages =
-                        if let Some(sess) = session_manager.get_session(&crawl_id_clone).await {
-                            sess.total_pages
-                        } else {
-                            0
-                        };
-
-                    // Check if any pages were successfully crawled
-                    if total_pages == 0 {
-                        // Zero pages crawled - treat as failure for better AI agent feedback
-                        let error_msg = "No pages could be crawled. This may indicate an invalid URL, network issue, or inaccessible domain.".to_string();
-                        session_manager
-                            .update_status(
-                                &crawl_id_clone,
-                                CrawlStatus::Failed {
-                                    error: error_msg.clone(),
-                                },
-                            )
-                            .await;
-
-                        // Save failed manifest
-                        if let Some(failed_session) =
-                            session_manager.get_session(&crawl_id_clone).await
-                        {
-                            let mut manifest = CrawlManifest::from_session(&failed_session);
-                            manifest.fail(error_msg);
-
-                            if let Err(e) = ManifestManager::save(&manifest).await {
-                                tracing::error!(error = %e, "Failed to save manifest");
-                            }
-                        }
-                    } else {
-                        // Success - at least one page was crawled
-                        session_manager
-                            .update_status(&crawl_id_clone, CrawlStatus::Completed)
-                            .await;
-
-                        // Save manifest
-                        if let Some(final_session) =
-                            session_manager.get_session(&crawl_id_clone).await
-                        {
-                            let mut manifest = CrawlManifest::from_session(&final_session);
-                            manifest.complete(total_pages);
-
-                            if let Err(e) = ManifestManager::save(&manifest).await {
-                                tracing::error!(error = %e, "Failed to save manifest");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Crawl failed
-                    let error_msg = format!("Crawl failed: {e}");
-                    session_manager
-                        .update_status(
-                            &crawl_id_clone,
-                            CrawlStatus::Failed {
-                                error: error_msg.clone(),
-                            },
-                        )
-                        .await;
-
-                    // Save failed manifest
-                    if let Some(failed_session) = session_manager.get_session(&crawl_id_clone).await
-                    {
-                        let mut manifest = CrawlManifest::from_session(&failed_session);
-                        manifest.fail(error_msg);
-
-                        if let Err(e) = ManifestManager::save(&manifest).await {
-                            tracing::error!(error = %e, "Failed to save manifest");
-                        }
-                    }
-                }
-            }
-        });
-
-        // 9. Create and register session with task handle
+        // 12. Register session WITHOUT task_handle
         let session = ActiveCrawlSession {
             crawl_id: crawl_id.clone(),
             config: config.clone(),
@@ -358,51 +349,135 @@ impl Tool for ScrapeUrlTool {
             progress: None,
             total_pages: 0,
             current_url: Some(args.url.clone()),
-            task_handle: Some(std::sync::Arc::new(task_handle)),
         };
 
         self.session_manager
             .register(crawl_id.clone(), session)
             .await;
 
-        // 7. Return immediately with crawl info
-        let mut contents = Vec::new();
-        
-        // Content[0]: Human summary (2-line ANSI formatted)
-        let max_pages_display = if let Some(limit) = args.limit {
-            limit.to_string()
-        } else {
-            "unlimited".to_string()
+        // 13. Await crawl with timeout
+        let start_time = Instant::now();
+        let timeout_duration = Duration::from_secs(args.timeout_seconds);
+
+        let crawl_result = match timeout(timeout_duration, request).await {
+            // Timeout reached - return partial results
+            Err(_elapsed) => {
+                let partial_pages = if let Some(sess) = self.session_manager.get_session(&crawl_id).await {
+                    sess.total_pages
+                } else {
+                    0
+                };
+
+                // Update session status
+                self.session_manager
+                    .update_status(&crawl_id, CrawlStatus::Completed)
+                    .await;
+
+                // Save manifest with partial results
+                if let Some(final_session) = self.session_manager.get_session(&crawl_id).await {
+                    let mut manifest = CrawlManifest::from_session(&final_session);
+                    manifest.complete(partial_pages);
+                    ManifestManager::save(&manifest).await?;
+                }
+
+                (partial_pages, true) // (pages_crawled, timeout_reached)
+            }
+
+            // Crawl completed within timeout
+            Ok(Ok(())) => {
+                let total_pages = if let Some(sess) = self.session_manager.get_session(&crawl_id).await {
+                    sess.total_pages
+                } else {
+                    0
+                };
+
+                // Validate pages crawled (fail if zero)
+                if total_pages == 0 {
+                    let error_msg = "No pages could be crawled. This may indicate an invalid URL, network issue, or inaccessible domain.";
+                    self.session_manager
+                        .update_status(&crawl_id, CrawlStatus::Failed {
+                            error: error_msg.to_string(),
+                        })
+                        .await;
+
+                    return Err(McpError::Other(anyhow::anyhow!("{}", error_msg)));
+                }
+
+                // Success
+                self.session_manager
+                    .update_status(&crawl_id, CrawlStatus::Completed)
+                    .await;
+
+                // Save manifest
+                if let Some(final_session) = self.session_manager.get_session(&crawl_id).await {
+                    let mut manifest = CrawlManifest::from_session(&final_session);
+                    manifest.complete(total_pages);
+                    ManifestManager::save(&manifest).await?;
+                }
+
+                (total_pages, false) // (pages_crawled, timeout_reached)
+            }
+
+            // Crawl failed with error
+            Ok(Err(e)) => {
+                let error_msg = format!("Crawl failed: {e}");
+                self.session_manager
+                    .update_status(&crawl_id, CrawlStatus::Failed {
+                        error: error_msg.clone(),
+                    })
+                    .await;
+
+                return Err(McpError::Other(anyhow::anyhow!("{}", error_msg)));
+            }
         };
+
+        let (pages_crawled, timeout_reached) = crawl_result;
+        let elapsed_seconds = start_time.elapsed().as_secs_f64();
+
+        // 14. Build comprehensive response with file listing
+        let files = Self::list_crawled_files(&output_dir, None).await?;
+        let file_types = Self::get_file_types(&files);
+
+        let mut contents = Vec::new();
+
+        // Content[0]: Human summary (ANSI formatted)
+        let timeout_marker = if timeout_reached { " (⏱️  TIMEOUT)" } else { "" };
         let summary = format!(
-            "\x1b[32m🕷️ Crawl Started: {}\x1b[0m\nℹ️  Session: {} · Max pages: {} · Depth: {}",
+            "\x1b[32m✅ Crawl Completed{}\x1b[0m\n\n\
+             URL: {}\n\
+             Pages: {} · Duration: {:.1}s\n\
+             Output: {}\n\
+             Files: {} ({:?})",
+            timeout_marker,
             args.url,
-            crawl_id,
-            max_pages_display,
-            args.max_depth
+            pages_crawled,
+            elapsed_seconds,
+            output_dir.display(),
+            files.len(),
+            file_types
         );
         contents.push(Content::text(summary));
-        
-        // Content[1]: Machine-readable metadata
+
+        // Content[1]: Machine-readable JSON
         let metadata = json!({
             "crawl_id": crawl_id,
-            "status": "running",
+            "summary": format!("Crawled {} pages from {}", pages_crawled, args.url),
+            "pages_crawled": pages_crawled,
             "output_dir": output_dir.to_string_lossy(),
+            "indexed": args.enable_search,
+            "elapsed_seconds": elapsed_seconds,
+            "timeout_reached": timeout_reached,
+            "file_types": file_types,
+            "files": files,
             "config": {
                 "url": args.url,
                 "max_depth": args.max_depth,
                 "max_pages": args.limit,
-                "crawl_rate_rps": args.crawl_rate_rps,
-                "enable_search": args.enable_search,
-                "save_markdown": args.save_markdown,
-                "save_screenshots": args.save_screenshots
-            },
-            "message": "Background crawl started successfully"
+                "timeout_seconds": args.timeout_seconds
+            }
         });
-        let json_str = serde_json::to_string_pretty(&metadata)
-            .unwrap_or_else(|_| "{}".to_string());
-        contents.push(Content::text(json_str));
-        
+        contents.push(Content::text(serde_json::to_string_pretty(&metadata)?));
+
         Ok(contents)
     }
 

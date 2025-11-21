@@ -1,32 +1,24 @@
 //! MCP (Model Context Protocol) Tools for Web Crawling
 //!
-//! This module provides three production-ready MCP tools that enable LLMs to autonomously
-//! crawl websites, monitor progress, and search crawled documentation using Tantivy
-//! full-text search.
+//! This module provides TWO production-ready MCP tools that enable LLMs to autonomously
+//! crawl websites and search crawled documentation using Tantivy full-text search.
 //!
 //! ## Tools
 //!
-//! ### `start_crawl`
-//! Initiates a background web crawl with automatic search indexing. Returns immediately
-//! with a `crawl_id` for status tracking.
+//! ### `scrape_url` (Long-Running)
+//! Executes a complete web crawl that blocks until finished, returning comprehensive
+//! results. This replaces the old polling pattern (start_crawl + get_crawl_results).
 //!
 //! **Features:**
-//! - Background processing (non-blocking)
+//! - Long-running execution (blocks until completion or timeout)
 //! - Automatic Tantivy search indexing
 //! - Rate limiting (default 2 req/sec)
 //! - Multiple output formats: Markdown, HTML, JSON
 //! - Screenshot capture support
+//! - Configurable timeout (default 600s = 10 minutes)
+//! - Partial results on timeout
 //!
-//! ### `get_crawl_results`
-//! Checks crawl status and retrieves progress information or completion summary.
-//! Supports both active crawls (by `crawl_id`) and completed crawls (by `output_dir`).
-//!
-//! **Features:**
-//! - Real-time progress tracking
-//! - File listing for completed crawls
-//! - Manifest-based historical queries
-//!
-//! ### `search_crawl_results`
+//! ### `scrape_search_results`
 //! Full-text search across crawled documentation with advanced query syntax.
 //!
 //! **Query Types:**
@@ -88,9 +80,8 @@
 //!
 //! ## Workflow
 //!
-//! 1. **Start Crawl**: Call `start_crawl` with target URL and options → returns `crawl_id`
-//! 2. **Monitor Progress**: Poll `get_crawl_results` with `crawl_id` → returns status/progress
-//! 3. **Search Results**: Call `search_crawl_results` with query → returns ranked results
+//! 1. **Crawl Website**: Call `scrape_url` with target URL and options → blocks until complete, returns full results
+//! 2. **Search Results**: Call `scrape_search_results` with `crawl_id` or `output_dir` → returns ranked results
 //!
 //! ## Output Directory Structure
 //!
@@ -124,7 +115,6 @@
 //!
 //! Handle errors appropriately in your MCP server implementation.
 
-pub mod get_crawl_results;
 pub mod manager;
 pub mod search_crawl_results;
 pub mod start_crawl;
@@ -140,7 +130,6 @@ pub use manager::{CrawlSessionManager, ManifestManager, SearchEngineCache, url_t
 pub use validation::ErrorContext;
 
 // Re-export tools
-pub use get_crawl_results::ScrapeCheckResultsTool;
 pub use search_crawl_results::ScrapeSearchResultsTool;
 pub use start_crawl::ScrapeUrlTool;
 pub use web_search::WebSearchTool;
