@@ -59,7 +59,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 html-escape = "0.2"
 regex = "1"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 chromiumoxide = { version = "0.7", features = ["tokio-runtime", "bytes", "_fetcher-native-tokio"], default-features = false }
 chromiumoxide_cdp = { version = "0.7" }
 chromiumoxide_types = { version = "0.7" }
