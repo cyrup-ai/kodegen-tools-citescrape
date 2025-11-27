@@ -200,6 +200,44 @@ pub fn should_visit_url(url: &str, config: &CrawlConfig) -> bool {
         }
     }
 
+    // Path validation: ensure URL path is beneath the start URL's path
+    // Only validate path boundaries when on the same host or subdomain
+    // (external domains are handled by allow_external_domains flag)
+    if url_host == start_host || (config.allow_subdomains() && url_host.ends_with(start_host)) {
+        let url_path = parsed_url.path();
+        let start_path = start_url.path();
+
+        // Normalize the start path by removing trailing slashes
+        // (unless it's the root path "/")
+        let normalized_start_path = if start_path == "/" {
+            start_path
+        } else {
+            start_path.trim_end_matches('/')
+        };
+
+        // Check if URL path is beneath the start path
+        // Allow: exact match, or child path (starting with start_path + "/")
+        let path_allowed = if normalized_start_path == "/" {
+            // Root path: allow all paths on this domain
+            true
+        } else if url_path == normalized_start_path {
+            // Exact match (e.g., "/docs" matches "/docs")
+            true
+        } else if url_path.starts_with(&format!("{}/", normalized_start_path)) {
+            // Child path (e.g., "/docs/api" starts with "/docs/")
+            true
+        } else if url_path == format!("{}/", normalized_start_path) {
+            // Exact match with trailing slash (e.g., "/docs/" matches "/docs")
+            true
+        } else {
+            false
+        };
+
+        if !path_allowed {
+            return false;
+        }
+    }
+
     // Check excluded_patterns using pre-compiled regexes
     // Patterns are compiled once at config creation to avoid hot-path compilation
     for regex in config.excluded_patterns_compiled() {
