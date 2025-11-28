@@ -7,11 +7,6 @@ use super::builder::CrawlConfigBuilder;
 
 // Methods available for all states after required fields are set
 impl<State> CrawlConfigBuilder<State> {
-    pub fn target_url(mut self, url: impl Into<String>) -> Self {
-        self.target_url = Some(url.into());
-        self
-    }
-
     #[must_use]
     pub fn save_screenshots(mut self, save: bool) -> Self {
         self.save_screenshots = save;

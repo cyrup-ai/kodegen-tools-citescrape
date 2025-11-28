@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
-use url::Url;
 
 use super::crawl_types::{CrawlError, Crawler};
 use crate::config::CrawlConfig;
 use crate::content_saver::{self};
+use crate::imurl::ImUrl;
 use crate::page_extractor::link_rewriter::LinkRewriter;
 use crate::runtime::CrawlRequest;
 
@@ -147,48 +147,38 @@ pub fn extract_valid_urls(
 ) -> Vec<String> {
     links
         .iter()
-        .filter(|link| {
-            // Skip external links unless explicitly allowed
-            if link.is_external && !config.allow_external_domains() {
-                return false;
-            }
-
-            // Check if URL should be visited based on config
-            should_visit_url(&link.url, config)
-        })
+        .filter(|link| should_visit_url(&link.url, config))
         .map(|link| link.url.clone())
         .collect()
 }
 
 #[must_use]
 pub fn should_visit_url(url: &str, config: &CrawlConfig) -> bool {
-    let parsed_url = match Url::parse(url) {
-        Ok(parsed_url) => parsed_url,
+    // Use ImUrl for URL parsing (existing infrastructure)
+    let parsed_url = match ImUrl::parse(url) {
+        Ok(u) => u,
         Err(_) => return false,
     };
 
-    let start_url = match Url::parse(config.start_url()) {
-        Ok(parsed_start_url) => parsed_start_url,
+    let start_url = match ImUrl::parse(config.start_url()) {
+        Ok(u) => u,
         Err(_) => return false,
     };
 
+    // Scheme must match
     if parsed_url.scheme() != start_url.scheme() {
         return false;
     }
 
-    let url_host = parsed_url.host_str().unwrap_or_default();
-    let start_host = start_url.host_str().unwrap_or_default();
+    // Host must match exactly (no subdomains, no external domains in real usage)
+    let url_host = parsed_url.host().unwrap_or_default();
+    let start_host = start_url.host().unwrap_or_default();
 
-    // Check basic host matching
-    let host_allowed = url_host == start_host
-        || config.allow_subdomains() && url_host.ends_with(start_host)
-        || config.allow_external_domains();
-
-    if !host_allowed {
-        return false;
+    if url_host != start_host {
+        return false;  // Reject different hosts immediately
     }
 
-    // Check allowed_domains list if configured
+    // Check allowed_domains list if configured (rare, but keep for compatibility)
     if let Some(allowed_domains) = config.allowed_domains()
         && !allowed_domains.is_empty()
     {
@@ -200,53 +190,35 @@ pub fn should_visit_url(url: &str, config: &CrawlConfig) -> bool {
         }
     }
 
-    // Path validation: ensure URL path is beneath the start URL's path
-    // Only validate path boundaries when on the same host or subdomain
-    // (external domains are handled by allow_external_domains flag)
-    if url_host == start_host || (config.allow_subdomains() && url_host.ends_with(start_host)) {
-        let url_path = parsed_url.path();
-        let start_path = start_url.path();
+    // PATH VALIDATION - MANDATORY for same-host URLs
+    // Query params and fragments are automatically ignored by ImUrl.path()
+    let url_path = parsed_url.path();
+    let start_path = start_url.path();
 
-        // Normalize the start path by removing trailing slashes
-        // (unless it's the root path "/")
-        let normalized_start_path = if start_path == "/" {
-            start_path
-        } else {
-            start_path.trim_end_matches('/')
-        };
+    // Normalize BOTH paths for consistent comparison
+    let norm_url_path = url_path.trim_end_matches('/');
+    let norm_start_path = start_path.trim_end_matches('/');
 
-        // Check if URL path is beneath the start path
-        // Allow: exact match, or child path (starting with start_path + "/")
-        let path_allowed = if normalized_start_path == "/" {
-            // Root path: allow all paths on this domain
-            true
-        } else if url_path == normalized_start_path {
-            // Exact match (e.g., "/docs" matches "/docs")
-            true
-        } else if url_path.starts_with(&format!("{}/", normalized_start_path)) {
-            // Child path (e.g., "/docs/api" starts with "/docs/")
-            true
-        } else if url_path == format!("{}/", normalized_start_path) {
-            // Exact match with trailing slash (e.g., "/docs/" matches "/docs")
-            true
-        } else {
-            false
-        };
+    // Root path allows all paths on this domain
+    if norm_start_path.is_empty() || norm_start_path == "/" {
+        // Continue to excluded patterns check below
+    } else {
+        // URL must be exact match or child of start path
+        let path_allowed = norm_url_path == norm_start_path
+            || norm_url_path.starts_with(&format!("{}/", norm_start_path));
 
         if !path_allowed {
-            return false;
+            return false;  // REJECT - outside path scope
         }
     }
 
-    // Check excluded_patterns using pre-compiled regexes
-    // Patterns are compiled once at config creation to avoid hot-path compilation
+    // Check excluded patterns
     for regex in config.excluded_patterns_compiled() {
         if regex.is_match(url) {
             return false;
         }
     }
 
-    // Also check for simple string matching if original patterns exist
     if let Some(excluded_patterns) = config.excluded_patterns() {
         for pattern in excluded_patterns {
             if url.contains(pattern) {

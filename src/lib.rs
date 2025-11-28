@@ -37,13 +37,15 @@ pub use mcp::{
     ActiveCrawlSession,
     ConfigSummary,
     CrawlManifest,
+    CrawlStatus,
     // Managers
     CrawlSessionManager,
-    CrawlStatus,
     ManifestManager,
     SearchEngineCache,
+    // Registry (NEW)
+    CrawlRegistry,
+    CrawlSession,
     // Tools
-    ScrapeSearchResultsTool,
     ScrapeUrlTool,
     WebSearchTool,
     // Utilities
@@ -135,27 +137,25 @@ pub async fn start_server(
             let mut prompt_router = PromptRouter::new();
             let managers = Managers::new();
 
-            // Create three managers (all local instances)
-            let session_manager = Arc::new(crate::CrawlSessionManager::new());
+            // Create managers
             let engine_cache = Arc::new(crate::SearchEngineCache::new());
             let browser_manager = Arc::new(crate::BrowserManager::new());
+
+            // Create crawl registry (NEW - replaces CrawlSessionManager)
+            let crawl_registry = Arc::new(crate::CrawlRegistry::new(engine_cache.clone()));
 
             // Register browser manager for shutdown (closes Chrome)
             managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
 
-            // Register all 3 citescrape tools
+            // Register tools
+            // Register unified scrape_url tool with registry
             (tool_router, prompt_router) = register_tool(
                 tool_router,
                 prompt_router,
-                crate::ScrapeUrlTool::new(session_manager.clone(), engine_cache.clone()),
+                crate::ScrapeUrlTool::new(crawl_registry.clone()),
             );
 
-            (tool_router, prompt_router) = register_tool(
-                tool_router,
-                prompt_router,
-                crate::ScrapeSearchResultsTool::new(session_manager.clone(), engine_cache.clone()),
-            );
-
+            // Keep web_search tool (unchanged)
             (tool_router, prompt_router) = register_tool(
                 tool_router,
                 prompt_router,
@@ -163,7 +163,6 @@ pub async fn start_server(
             );
 
             // CRITICAL: Start cleanup tasks after all tools are registered
-            session_manager.start_cleanup_task();
             engine_cache.start_cleanup_task();
 
             Ok(RouterSet::new(tool_router, prompt_router, managers))

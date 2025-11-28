@@ -2,7 +2,7 @@ mod common;
 
 use anyhow::{Context, Result};
 use kodegen_mcp_client::responses::StartCrawlResponse;
-use kodegen_mcp_schema::citescrape::{SCRAPE_URL, SCRAPE_CHECK_RESULTS, SCRAPE_SEARCH_RESULTS, WEB_SEARCH};
+use kodegen_mcp_schema::citescrape::{SCRAPE_URL, WEB_SEARCH};
 use serde_json::json;
 use tokio::time::{Duration, sleep};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -33,7 +33,7 @@ async fn wait_for_crawl_completion(
     loop {
         let result = client
             .call_tool(
-                SCRAPE_CHECK_RESULTS,
+                SCRAPE_URL,  // Updated to unified tool
                 json!({
                     "crawl_id": crawl_id,
                     "include_progress": false
@@ -136,7 +136,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let result = client
             .call_tool(
-                SCRAPE_CHECK_RESULTS,
+                SCRAPE_URL,  // Updated to unified tool
                 json!({
                     "crawl_id": crawl_id,
                     "include_progress": true,
@@ -218,7 +218,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let result = client
             .call_tool(
-                SCRAPE_CHECK_RESULTS,
+                SCRAPE_URL,  // Updated to unified tool
                 json!({
                     "crawl_id": crawl_id,
                     "include_progress": false,
@@ -245,7 +245,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let result = client
             .call_tool(
-                SCRAPE_SEARCH_RESULTS,
+                SCRAPE_URL,  // Updated to unified tool
                 json!({
                     "crawl_id": crawl_id,
                     "query": "ratatui",
@@ -347,7 +347,7 @@ async fn run_citescrape_example(client: &common::LoggingClient) -> Result<()> {
 
         let _result = client
             .call_tool(
-                SCRAPE_CHECK_RESULTS,
+                SCRAPE_URL,  // Updated to unified tool
                 json!({
                     "crawl_id": crawl_id_2,
                     "include_progress": false,

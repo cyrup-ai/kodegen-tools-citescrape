@@ -29,28 +29,26 @@ async fn main() -> Result<()> {
         let managers = Managers::new();
 
         // Create managers
-        let session_manager = Arc::new(kodegen_tools_citescrape::CrawlSessionManager::new());
         let engine_cache = Arc::new(kodegen_tools_citescrape::SearchEngineCache::new());
         let browser_manager = Arc::new(kodegen_tools_citescrape::BrowserManager::new());
+
+        // Create crawl registry (NEW - replaces CrawlSessionManager)
+        let crawl_registry = Arc::new(kodegen_tools_citescrape::CrawlRegistry::new(engine_cache.clone()));
 
         // Register browser manager for shutdown (closes Chrome)
         managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
 
-        // Register all 4 citescrape tools
+        // Register tools
         use kodegen_tools_citescrape::*;
 
+        // Register unified scrape_url tool with registry
         (tool_router, prompt_router) = register_tool(
             tool_router,
             prompt_router,
-            ScrapeUrlTool::new(session_manager.clone(), engine_cache.clone()),
+            ScrapeUrlTool::new(crawl_registry.clone()),
         );
 
-        (tool_router, prompt_router) = register_tool(
-            tool_router,
-            prompt_router,
-            ScrapeSearchResultsTool::new(session_manager.clone(), engine_cache.clone()),
-        );
-
+        // Keep web_search tool (unchanged)
         (tool_router, prompt_router) = register_tool(
             tool_router,
             prompt_router,
@@ -58,8 +56,6 @@ async fn main() -> Result<()> {
         );
 
         // CRITICAL: Start cleanup tasks after all tools are registered
-        // Pattern from mcp-server/src/common/tool_registry.rs:766-767
-        session_manager.start_cleanup_task();
         engine_cache.start_cleanup_task();
 
         Ok(RouterSet::new(tool_router, prompt_router, managers))

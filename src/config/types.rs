@@ -13,7 +13,6 @@ pub struct CrawlConfig {
     pub(crate) only_html: bool,
     pub(crate) full_resources: bool,
     pub(crate) start_url: String,
-    pub(crate) target_url: String,
     pub(crate) limit: Option<usize>,
     pub(crate) screenshot_quality: u8,
     pub(crate) stealth_mode: bool,
@@ -154,7 +153,6 @@ impl Default for CrawlConfig {
         Self {
             storage_dir: PathBuf::from("./output"),
             start_url: String::new(),
-            target_url: String::new(),
             only_html: false,
             headless: true,
             progressive: false,

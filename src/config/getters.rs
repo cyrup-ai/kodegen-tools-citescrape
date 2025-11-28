@@ -19,11 +19,6 @@ impl CrawlConfig {
     }
 
     #[must_use]
-    pub fn target_url(&self) -> &str {
-        &self.target_url
-    }
-
-    #[must_use]
     pub fn limit(&self) -> Option<usize> {
         self.limit
     }
