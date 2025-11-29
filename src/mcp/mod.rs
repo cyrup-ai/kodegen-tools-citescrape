@@ -85,9 +85,10 @@
 //!
 //! ## Output Directory Structure
 //!
-//! Crawled content is organized as:
+//! Crawled content is organized under `.kodegen/citescrape/` (in git repo) or
+//! `~/.local/share/kodegen/citescrape/` (fallback):
 //! ```text
-//! docs/
+//! ${git_root}/.kodegen/citescrape/
 //! └── ratatui.rs/
 //!     ├── manifest.json          # Crawl metadata
 //!     ├── .search_index/         # Tantivy search index

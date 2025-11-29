@@ -127,4 +127,30 @@ impl CrawlRegistry {
             }))
         }
     }
+
+    /// Cleanup all crawls for a connection (called on connection drop)
+    ///
+    /// Cancels running crawls but preserves output directories at docs/<domain>/
+    pub async fn cleanup_connection(&self, connection_id: &str) -> usize {
+        let mut crawls = self.crawls.lock().await;
+        let to_remove: Vec<(String, u32)> = crawls
+            .keys()
+            .filter(|(conn_id, _)| conn_id == connection_id)
+            .cloned()
+            .collect();
+        
+        let count = to_remove.len();
+        for key in to_remove {
+            if let Some(session) = crawls.remove(&key) {
+                log::debug!(
+                    "Cleaning up crawl {} for connection {} (preserving output directory)",
+                    key.1,
+                    connection_id
+                );
+                // Cancel the crawl if running (output dir is preserved)
+                let _ = session.cancel().await;
+            }
+        }
+        count
+    }
 }

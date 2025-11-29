@@ -4,9 +4,11 @@
 // Managed by kodegend daemon, typically running on port 30445.
 
 use anyhow::Result;
-use kodegen_server_http::{run_http_server, Managers, RouterSet, ShutdownHook, register_tool};
+use kodegen_server_http::{run_http_server, Managers, RouterSet, ShutdownHook, register_tool, ConnectionCleanupFn};
 use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
 use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
 
 // Wrapper to impl ShutdownHook for Arc<BrowserManager>
 struct BrowserManagerWrapper(Arc<kodegen_tools_citescrape::BrowserManager>);
@@ -58,7 +60,22 @@ async fn main() -> Result<()> {
         // CRITICAL: Start cleanup tasks after all tools are registered
         engine_cache.start_cleanup_task();
 
-        Ok(RouterSet::new(tool_router, prompt_router, managers))
+        // Create cleanup callback for connection dropped notification
+        let cleanup: ConnectionCleanupFn = Arc::new(move |connection_id: String| {
+            let registry = crawl_registry.clone();
+            Box::pin(async move {
+                let cleaned = registry.cleanup_connection(&connection_id).await;
+                log::info!(
+                    "Connection {}: cleaned up {} crawl session(s) (output directories preserved)",
+                    connection_id,
+                    cleaned
+                );
+            }) as Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+        });
+
+        let mut router_set = RouterSet::new(tool_router, prompt_router, managers);
+        router_set.connection_cleanup = Some(cleanup);
+        Ok(router_set)
         })
     })
     .await

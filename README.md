@@ -77,7 +77,7 @@ Initiates a background web crawl with automatic search indexing.
 
 **Arguments:**
 - `url` (required): Starting URL to crawl
-- `output_dir` (optional): Directory to save results (default: temp dir)
+- `output_dir` (optional): Directory to save results (default: `${git_root}/.kodegen/citescrape` or `~/.local/share/kodegen/citescrape`)
 - `max_depth` (optional): Maximum link depth (default: 3)
 - `max_pages` (optional): Maximum pages to crawl (default: 100)
 - `follow_external_links` (optional): Crawl external domains (default: false)
