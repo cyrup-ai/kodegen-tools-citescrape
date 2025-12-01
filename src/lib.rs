@@ -169,3 +169,71 @@ pub async fn start_server(
         })
     }).await
 }
+
+/// Start citescrape tools HTTP server using pre-bound listener (TOCTOU-safe)
+///
+/// This variant is used by kodegend to eliminate TOCTOU race conditions
+/// during port cleanup. The listener is already bound to a port.
+///
+/// # Arguments
+/// * `listener` - Pre-bound TcpListener (port already reserved)
+/// * `tls_config` - Optional (cert_path, key_path) for HTTPS
+///
+/// # Returns
+/// ServerHandle for graceful shutdown, or error if startup fails
+pub async fn start_server_with_listener(
+    listener: tokio::net::TcpListener,
+    tls_config: Option<(std::path::PathBuf, std::path::PathBuf)>,
+) -> anyhow::Result<kodegen_server_http::ServerHandle> {
+    use kodegen_server_http::{create_http_server_with_listener, Managers, RouterSet, register_tool};
+    use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let shutdown_timeout = Duration::from_secs(30);
+    let session_keep_alive = Duration::ZERO;  // Infinite keep-alive for MCP sessions
+
+    create_http_server_with_listener(
+        "citescrape",
+        listener,
+        tls_config,
+        shutdown_timeout,
+        session_keep_alive,
+        |_config, _tracker| {
+        Box::pin(async move {
+            let mut tool_router = ToolRouter::new();
+            let mut prompt_router = PromptRouter::new();
+            let managers = Managers::new();
+
+            // Create managers
+            let engine_cache = Arc::new(crate::SearchEngineCache::new());
+            let browser_manager = Arc::new(crate::BrowserManager::new());
+
+            // Create crawl registry (NEW - replaces CrawlSessionManager)
+            let crawl_registry = Arc::new(crate::CrawlRegistry::new(engine_cache.clone()));
+
+            // Register browser manager for shutdown (closes Chrome)
+            managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
+
+            // Register tools
+            // Register unified scrape_url tool with registry
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                crate::ScrapeUrlTool::new(crawl_registry.clone()),
+            );
+
+            // Keep web_search tool (unchanged)
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                crate::WebSearchTool::new(browser_manager.clone()),
+            );
+
+            // CRITICAL: Start cleanup tasks after all tools are registered
+            engine_cache.start_cleanup_task();
+
+            Ok(RouterSet::new(tool_router, prompt_router, managers))
+        })
+    }).await
+}
