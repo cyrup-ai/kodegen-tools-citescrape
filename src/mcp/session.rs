@@ -75,6 +75,10 @@ impl CrawlSession {
             state.start_time = Some(Instant::now());
         }
 
+        // Create unique Chrome user data directory for this crawl session
+        // Using crawl_id ensures profile isolation between concurrent/sequential crawls
+        let chrome_data_dir = std::env::temp_dir().join(format!("kodegen_chrome_{}", self.crawl_id));
+
         // Build crawl config (reuse existing logic from start_crawl.rs)
         let mut config = CrawlConfig {
             storage_dir: self.output_dir.clone(),
@@ -92,6 +96,9 @@ impl CrawlSession {
             crawl_rate_rps: Some(args.crawl_rate_rps),
             ..Default::default()
         };
+
+        // Attach chrome data dir to config for browser profile isolation
+        config = config.with_chrome_data_dir(chrome_data_dir);
 
         // Get or initialize search engine if enabled
         if args.enable_search {
