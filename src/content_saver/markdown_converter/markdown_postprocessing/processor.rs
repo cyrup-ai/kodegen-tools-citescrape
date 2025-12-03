@@ -4,12 +4,53 @@
 
 use super::code_fence_detection::{detect_code_fence, looks_like_code, CodeFence};
 use super::heading_extraction::{extract_heading_level, normalize_heading_level, HEADING_PREFIXES};
+use regex::Regex;
+use std::sync::LazyLock;
+
+// Safety net: Remove duplicated hash symbols in markdown headings
+// Catches patterns like "## # Heading" or "### # Section"
+// This handles edge cases that slip through HTML preprocessing
+static DUPLICATE_HEADING_HASH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^(#{1,6})\s+#\s+")
+        .expect("DUPLICATE_HEADING_HASH: hardcoded regex is valid")
+});
+
+static MALFORMED_HR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^-\s+-+$")
+        .expect("SAFETY: hardcoded regex r\"^-\\s+-+$\" is statically valid")
+});
+
+/// Matches "Section titled" anchor patterns in markdown (fallback safety net)
+/// Removes any remaining anchor links that escaped HTML preprocessing
+/// Pattern: [Section titled "..."](...) with optional newline
+static SECTION_ANCHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\[Section titled "[^"]+"\]\(#[^)]+\)\n?"#)
+        .expect("SECTION_ANCHOR_RE: hardcoded regex is valid")
+});
 
 /// Process markdown headings to normalize heading levels and handle different markdown styles
 pub fn process_markdown_headings(markdown: &str) -> String {
+    // Safety net: Remove any remaining "## # " patterns from markdown
+    // This catches edge cases that escaped HTML preprocessing
+    let markdown = DUPLICATE_HEADING_HASH.replace_all(markdown, "$1 ").to_string();
+
     let lines: Vec<&str> = markdown.lines().collect();
 
-    // Process all lines
+    // FIRST PASS: Fix malformed horizontal rules (- ---------)
+    let mut cleaned_lines = Vec::with_capacity(lines.len());
+    for line in &lines {
+        if MALFORMED_HR.is_match(line.trim()) {
+            // Convert malformed HR to proper markdown HR
+            cleaned_lines.push("---");
+        } else {
+            cleaned_lines.push(*line);
+        }
+    }
+    
+    // Convert back to lines for main processing
+    let lines: Vec<&str> = cleaned_lines.to_vec();
+
+    // SECOND PASS: Process all lines
     let mut processed_lines = Vec::new();
     let mut fence_stack: Option<CodeFence> = None;
 
@@ -45,11 +86,21 @@ pub fn process_markdown_headings(markdown: &str) -> String {
                 let next_line = lines[i + 1];
                 let next_trimmed = next_line.trim();
 
-                if !line.trim().is_empty()
+                // Improved detection: Check for setext underlines
+                // Must be at least 3 characters, all = or all -
+                let is_setext_underline = !next_trimmed.is_empty()
+                    && next_trimmed.len() >= 3
                     && (next_trimmed.chars().all(|c| c == '=')
-                        || next_trimmed.chars().all(|c| c == '-'))
-                    && !next_trimmed.is_empty()
-                {
+                        || next_trimmed.chars().all(|c| c == '-'));
+
+                // Additional check: Previous line should look like heading text
+                // (not empty, not already a heading, reasonable length)
+                let current_trimmed = line.trim();
+                let looks_like_heading_text = !current_trimmed.is_empty()
+                    && !current_trimmed.starts_with('#')
+                    && current_trimmed.len() <= 200;
+
+                if is_setext_underline && looks_like_heading_text {
                     // This is a setext heading - convert to ATX style
                     let level = if next_trimmed.chars().all(|c| c == '=') {
                         1
@@ -58,7 +109,7 @@ pub fn process_markdown_headings(markdown: &str) -> String {
                     };
                     let normalized_level = normalize_heading_level(level);
                     let new_heading =
-                        format!("{}{}", HEADING_PREFIXES[normalized_level - 1], line.trim());
+                        format!("{}{}", HEADING_PREFIXES[normalized_level - 1], current_trimmed);
                     processed_lines.push(new_heading);
                     i += 2; // Skip both the heading line and the underline
                     continue;
@@ -110,5 +161,10 @@ pub fn process_markdown_headings(markdown: &str) -> String {
         );
     }
 
-    processed_lines.join("\n")
+    let result = processed_lines.join("\n");
+
+    // Remove any remaining "Section titled" anchor patterns (safety net)
+    let result = SECTION_ANCHOR_RE.replace_all(&result, "");
+
+    result.to_string()
 }

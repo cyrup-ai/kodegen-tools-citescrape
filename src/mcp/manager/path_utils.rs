@@ -22,7 +22,11 @@ use url::Url;
 /// url_to_output_dir("https://example.com:8080/path", Some("/custom/path"))
 /// // => Ok(PathBuf::from("/custom/path/example.com_8080"))
 /// ```
-pub fn url_to_output_dir(url: &str, base_dir: Option<&str>) -> Result<PathBuf, McpError> {
+pub fn url_to_output_dir(
+    url: &str,
+    base_dir: Option<&str>,
+    client_pwd: Option<&std::path::Path>,
+) -> Result<PathBuf, McpError> {
     let parsed_url =
         Url::parse(url).map_err(|e| McpError::InvalidUrl(format!("Invalid URL '{url}': {e}")))?;
 
@@ -52,13 +56,19 @@ pub fn url_to_output_dir(url: &str, base_dir: Option<&str>) -> Result<PathBuf, M
 
     let output_dir = base.join(safe_domain);
 
-    // Convert to absolute path to avoid CWD issues in indexing
+    // Convert to absolute path using client's PWD (if available)
     let output_dir = if output_dir.is_absolute() {
         output_dir
     } else {
-        std::env::current_dir()
-            .map_err(|e| McpError::InvalidUrl(format!("Failed to get current directory: {e}")))?
-            .join(&output_dir)
+        // Use client's pwd if available (HTTP MCP case), fallback to server's pwd (library/test case)
+        let base_path = if let Some(pwd) = client_pwd {
+            pwd.to_path_buf()
+        } else {
+            // Fallback for non-HTTP clients (direct library usage, tests, legacy)
+            std::env::current_dir()
+                .map_err(|e| McpError::InvalidUrl(format!("Failed to get current directory: {e}")))?
+        };
+        base_path.join(&output_dir)
     };
 
     Ok(output_dir)

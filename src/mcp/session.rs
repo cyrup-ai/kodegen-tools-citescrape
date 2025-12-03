@@ -5,6 +5,7 @@ use crate::Crawler;  // Import the Crawler trait
 use crate::config::CrawlConfig;
 use crate::mcp::manager::SearchEngineCache;
 use anyhow::Result;
+use kodegen_mcp_schema::citescrape::{ScrapeSearchResult, ScrapeUrlOutput};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -62,11 +63,11 @@ impl CrawlSession {
         &self,
         args: kodegen_mcp_schema::citescrape::ScrapeUrlArgs,
         await_completion_ms: u64,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<ScrapeUrlOutput> {
         use std::time::Instant;
-        
+
         let url = args.url.ok_or_else(|| anyhow::anyhow!("url required for CRAWL action"))?;
-        
+
         // Update state to running
         {
             let mut state = self.state.lock().await;
@@ -112,7 +113,7 @@ impl CrawlSession {
         let event_bus = Arc::new(crate::crawl_events::CrawlEventBus::new(1000));
         let state_clone = self.state.clone();
         let mut event_receiver = event_bus.subscribe();
-        
+
         // Spawn progress tracker
         tokio::spawn(async move {
             let mut page_count = 0;
@@ -138,18 +139,27 @@ impl CrawlSession {
 
         // Handle timeout
         let start = Instant::now();
+        let output_dir_str = self.output_dir.to_string_lossy().to_string();
+
         if await_completion_ms == 0 {
             // Fire-and-forget: spawn and return immediately
             tokio::spawn(async move {
                 let _ = crawl_future.await;
             });
 
-            Ok(serde_json::json!({
-                "status": "background",
-                "crawl": self.crawl_id,
-                "message": "Crawl started in background. Use action=READ to check progress.",
-                "output_dir": self.output_dir,
-            }))
+            Ok(ScrapeUrlOutput {
+                crawl_id: self.crawl_id,
+                status: "background".to_string(),
+                url: Some(url),
+                pages_crawled: 0,
+                pages_queued: 0,
+                output_dir: Some(output_dir_str),
+                elapsed_ms: 0,
+                completed: false,
+                error: None,
+                crawls: None,
+                search_results: None,
+            })
         } else {
             // Wait with timeout
             match timeout(Duration::from_millis(await_completion_ms), crawl_future).await {
@@ -158,13 +168,19 @@ impl CrawlSession {
                     let mut state = self.state.lock().await;
                     state.status = "completed".to_string();
 
-                    Ok(serde_json::json!({
-                        "status": "completed",
-                        "crawl": self.crawl_id,
-                        "pages_crawled": state.pages_crawled,
-                        "output_dir": self.output_dir,
-                        "elapsed_ms": start.elapsed().as_millis(),
-                    }))
+                    Ok(ScrapeUrlOutput {
+                        crawl_id: self.crawl_id,
+                        status: "completed".to_string(),
+                        url: Some(url),
+                        pages_crawled: state.pages_crawled,
+                        pages_queued: 0,
+                        output_dir: Some(output_dir_str),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        completed: true,
+                        error: None,
+                        crawls: None,
+                        search_results: None,
+                    })
                 }
                 Ok(Err(e)) => {
                     // Failed
@@ -177,14 +193,19 @@ impl CrawlSession {
                     // Timeout - return partial results
                     let state = self.state.lock().await;
 
-                    Ok(serde_json::json!({
-                        "status": "timeout",
-                        "crawl": self.crawl_id,
-                        "pages_crawled": state.pages_crawled,
-                        "output_dir": self.output_dir,
-                        "elapsed_ms": start.elapsed().as_millis(),
-                        "message": "Timeout reached. Crawl continues in background. Use action=READ to check progress.",
-                    }))
+                    Ok(ScrapeUrlOutput {
+                        crawl_id: self.crawl_id,
+                        status: "timeout".to_string(),
+                        url: Some(url),
+                        pages_crawled: state.pages_crawled,
+                        pages_queued: 0,
+                        output_dir: Some(output_dir_str),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        completed: false,
+                        error: None,
+                        crawls: None,
+                        search_results: None,
+                    })
                 }
             }
         }
@@ -193,16 +214,22 @@ impl CrawlSession {
     /// Read current crawl state without executing
     ///
     /// **Pattern from:** terminal tool's read_current_state()
-    pub async fn read_current_state(&self) -> Result<serde_json::Value> {
+    pub async fn read_current_state(&self) -> Result<ScrapeUrlOutput> {
         let state = self.state.lock().await;
-        
-        Ok(serde_json::json!({
-            "crawl": self.crawl_id,
-            "status": state.status,
-            "pages_crawled": state.pages_crawled,
-            "current_url": state.current_url,
-            "output_dir": self.output_dir,
-        }))
+
+        Ok(ScrapeUrlOutput {
+            crawl_id: self.crawl_id,
+            status: state.status.clone(),
+            url: state.current_url.clone(),
+            pages_crawled: state.pages_crawled,
+            pages_queued: 0,
+            output_dir: Some(self.output_dir.to_string_lossy().to_string()),
+            elapsed_ms: state.start_time.map_or(0, |t| t.elapsed().as_millis() as u64),
+            completed: state.status == "completed",
+            error: None,
+            crawls: None,
+            search_results: None,
+        })
     }
 
     /// Search indexed content (replaces scrape_search_results tool)
@@ -217,22 +244,22 @@ impl CrawlSession {
         url: Option<String>,
         query: String,
         limit: usize,
-        offset: usize,
+        _offset: usize,
         highlight: bool,
         crawl_args: kodegen_mcp_schema::citescrape::ScrapeUrlArgs,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<ScrapeUrlOutput> {
         use crate::search::query::SearchQueryBuilder;
-        
+
         // Check if search index exists
         let search_index_dir = self.output_dir.join(".search_index");
         if !search_index_dir.join("meta.json").exists() {
             // Auto-crawl if url provided and index doesn't exist
-            if let Some(url) = url {
+            if let Some(ref url) = url {
                 // Crawl with search enabled
                 let mut auto_crawl_args = crawl_args.clone();
                 auto_crawl_args.url = Some(url.clone());
                 auto_crawl_args.enable_search = true;
-                
+
                 self.execute_crawl_with_timeout(auto_crawl_args, 600_000).await?;
             } else {
                 return Err(anyhow::anyhow!(
@@ -255,37 +282,37 @@ impl CrawlSession {
         // Execute search (reuse existing SearchQueryBuilder)
         let search_results = SearchQueryBuilder::new(&query)
             .limit(limit)
-            .offset(offset)
+            .offset(_offset)
             .highlight(highlight)
             .execute_with_metadata((*entry.engine).clone())
             .await?;
 
-        // Format results
-        let results: Vec<serde_json::Value> = search_results
+        // Format results using schema type
+        let results: Vec<ScrapeSearchResult> = search_results
             .results
             .iter()
-            .map(|item| {
-                serde_json::json!({
-                    "url": item.url,
-                    "title": item.title,
-                    "path": item.path,
-                    "excerpt": item.excerpt,
-                    "score": item.score,
-                })
+            .map(|item| ScrapeSearchResult {
+                url: item.url.clone(),
+                title: Some(item.title.clone()),
+                snippet: item.excerpt.clone(),
+                score: item.score,
+                path: Some(item.path.clone()),
             })
             .collect();
 
-        Ok(serde_json::json!({
-            "query": query,
-            "total_count": search_results.total_count,
-            "results": results,
-            "pagination": {
-                "offset": offset,
-                "limit": limit,
-                "has_more": search_results.has_more(),
-                "next_offset": search_results.next_offset(),
-            },
-        }))
+        Ok(ScrapeUrlOutput {
+            crawl_id: self.crawl_id,
+            status: "search".to_string(),
+            url,
+            pages_crawled: 0,
+            pages_queued: 0,
+            output_dir: Some(self.output_dir.to_string_lossy().to_string()),
+            elapsed_ms: 0,
+            completed: true,
+            error: None,
+            crawls: None,
+            search_results: Some(results),
+        })
     }
 
     /// Cancel the crawl

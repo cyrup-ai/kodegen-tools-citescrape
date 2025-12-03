@@ -1,5 +1,4 @@
-/// Debug test to understand ImUrl behavior and identify potential normalization issues
-
+//! Debug test to understand ImUrl behavior and identify potential normalization issues
 use kodegen_tools_citescrape::imurl::ImUrl;
 
 #[test]

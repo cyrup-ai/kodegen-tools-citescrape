@@ -1,15 +1,18 @@
 //! HTML preprocessing functionality for markdown conversion.
 //!
-//! This module provides two main functions:
+//! This module provides three main functions:
 //! 1. `extract_main_content` - Intelligently extracts the primary content from HTML
 //! 2. `clean_html_content` - Removes scripts, styles, ads, and other non-content elements
+//! 3. `preprocess_tables` - Normalizes tables by expanding colspan/rowspan and detecting layout tables
 //!
 //! These functions prepare HTML for optimal markdown conversion.
 
 // Submodules
 mod main_content_extraction;
 mod html_cleaning;
+mod table_preprocessing;
 
 // Re-export public API
 pub use main_content_extraction::extract_main_content;
 pub use html_cleaning::clean_html_content;
+pub use table_preprocessing::preprocess_tables;

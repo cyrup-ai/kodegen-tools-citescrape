@@ -1,5 +1,4 @@
-/// Integration test to verify config creation matches MCP tool behavior
-
+//! Integration test to verify config creation matches MCP tool behavior
 use kodegen_tools_citescrape::config::CrawlConfig;
 use kodegen_tools_citescrape::crawl_engine::should_visit_url;
 

@@ -180,7 +180,10 @@ pub async fn process_single_page(
 
     // Save markdown if requested
     if ctx.config.save_markdown() {
-        let conversion_options = ConversionOptions::default();
+        let conversion_options = ConversionOptions {
+            base_url: Some(item.url.clone()),
+            ..ConversionOptions::default()
+        };
 
         let processed_markdown =
             match convert_html_to_markdown(&page_data.content, &conversion_options).await {

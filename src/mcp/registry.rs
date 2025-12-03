@@ -4,6 +4,7 @@
 
 use crate::mcp::session::CrawlSession;
 use crate::mcp::manager::SearchEngineCache;
+use kodegen_mcp_schema::citescrape::{CrawlSnapshot, ScrapeUrlOutput};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -72,31 +73,39 @@ impl CrawlRegistry {
     pub async fn list_all_crawls(
         &self,
         connection_id: &str,
-    ) -> Result<serde_json::Value, anyhow::Error> {
+    ) -> Result<ScrapeUrlOutput, anyhow::Error> {
         let crawls = self.crawls.lock().await;
         let mut snapshots = Vec::new();
 
         for ((conn_id, crawl_num), session) in crawls.iter() {
             if conn_id == connection_id {
                 let state = session.get_current_state().await?;
-                snapshots.push(serde_json::json!({
-                    "crawl": crawl_num,
-                    "output_dir": state.output_dir,
-                    "status": state.status,
-                    "pages_crawled": state.pages_crawled,
-                    "current_url": state.current_url,
-                }));
+                snapshots.push(CrawlSnapshot {
+                    crawl_id: *crawl_num,
+                    status: state.status.clone(),
+                    url: state.current_url.clone(),
+                    pages_crawled: state.pages_crawled,
+                    elapsed_ms: 0,
+                });
             }
         }
 
         // Sort by crawl ID
-        snapshots.sort_by_key(|v| v["crawl"].as_u64().unwrap_or(0));
+        snapshots.sort_by_key(|s| s.crawl_id);
 
-        Ok(serde_json::json!({
-            "connection_id": connection_id,
-            "total_crawls": snapshots.len(),
-            "crawls": snapshots,
-        }))
+        Ok(ScrapeUrlOutput {
+            crawl_id: 0,
+            status: "list".to_string(),
+            url: None,
+            pages_crawled: 0,
+            pages_queued: 0,
+            output_dir: None,
+            elapsed_ms: 0,
+            completed: true,
+            error: None,
+            crawls: Some(snapshots),
+            search_results: None,
+        })
     }
 
     /// Kill a crawl and cleanup all resources
@@ -104,27 +113,43 @@ impl CrawlRegistry {
     /// Pattern from: terminal/registry.rs:81-104
     pub async fn kill_crawl(
         &self,
-        connection_id: &str,
+        _connection_id: &str,
         crawl_id: u32,
-    ) -> Result<serde_json::Value, anyhow::Error> {
-        let key = (connection_id.to_string(), crawl_id);
+    ) -> Result<ScrapeUrlOutput, anyhow::Error> {
+        let key = (_connection_id.to_string(), crawl_id);
         let mut crawls = self.crawls.lock().await;
 
         if let Some(session) = crawls.remove(&key) {
             // Cancel the crawl if running
             session.cancel().await?;
 
-            Ok(serde_json::json!({
-                "status": "killed",
-                "crawl": crawl_id,
-                "connection_id": connection_id,
-            }))
+            Ok(ScrapeUrlOutput {
+                crawl_id,
+                status: "killed".to_string(),
+                url: None,
+                pages_crawled: 0,
+                pages_queued: 0,
+                output_dir: None,
+                elapsed_ms: 0,
+                completed: true,
+                error: None,
+                crawls: None,
+                search_results: None,
+            })
         } else {
-            Ok(serde_json::json!({
-                "status": "not_found",
-                "crawl": crawl_id,
-                "connection_id": connection_id,
-            }))
+            Ok(ScrapeUrlOutput {
+                crawl_id,
+                status: "not_found".to_string(),
+                url: None,
+                pages_crawled: 0,
+                pages_queued: 0,
+                output_dir: None,
+                elapsed_ms: 0,
+                completed: true,
+                error: Some(format!("Crawl {} not found", crawl_id)),
+                crawls: None,
+                search_results: None,
+            })
         }
     }
 

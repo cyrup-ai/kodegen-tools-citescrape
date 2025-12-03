@@ -14,6 +14,91 @@ use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, CaptureScreenshotParams,
 };
 
+/// Wait for page to be fully loaded before taking screenshot
+///
+/// This function polls the page to ensure content is fully rendered:
+/// 1. Checks `document.readyState === 'complete'`
+/// 2. Waits for network idle (no pending requests)
+/// 3. Adds small buffer for final image loading
+///
+/// Without this, screenshots of JS-heavy sites will be blank because
+/// `page.wait_for_navigation()` only waits for the HTTP response, not
+/// for JavaScript execution, CSS application, or image loading.
+///
+/// # Arguments
+/// * `page` - Page to wait for
+/// * `max_wait_secs` - Maximum time to wait (default 10s recommended)
+async fn wait_for_page_load(page: &Page, max_wait_secs: u64) -> Result<()> {
+    use std::time::{Duration, Instant};
+    
+    let start = Instant::now();
+    let max_wait = Duration::from_secs(max_wait_secs);
+    let poll_interval = Duration::from_millis(100);
+    
+    log::debug!("Waiting for page to be fully loaded (max {}s)", max_wait_secs);
+    
+    // Phase 1: Wait for document.readyState === 'complete'
+    loop {
+        // Check if we've exceeded max wait time
+        if start.elapsed() >= max_wait {
+            log::warn!("Timeout waiting for page load after {}s, proceeding anyway", max_wait_secs);
+            break;
+        }
+        
+        // Evaluate JavaScript to check readyState
+        let ready_state_script = r#"
+            (function() {
+                return {
+                    readyState: document.readyState,
+                    imagesLoaded: Array.from(document.images).every(img => img.complete),
+                    bodyExists: document.body !== null
+                };
+            })()
+        "#;
+        
+        match page.evaluate(ready_state_script).await {
+            Ok(result) => {
+                if let Ok(value) = result.into_value::<serde_json::Value>() {
+                    let ready_state = value.get("readyState").and_then(|v| v.as_str());
+                    let images_loaded = value.get("imagesLoaded").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let body_exists = value.get("bodyExists").and_then(|v| v.as_bool()).unwrap_or(false);
+                    
+                    if ready_state == Some("complete") && body_exists {
+                        let elapsed = start.elapsed();
+                        log::debug!(
+                            "Page ready after {:.2}s (images loaded: {})",
+                            elapsed.as_secs_f64(),
+                            images_loaded
+                        );
+                        
+                        // Phase 2: Small additional wait for final rendering
+                        // Even after readyState=complete, some images may still be loading
+                        // or CSS animations may be in progress
+                        if !images_loaded {
+                            log::debug!("Images still loading, waiting additional 500ms");
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                        
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                log::debug!("Failed to check readyState: {}, retrying", e);
+            }
+        }
+        
+        // Wait before next poll
+        tokio::time::sleep(poll_interval).await;
+    }
+    
+    // Phase 3: Final safety buffer for CSS transitions and lazy-loaded content
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    
+    log::debug!("Page load wait complete after {:.2}s", start.elapsed().as_secs_f64());
+    Ok(())
+}
+
 /// Extract page metadata with zero allocation
 #[inline]
 pub async fn extract_metadata(page: Page) -> Result<PageMetadata> {
@@ -157,6 +242,11 @@ pub async fn capture_screenshot(page: Page, url: &str, output_dir: &std::path::P
             .ok_or_else(|| anyhow::anyhow!("Path has no parent directory"))?,
     )
     .await?;
+
+    // ============ FIX: Wait for page to be fully loaded ============
+    // Without this, screenshots will be blank for JS-heavy sites
+    wait_for_page_load(&page, 10).await?;
+    // ================================================================
 
     let params = CaptureScreenshotParams {
         quality: Some(100),

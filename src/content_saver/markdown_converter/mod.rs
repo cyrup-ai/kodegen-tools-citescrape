@@ -46,12 +46,13 @@ use anyhow::Result;
 mod html_preprocessing;
 mod html_to_markdown;
 mod markdown_postprocessing;
+mod custom_handlers;
 
 // Re-export sub-modules for advanced usage
 pub use html_preprocessing::{clean_html_content, extract_main_content};
 pub use html_to_markdown::MarkdownConverter;
 pub use markdown_postprocessing::{
-    extract_heading_level, normalize_heading_level, process_markdown_headings,
+    extract_heading_level, normalize_heading_level, normalize_whitespace, process_markdown_headings,
 };
 
 /// Configuration options for HTML to Markdown conversion
@@ -89,6 +90,26 @@ pub struct ConversionOptions {
     /// Converts setext-style headings to ATX style, removes closing hashes,
     /// normalizes heading levels, and handles code fences properly.
     pub process_headings: bool,
+
+    /// Normalize whitespace and blank lines (default: true)
+    ///
+    /// When enabled, removes trailing whitespace, collapses multiple blank lines,
+    /// ensures proper spacing around structural elements, and trims document edges.
+    /// Preserves all whitespace inside code blocks.
+    pub normalize_whitespace: bool,
+
+    /// Base URL for resolving relative links (default: None)
+    ///
+    /// When provided, relative URLs in links will be converted to absolute URLs
+    /// using RFC 3986 resolution rules via url::Url::join().
+    ///
+    /// Examples:
+    /// - Base: "https://example.com/docs/guide.html"
+    /// - "/api" → "https://example.com/api"
+    /// - "../concepts/intro" → "https://example.com/concepts/intro"
+    /// - "#section" → "#section" (preserved as-is)
+    /// - "https://other.com" → "https://other.com" (preserved as-is)
+    pub base_url: Option<String>,
 }
 
 impl Default for ConversionOptions {
@@ -101,6 +122,8 @@ impl Default for ConversionOptions {
             preserve_images: true,
             code_highlighting: true,
             process_headings: true,
+            normalize_whitespace: true,
+            base_url: None,
         }
     }
 }
@@ -126,6 +149,8 @@ impl ConversionOptions {
             preserve_images: true,
             code_highlighting: false,
             process_headings: false,
+            normalize_whitespace: false,
+            base_url: None,
         }
     }
 
@@ -140,6 +165,8 @@ impl ConversionOptions {
             preserve_images: false,
             code_highlighting: true,
             process_headings: true,
+            normalize_whitespace: true,
+            base_url: None,
         }
     }
 }
@@ -225,6 +252,19 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
         main_html
     };
 
+    // Stage 2.5: Preprocess tables (NEW - always enabled when preserve_tables is true)
+    let preprocessed_html = if options.preserve_tables {
+        match html_preprocessing::preprocess_tables(&clean_html) {
+            Ok(processed) => processed,
+            Err(e) => {
+                tracing::warn!("Table preprocessing failed: {}, using unprocessed HTML", e);
+                clean_html
+            }
+        }
+    } else {
+        clean_html
+    };
+
     // Stage 3: Convert to Markdown
     // The MarkdownConverter has built-in fallback to html2md::parse_html,
     // so we don't need to handle that here
@@ -234,13 +274,27 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
         .with_preserve_images(options.preserve_images)
         .with_code_highlighting(options.code_highlighting);
 
-    let markdown = converter.convert_sync(&clean_html)?;
+    let markdown = converter.convert_sync(&preprocessed_html)?;
+
+    // Stage 3.5: Process markdown links (convert relative URLs to absolute)
+    let markdown = if let Some(base_url) = &options.base_url {
+        html_to_markdown::process_markdown_links(&markdown, base_url)
+    } else {
+        markdown
+    };
 
     // Stage 4: Process markdown headings (with passthrough if disabled)
-    let final_markdown = if options.process_headings {
+    let processed_markdown = if options.process_headings {
         process_markdown_headings(&markdown)
     } else {
         markdown
+    };
+
+    // Stage 5: Normalize whitespace (with passthrough if disabled)
+    let final_markdown = if options.normalize_whitespace {
+        normalize_whitespace(&processed_markdown)
+    } else {
+        processed_markdown
     };
 
     Ok(final_markdown)
@@ -429,6 +483,8 @@ mod tests {
             preserve_images: false,
             code_highlighting: false,
             process_headings: false,
+            normalize_whitespace: false,
+            base_url: None,
         };
 
         let html = "<html><body><h1>Test</h1><a href='#'>Link</a></body></html>";

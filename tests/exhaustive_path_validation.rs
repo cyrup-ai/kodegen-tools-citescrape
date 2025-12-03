@@ -1,8 +1,7 @@
-/// Exhaustive path validation testing to verify crawl scope enforcement
-/// 
-/// This test systematically verifies that path-based scope enforcement works
-/// correctly for real-world URLs like stackoverflow.com
-
+//! Exhaustive path validation testing to verify crawl scope enforcement
+//! 
+//! This test systematically verifies that path-based scope enforcement works
+//! correctly for real-world URLs like stackoverflow.com
 use kodegen_tools_citescrape::config::CrawlConfig;
 use kodegen_tools_citescrape::crawl_engine::should_visit_url;
 

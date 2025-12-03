@@ -3,10 +3,10 @@
 //! Unified tool with 5 actions: CRAWL, READ, LIST, KILL, SEARCH
 //! Pattern based on: packages/kodegen-tools-terminal/src/tool.rs
 
-use kodegen_mcp_schema::citescrape::{ScrapeAction, ScrapeUrlArgs, ScrapeUrlPromptArgs, SCRAPE_URL};
-use kodegen_mcp_tool::{Tool, ToolExecutionContext};
+use kodegen_mcp_schema::citescrape::{ScrapeAction, ScrapeUrlArgs, ScrapeUrlOutput, ScrapeUrlPromptArgs, SCRAPE_URL};
+use kodegen_mcp_tool::{Tool, ToolExecutionContext, ToolResponse};
 use kodegen_mcp_tool::error::McpError;
-use rmcp::model::{Content, PromptArgument, PromptMessage};
+use rmcp::model::{PromptArgument, PromptMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,15 +24,36 @@ impl ScrapeUrlTool {
         Self { registry }
     }
 
-    /// Resolve output directory from args
-    fn resolve_output_dir(args: &ScrapeUrlArgs) -> Result<PathBuf, McpError> {
+    /// Resolve output directory from args using client PWD
+    fn resolve_output_dir(
+        args: &ScrapeUrlArgs,
+        client_pwd: Option<&std::path::Path>,
+    ) -> Result<PathBuf, McpError> {
         if let Some(ref dir) = args.output_dir {
-            Ok(PathBuf::from(dir))
+            // User provided explicit output_dir - still needs pwd resolution if relative
+            if PathBuf::from(dir).is_absolute() {
+                Ok(PathBuf::from(dir))
+            } else {
+                // Resolve relative path using client PWD
+                let base_path = if let Some(pwd) = client_pwd {
+                    pwd.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| McpError::InvalidUrl(format!("Failed to get current directory: {e}")))?
+                };
+                Ok(base_path.join(dir))
+            }
         } else if let Some(ref url) = args.url {
-            url_to_output_dir(url, None)
+            url_to_output_dir(url, None, client_pwd)
         } else {
-            // For READ/SEARCH without url, use a default
-            Ok(PathBuf::from("docs"))
+            // For READ/SEARCH without url, use a default relative path
+            let base_path = if let Some(pwd) = client_pwd {
+                pwd.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| McpError::InvalidUrl(format!("Failed to get current directory: {e}")))?
+            };
+            Ok(base_path.join("docs"))
         }
     }
 }
@@ -78,11 +99,11 @@ impl Tool for ScrapeUrlTool {
         &self,
         args: Self::Args,
         ctx: ToolExecutionContext,
-    ) -> Result<Vec<Content>, McpError> {
+    ) -> Result<ToolResponse<ScrapeUrlOutput>, McpError> {
         let connection_id = ctx.connection_id().unwrap_or("default");
 
         // Dispatch based on action (pattern from terminal/tool.rs:72-120)
-        let result = match args.action {
+        let result: ScrapeUrlOutput = match args.action {
             ScrapeAction::List => {
                 // List all crawls for connection
                 self.registry
@@ -101,7 +122,7 @@ impl Tool for ScrapeUrlTool {
 
             ScrapeAction::Read => {
                 // Read current state without executing
-                let output_dir = Self::resolve_output_dir(&args)?;
+                let output_dir = Self::resolve_output_dir(&args, ctx.pwd())?;
                 let session = self
                     .registry
                     .find_or_create_crawl(connection_id, args.crawl_id, output_dir)
@@ -120,7 +141,7 @@ impl Tool for ScrapeUrlTool {
                     McpError::InvalidArguments("query required for SEARCH action".to_string())
                 })?;
                 
-                let output_dir = Self::resolve_output_dir(&args)?;
+                let output_dir = Self::resolve_output_dir(&args, ctx.pwd())?;
                 let session = self
                     .registry
                     .find_or_create_crawl(connection_id, args.crawl_id, output_dir)
@@ -152,7 +173,7 @@ impl Tool for ScrapeUrlTool {
                     McpError::InvalidUrl(format!("Invalid URL '{}': {}", url, e))
                 })?;
                 
-                let output_dir = Self::resolve_output_dir(&args)?;
+                let output_dir = Self::resolve_output_dir(&args, ctx.pwd())?;
                 let session = self
                     .registry
                     .find_or_create_crawl(connection_id, args.crawl_id, output_dir)
@@ -166,7 +187,15 @@ impl Tool for ScrapeUrlTool {
             }
         };
 
-        Ok(vec![Content::text(serde_json::to_string_pretty(&result)?)])
+        // Build summary from result
+        let summary = format!(
+            "Crawl {} - Status: {} · Pages: {}",
+            result.crawl_id,
+            result.status,
+            result.pages_crawled
+        );
+
+        Ok(ToolResponse::new(summary, result))
     }
 
     fn prompt_arguments() -> Vec<PromptArgument> {

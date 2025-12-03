@@ -1,7 +1,7 @@
 
 [package]
 name = "kodegen_tools_citescrape"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 authors = ["KODEGEN.ᴀɪ"]
@@ -75,6 +75,7 @@ sanitize-filename = "0.6"
 imstr = "0.2"
 url = "2"
 html2md = "0.2"
+markup5ever_rcdom = "0.3"
 flate2 = "1"
 convert_case = "0.8"
 tempfile = "3"

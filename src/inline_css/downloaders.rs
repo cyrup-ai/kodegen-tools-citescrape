@@ -34,6 +34,8 @@ use base64::Engine;
 use futures::StreamExt;
 use reqwest::Client;
 
+use crate::utils::constants::CHROME_USER_AGENT;
+
 /// Configuration for download timeouts and size limits
 #[derive(Debug, Clone)]
 pub struct InlineConfig {
@@ -84,10 +86,13 @@ impl Default for InlineConfig {
 /// Handles HTTP download with streaming, size limits, and timeout.
 /// Called by the public async API.
 async fn download_css_core(url: String, client: Client, config: &InlineConfig) -> Result<String> {
-    // Download with timeout
+    // Download with timeout and browser-like headers
     let response = client
         .get(&url)
         .timeout(config.css_timeout)
+        .header("User-Agent", CHROME_USER_AGENT)
+        .header("Accept", "text/css,*/*;q=0.1")
+        .header("Accept-Encoding", "gzip, deflate, br")
         .send()
         .await
         .context("Failed to download CSS")?;
@@ -153,10 +158,13 @@ async fn download_and_encode_image_core(
     config: &InlineConfig,
     max_inline_size_bytes: Option<usize>,
 ) -> Result<String> {
-    // Download image with timeout
+    // Download image with timeout and browser-like headers
     let response = client
         .get(&url)
         .timeout(config.image_timeout)
+        .header("User-Agent", CHROME_USER_AGENT)
+        .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+        .header("Accept-Encoding", "gzip, deflate, br")
         .send()
         .await
         .context("Failed to download image")?;
@@ -249,10 +257,13 @@ async fn download_and_encode_image_core(
 /// Cleans up SVG content by removing XML declarations and commenting DOCTYPE.
 /// Called by the public async API.
 async fn download_svg_core(url: String, client: Client, config: &InlineConfig) -> Result<String> {
-    // Download with timeout
+    // Download with timeout and browser-like headers
     let response = client
         .get(&url)
         .timeout(config.svg_timeout)
+        .header("User-Agent", CHROME_USER_AGENT)
+        .header("Accept", "image/svg+xml,*/*;q=0.8")
+        .header("Accept-Encoding", "gzip, deflate, br")
         .send()
         .await
         .context("Failed to download SVG")?;
