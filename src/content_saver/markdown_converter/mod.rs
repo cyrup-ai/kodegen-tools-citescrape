@@ -283,6 +283,10 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
         markdown
     };
 
+    // Stage 3.6: Filter collapsed code section indicators
+    // Removes "X collapsed lines" UI artifacts from code viewer widgets
+    let markdown = markdown_postprocessing::filter_collapsed_lines(&markdown);
+
     // Stage 4: Process markdown headings (with passthrough if disabled)
     let processed_markdown = if options.process_headings {
         process_markdown_headings(&markdown)

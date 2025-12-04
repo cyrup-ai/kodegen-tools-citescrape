@@ -42,8 +42,8 @@ static CODE_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[([^\]]+)\]\([^\)]+\)")
-        .expect("SAFETY: hardcoded regex r\"\\[([^\\]]+)\\]\\([^\\)]+\\)\" is statically valid")
+    Regex::new(r"\[([^\]]+)\]\(([^\)]+)\)")
+        .expect("SAFETY: hardcoded regex r\"\\[([^\\]]+)\\]\\(([^\\)]+)\\)\" is statically valid")
 });
 
 static IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -65,6 +65,55 @@ static HTML_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<img[^>]*?\ssrc="([^"]+)"(?:[^>]*?\salt="([^"]*)")?[^>]*?>"#)
         .expect("HTML_IMG_RE: hardcoded regex is valid")
 });
+
+/// Detect if a line contains only empty list markers (bullets with no content)
+/// 
+/// Matches lines that are purely bullet characters (*, -, +) and whitespace.
+/// This catches two patterns:
+/// 
+/// 1. Multiple empty bullets: "* * *", "- - -" 
+/// 2. Single empty bullet: "* ", "- ", "+ "
+/// 
+/// Examples:
+/// - "* * *" → true (multiple empty)
+/// - "* * * *" → true (multiple empty)
+/// - "* " → true (single empty)
+/// - "  *  " → true (single empty with indent)
+/// - "* Valid content" → false (has content)
+/// - "" → false (blank line, not a list)
+/// 
+/// Does NOT match horizontal rules (consecutive chars without spaces):
+/// - "***" → false (horizontal rule, handled by markdown renderer)
+/// - "---" → false (horizontal rule)
+fn is_empty_list_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    
+    // Empty line check
+    if trimmed.is_empty() {
+        return false;
+    }
+    
+    // Pattern 1: Single empty bullet (just a marker with optional whitespace)
+    // Check if the trimmed line is exactly one character and is a list marker
+    if trimmed.len() == 1 {
+        return matches!(trimmed.chars().next(), Some('*' | '-' | '+'));
+    }
+    
+    // Pattern 2: Multiple empty bullets separated by whitespace
+    // Split by whitespace and check if all tokens are single-character markers
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    
+    // Must have at least one token
+    if tokens.is_empty() {
+        return false;
+    }
+    
+    // Check if ALL tokens are single-character list markers
+    // This catches "* * *", "- - -", etc.
+    tokens.iter().all(|token| {
+        token.len() == 1 && matches!(token.chars().next(), Some('*' | '-' | '+'))
+    })
+}
 
 /// Process markdown links by converting relative URLs to absolute URLs
 ///
@@ -260,6 +309,14 @@ impl MarkdownConverter {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Remove empty list lines (lines with only bullets and no content)
+        // This must happen BEFORE list indentation fixes to avoid processing empty lines
+        cleaned = cleaned
+            .lines()
+            .filter(|line| !is_empty_list_line(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         // Fix list indentation
         cleaned = cleaned
             .lines()
@@ -425,12 +482,79 @@ fn convert_remaining_html_images(markdown: &str) -> String {
         // Group 1 (src) is guaranteed to exist because pattern requires it
         let src = caps.get(1)
             .map_or("", |m| m.as_str());
-        
+
         // Group 2 (alt) is optional - use empty string if not present
         let alt = caps.get(2)
             .map_or("", |m| m.as_str());
-        
+
         // Generate markdown: ![alt](src) or ![](src)
         format!("![{alt}]({src})")
     }).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_markdown_links_basic() {
+        let markdown = "[Home](/index.html)";
+        let base = "https://example.com/docs/guide.html";
+        let result = process_markdown_links(markdown, base);
+        assert_eq!(result, "[Home](https://example.com/index.html)");
+    }
+
+    #[test]
+    fn test_process_markdown_links_relative() {
+        let markdown = "[Next](./tutorial.html)";
+        let base = "https://example.com/docs/guide.html";
+        let result = process_markdown_links(markdown, base);
+        assert_eq!(result, "[Next](https://example.com/docs/tutorial.html)");
+    }
+
+    #[test]
+    fn test_process_markdown_links_fragment() {
+        let markdown = "[Section](#heading)";
+        let base = "https://example.com/page.html";
+        let result = process_markdown_links(markdown, base);
+        // Fragment-only links should be preserved as-is
+        assert_eq!(result, "[Section](#heading)");
+    }
+
+    #[test]
+    fn test_process_markdown_links_absolute() {
+        let markdown = "[External](https://other.com/page)";
+        let base = "https://example.com/page.html";
+        let result = process_markdown_links(markdown, base);
+        // Absolute URLs should be preserved as-is
+        assert_eq!(result, "[External](https://other.com/page)");
+    }
+
+    #[test]
+    fn test_process_markdown_links_multiple() {
+        let markdown = "[Home](/) and [About](/about) and [External](https://other.com)";
+        let base = "https://example.com/docs/guide.html";
+        let result = process_markdown_links(markdown, base);
+        assert!(result.contains("[Home](https://example.com/)"));
+        assert!(result.contains("[About](https://example.com/about)"));
+        assert!(result.contains("[External](https://other.com)"));
+    }
+
+    #[test]
+    fn test_link_re_captures_both_text_and_url() {
+        // This test specifically verifies the regex bug fix:
+        // LINK_RE must have 2 capture groups (text and URL)
+        let test_link = "[Click here](/path/to/page)";
+
+        let caps = LINK_RE.captures(test_link).expect("Should match");
+
+        // Group 0 is the full match
+        assert_eq!(caps.get(0).unwrap().as_str(), "[Click here](/path/to/page)");
+
+        // Group 1 should be the link text
+        assert_eq!(caps.get(1).unwrap().as_str(), "Click here");
+
+        // Group 2 should be the URL (this was the bug - group 2 didn't exist)
+        assert_eq!(caps.get(2).unwrap().as_str(), "/path/to/page");
+    }
 }

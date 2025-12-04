@@ -440,40 +440,37 @@ fn preprocess_expressive_code(html: &str) -> Result<String> {
                 .unwrap_or_else(|| String::from("plaintext"))
         };
         
-        // Try Strategy 1: Extract from button[data-code] attribute
-        let code_text = {
+        // Try Strategy 1: Extract from .ec-line elements (preserves newlines!)
+        // This is the primary strategy because it preserves the actual code structure
+        let lines: Vec<String> = match node.select(".ec-line") {
+            Ok(iter) => iter.map(|line_elem| line_elem.text_contents()).collect(),
+            Err(_) => Vec::new(),
+        };
+
+        let code_text = if !lines.is_empty() {
+            log::debug!("Extracted {} lines from .ec-line elements", lines.len());
+            lines.join("\n")
+        } else {
+            // Strategy 2: Fallback to button[data-code] attribute
+            // Note: data-code often has flattened code with spaces instead of newlines,
+            // but it's better than nothing when .ec-line elements aren't available
+            log::debug!("Falling back to data-code attribute extraction");
+
             let button_matches: Vec<_> = node
                 .select("button[data-code]")
                 .map_err(|()| anyhow::anyhow!("Invalid selector: button[data-code]"))?
                 .collect();
-            
+
             button_matches
                 .first()
                 .and_then(|button_elem| {
                     let attrs = button_elem.attributes.borrow();
                     attrs.get("data-code").map(String::from)
                 })
-        };
-        
-        let code_text = if let Some(text) = code_text {
-            log::debug!("Extracted code from data-code attribute (length: {})", text.len());
-            text
-        } else {
-            // Strategy 2: Fallback to .ec-line extraction
-            log::debug!("Falling back to .ec-line text extraction");
-            
-            let lines: Vec<String> = match node.select(".ec-line") {
-                Ok(iter) => iter.map(|line_elem| line_elem.text_contents()).collect(),
-                Err(_) => Vec::new(),
-            };
-            
-            if lines.is_empty() {
-                log::warn!("Failed to extract code from Expressive Code block");
-                String::new()
-            } else {
-                log::debug!("Extracted {} lines from .ec-line elements", lines.len());
-                lines.join("\n")
-            }
+                .unwrap_or_else(|| {
+                    log::warn!("Failed to extract code from Expressive Code block");
+                    String::new()
+                })
         };
         
         // HTML-escape the code text

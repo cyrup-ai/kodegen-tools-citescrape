@@ -20,6 +20,14 @@ static MALFORMED_HR: LazyLock<Regex> = LazyLock::new(|| {
         .expect("SAFETY: hardcoded regex r\"^-\\s+-+$\" is statically valid")
 });
 
+// Remove malformed list markers mixed with heading syntax
+// Catches patterns like "## * * Text" or "### - Content" 
+// This handles edge cases where html2md outputs both heading and list syntax
+static MALFORMED_LIST_HEADING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^(#{1,6})\s+(?:[*\-]\s+)+")
+        .expect("MALFORMED_LIST_HEADING: hardcoded regex is valid")
+});
+
 /// Matches "Section titled" anchor patterns in markdown (fallback safety net)
 /// Removes any remaining anchor links that escaped HTML preprocessing
 /// Pattern: [Section titled "..."](...) with optional newline
@@ -33,6 +41,10 @@ pub fn process_markdown_headings(markdown: &str) -> String {
     // Safety net: Remove any remaining "## # " patterns from markdown
     // This catches edge cases that escaped HTML preprocessing
     let markdown = DUPLICATE_HEADING_HASH.replace_all(markdown, "$1 ").to_string();
+
+    // Remove malformed list markers mixed with heading syntax
+    // This catches patterns like "## * * Text" where html2md produced both syntaxes
+    let markdown = MALFORMED_LIST_HEADING.replace_all(&markdown, "$1 ").to_string();
 
     let lines: Vec<&str> = markdown.lines().collect();
 
