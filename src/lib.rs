@@ -46,6 +46,7 @@ pub use mcp::{
     CrawlRegistry,
     CrawlSession,
     // Tools
+    FetchTool,
     ScrapeUrlTool,
     WebSearchTool,
     // Utilities
@@ -162,6 +163,13 @@ pub async fn start_server(
                 crate::WebSearchTool::new(browser_manager.clone()),
             );
 
+            // Register fetch tool (simplified single-page fetcher)
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                crate::FetchTool::new(crawl_registry.clone()),
+            );
+
             // CRITICAL: Start cleanup tasks after all tools are registered
             engine_cache.start_cleanup_task();
 
@@ -228,6 +236,13 @@ pub async fn start_server_with_listener(
                 tool_router,
                 prompt_router,
                 crate::WebSearchTool::new(browser_manager.clone()),
+            );
+
+            // Register fetch tool (simplified single-page fetcher)
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                crate::FetchTool::new(crawl_registry.clone()),
             );
 
             // CRITICAL: Start cleanup tasks after all tools are registered

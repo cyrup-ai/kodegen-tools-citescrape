@@ -12,10 +12,21 @@ use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_target(false)
+    // Initialize logging with chromiumoxide and tantivy spam reduction
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .add_directive("chromiumoxide::handler=off".parse().unwrap())
+                .add_directive("chromiumoxide::conn=off".parse().unwrap())
+                .add_directive("tantivy::indexer::index_writer=warn".parse().unwrap())
+                .add_directive("tantivy::indexer::prepared_commit=warn".parse().unwrap())
+                .add_directive("tantivy::indexer::segment_updater=warn".parse().unwrap())
+                .add_directive("tantivy::directory::managed_directory=warn".parse().unwrap())
+                .add_directive("tantivy::directory::file_watcher=warn".parse().unwrap())
+        )
+        .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
 
     // Create browser manager for proper lifecycle management

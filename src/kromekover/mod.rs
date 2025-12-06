@@ -3,7 +3,7 @@ use chromiumoxide::{Page, cdp};
 use futures::future::join_all;
 use std::path::Path;
 use tokio::fs;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 mod config;
 use config::Config;
@@ -43,7 +43,7 @@ pub async fn inject(page: Page) -> Result<()> {
     let session_seed: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
     let session_seed_hex = hex::encode(&session_seed);
 
-    info!("Injecting stealth scripts");
+    debug!("Injecting stealth scripts");
 
     let config = Config::default();
 
@@ -79,7 +79,7 @@ pub async fn inject(page: Page) -> Result<()> {
         session_seed_hex,
     );
 
-    info!("Injecting window.grokConfig");
+    debug!("Injecting window.grokConfig");
     page.execute(
         cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams {
             source: grok_config,
@@ -91,7 +91,7 @@ pub async fn inject(page: Page) -> Result<()> {
     .await?;
 
     // Step 2: Load all script files with best-effort error handling
-    info!("Loading {} evasion scripts", EVASION_SCRIPTS.len());
+    debug!("Loading {} evasion scripts", EVASION_SCRIPTS.len());
 
     let read_futures: Vec<_> = EVASION_SCRIPTS
         .iter()
@@ -124,7 +124,7 @@ pub async fn inject(page: Page) -> Result<()> {
         }
     }
 
-    info!(
+    debug!(
         "Loaded {}/{} scripts successfully",
         scripts.len(),
         EVASION_SCRIPTS.len()
@@ -138,7 +138,7 @@ pub async fn inject(page: Page) -> Result<()> {
     }
 
     // Step 4: Inject all loaded scripts with best-effort error handling
-    info!("Injecting {} scripts", scripts.len());
+    debug!("Injecting {} scripts", scripts.len());
 
     let inject_futures: Vec<_> = scripts
         .into_iter()
@@ -179,7 +179,7 @@ pub async fn inject(page: Page) -> Result<()> {
         }
     }
 
-    info!(
+    debug!(
         "Successfully injected {}/{} scripts",
         success_count,
         EVASION_SCRIPTS.len()
@@ -202,7 +202,7 @@ pub async fn inject(page: Page) -> Result<()> {
     }
 
     // Step 6: Modify user agent last
-    info!("Configuring user agent");
+    debug!("Configuring user agent");
     let ua = page
         .execute(cdp::browser_protocol::browser::GetVersionParams {})
         .await?;
@@ -217,7 +217,7 @@ pub async fn inject(page: Page) -> Result<()> {
     })
     .await?;
 
-    info!(
+    debug!(
         "Stealth injection complete: {}/{} scripts active",
         success_count,
         EVASION_SCRIPTS.len()

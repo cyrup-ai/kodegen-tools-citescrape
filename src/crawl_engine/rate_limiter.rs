@@ -115,6 +115,19 @@ impl DomainRateLimiter {
     }
 
     /// Refill tokens based on elapsed time since last refill
+    ///
+    /// **Critical Fix**: Preserves fractional nanoseconds by only advancing
+    /// `last_refill_nanos` by the time that actually produced tokens. This prevents
+    /// the integer division bug where concurrent threads would starve when
+    /// elapsed time is too small to produce tokens.
+    ///
+    /// **Before (buggy)**:
+    /// - Thread A: elapsed=40ms, tokens=0 (40ms * 0.02 / 1M = 0), updates last_refill to NOW
+    /// - Thread B: elapsed=0ms (sees updated last_refill), tokens=0, fails
+    ///
+    /// **After (fixed)**:
+    /// - Thread A: elapsed=40ms, tokens=0, time_credited=0ns, last_refill unchanged
+    /// - Thread B: elapsed=40ms (still accumulating), waits for 50ms, eventually succeeds
     #[inline]
     fn refill_tokens(&self, now_nanos: u64) {
         loop {
@@ -127,35 +140,46 @@ impl DomainRateLimiter {
             let elapsed_nanos = now_nanos.saturating_sub(last_refill);
             let tokens_to_add = (elapsed_nanos.saturating_mul(self.rate_per_nano)) / RATE_SCALE;
 
-            if tokens_to_add == 0 {
-                break;
-            }
+            // Calculate exact time that produced these tokens (inverse operation)
+            // This prevents discarding fractional nanoseconds when tokens_to_add = 0
+            let time_credited_nanos = if self.rate_per_nano > 0 {
+                (tokens_to_add.saturating_mul(RATE_SCALE)) / self.rate_per_nano
+            } else {
+                0
+            };
+
+            // Only advance last_refill by time that produced tokens
+            // This preserves fractional nanoseconds for future accumulation
+            let new_last_refill = last_refill.saturating_add(time_credited_nanos);
 
             match self.last_refill_nanos.compare_exchange_weak(
                 last_refill,
-                now_nanos,
+                new_last_refill,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    loop {
-                        let current_tokens = self.tokens.load(Ordering::Relaxed);
-                        let new_tokens = current_tokens
-                            .saturating_add(tokens_to_add)
-                            .min(self.max_tokens);
+                    // Only add tokens if we actually produced any
+                    if tokens_to_add > 0 {
+                        loop {
+                            let current_tokens = self.tokens.load(Ordering::Relaxed);
+                            let new_tokens = current_tokens
+                                .saturating_add(tokens_to_add)
+                                .min(self.max_tokens);
 
-                        if current_tokens == new_tokens {
-                            break;
-                        }
+                            if current_tokens == new_tokens {
+                                break;
+                            }
 
-                        match self.tokens.compare_exchange_weak(
-                            current_tokens,
-                            new_tokens,
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                        ) {
-                            Ok(_) => break,
-                            Err(_) => continue,
+                            match self.tokens.compare_exchange_weak(
+                                current_tokens,
+                                new_tokens,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => break,
+                                Err(_) => continue,
+                            }
                         }
                     }
                     break;

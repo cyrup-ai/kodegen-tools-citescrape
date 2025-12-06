@@ -87,12 +87,12 @@ impl Default for InlineConfig {
 /// Called by the public async API.
 async fn download_css_core(url: String, client: Client, config: &InlineConfig) -> Result<String> {
     // Download with timeout and browser-like headers
+    // Note: Accept-Encoding is handled automatically by reqwest for decompression
     let response = client
         .get(&url)
         .timeout(config.css_timeout)
         .header("User-Agent", CHROME_USER_AGENT)
         .header("Accept", "text/css,*/*;q=0.1")
-        .header("Accept-Encoding", "gzip, deflate, br")
         .send()
         .await
         .context("Failed to download CSS")?;
@@ -159,12 +159,12 @@ async fn download_and_encode_image_core(
     max_inline_size_bytes: Option<usize>,
 ) -> Result<String> {
     // Download image with timeout and browser-like headers
+    // Note: Accept-Encoding is handled automatically by reqwest for decompression
     let response = client
         .get(&url)
         .timeout(config.image_timeout)
         .header("User-Agent", CHROME_USER_AGENT)
         .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-        .header("Accept-Encoding", "gzip, deflate, br")
         .send()
         .await
         .context("Failed to download image")?;
@@ -258,12 +258,12 @@ async fn download_and_encode_image_core(
 /// Called by the public async API.
 async fn download_svg_core(url: String, client: Client, config: &InlineConfig) -> Result<String> {
     // Download with timeout and browser-like headers
+    // Note: Accept-Encoding is handled automatically by reqwest for decompression
     let response = client
         .get(&url)
         .timeout(config.svg_timeout)
         .header("User-Agent", CHROME_USER_AGENT)
         .header("Accept", "image/svg+xml,*/*;q=0.8")
-        .header("Accept-Encoding", "gzip, deflate, br")
         .send()
         .await
         .context("Failed to download SVG")?;

@@ -11,7 +11,7 @@
 /// Users can adjust via `crawl_rate_rps` parameter:
 /// - Increase for fast servers or local testing
 /// - Decrease for slow servers or rate-limited APIs
-pub const DEFAULT_CRAWL_RATE_RPS: f64 = 2.0;
+pub const DEFAULT_CRAWL_RATE_RPS: f64 = 20.0;
 
 /// Screenshot quality: 80% JPEG compression
 ///

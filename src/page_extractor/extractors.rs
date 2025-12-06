@@ -265,6 +265,6 @@ pub async fn capture_screenshot(page: Page, url: &str, output_dir: &std::path::P
         crate::content_saver::save_compressed_file(screenshot_data, &path, "image/png", false)
             .await?;
 
-    log::info!("Screenshot captured and saved successfully for URL: {url}");
+    log::debug!("Screenshot captured and saved successfully for URL: {url}");
     Ok(())
 }

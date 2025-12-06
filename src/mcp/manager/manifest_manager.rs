@@ -4,7 +4,7 @@
 //! to prevent corruption from crashes or interrupted writes.
 
 use super::types::CrawlManifest;
-use kodegen_mcp_tool::error::McpError;
+use kodegen_mcp_schema::McpError;
 use std::path::Path;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;

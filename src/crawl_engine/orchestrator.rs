@@ -50,7 +50,7 @@ use crate::page_extractor::link_rewriter::LinkRewriter;
 pub async fn crawl_pages<P: ProgressReporter>(
     config: CrawlConfig,
     link_rewriter: LinkRewriter,
-    chrome_data_dir: Option<PathBuf>,
+    _chrome_data_dir: Option<PathBuf>,  // Deprecated parameter, kept for API compatibility
     progress: P,
     event_bus: Option<Arc<CrawlEventBus>>,
 ) -> Result<Option<PathBuf>> {
@@ -111,7 +111,7 @@ pub async fn crawl_pages<P: ProgressReporter>(
 
     let chrome_dir_param = config.chrome_data_dir().cloned();
 
-    let (browser, handler_task) = launch_browser(config.headless(), chrome_dir_param)
+    let (browser, handler_task, chrome_data_dir_path) = launch_browser(config.headless(), chrome_dir_param)
         .await
         .context("Failed to launch browser")?;
 
@@ -286,19 +286,13 @@ pub async fn crawl_pages<P: ProgressReporter>(
 
     progress.report_cleanup_started();
 
-    // Clean up browser and data
-    let chrome_data_dir_path = chrome_data_dir
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("Chrome data directory path not available for cleanup"))?;
-
-    // Abort browser handler task to prevent resource leak
-    info!("Aborting browser handler task");
-    handler_task.abort();
-    if let Err(e) = handler_task.await
-        && !e.is_cancelled()
-    {
-        warn!("Handler task failed during abort: {e}");
-    }
+    // CRITICAL: Cleanup order matters!
+    // 1. Unwrap browser from Arc (must happen before close)
+    // 2. Close browser gracefully (browser.close() + browser.wait())
+    // 3. Clean up temp directory
+    // 4. THEN abort handler task
+    //
+    // This ensures the browser is properly closed before the handler loses its CDP connection.
 
     // Try to unwrap browser from Arc - if there are still references, skip cleanup
     let browser_for_cleanup = match Arc::try_unwrap(browser) {
@@ -313,7 +307,8 @@ pub async fn crawl_pages<P: ProgressReporter>(
     };
 
     if let Some(browser_owned) = browser_for_cleanup {
-        match super::cleanup::cleanup_browser_and_data(browser_owned, chrome_data_dir_path).await {
+        // Close browser gracefully and clean up temp directory
+        match super::cleanup::cleanup_browser_and_data(browser_owned, chrome_data_dir_path.clone()).await {
             Ok(super::cleanup::CleanupResult::Success) => {
                 debug!("Browser and data cleanup completed successfully");
             }
@@ -330,7 +325,16 @@ pub async fn crawl_pages<P: ProgressReporter>(
         }
     }
 
+    // NOW abort the handler task (after browser is closed)
+    info!("Aborting browser handler task");
+    handler_task.abort();
+    if let Err(e) = handler_task.await
+        && !e.is_cancelled()
+    {
+        warn!("Handler task failed during abort: {e}");
+    }
+
     progress.report_completed();
 
-    Ok(chrome_data_dir)
+    Ok(Some(chrome_data_dir_path))
 }

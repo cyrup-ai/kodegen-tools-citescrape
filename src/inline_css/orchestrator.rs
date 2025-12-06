@@ -4,6 +4,7 @@
 //! downloading and inlining of CSS, image, and SVG resources.
 
 use super::css_downloader::download_all_css;
+use super::domain_queue::DomainQueueManager;
 use super::downloaders::InlineConfig;
 use super::image_downloader::download_all_images;
 use super::svg_downloader::download_all_svgs;
@@ -110,8 +111,12 @@ pub async fn inline_resources_from_info(
     max_inline_image_size_bytes: Option<usize>,
     rate_rps: Option<f64>,
 ) -> Result<InliningResult> {
-    let config = config.clone();
+    let _config = config.clone();
     let client = Client::new();
+    
+    // Create domain queue manager for coordinated downloads
+    let queue_manager = DomainQueueManager::new(client.clone(), rate_rps);
+    
     let html = html_content;
 
     log::debug!("Starting to inline resources for base_url: {base_url}");
@@ -132,9 +137,7 @@ pub async fn inline_resources_from_info(
         {
             let base = base_url.clone();
             let href_clone = href.clone();
-            let client_clone = client.clone();
-            let config_clone = config.clone();
-            let rate_rps_clone = rate_rps;
+            let queue_manager_clone = queue_manager.clone();
 
             let future = Box::pin(async move {
                 let css_url = match super::utils::resolve_url(&base, &href_clone) {
@@ -148,41 +151,32 @@ pub async fn inline_resources_from_info(
                     }
                 };
 
-                // Apply rate limiting if configured
-                if let Some(rate) = rate_rps_clone {
-                    match crate::crawl_engine::rate_limiter::check_http_rate_limit(&css_url, rate)
-                        .await
-                    {
-                        crate::crawl_engine::rate_limiter::RateLimitDecision::Deny { .. } => {
-                            let error_msg = format!("Rate limited: {css_url}");
-                            log::debug!("{error_msg}");
-                            return Err(InliningError {
-                                url: css_url,
-                                resource_type: ResourceType::Css,
-                                error: error_msg,
-                            });
-                        }
-                        crate::crawl_engine::rate_limiter::RateLimitDecision::Allow => {}
-                    }
-                }
-
                 log::debug!("Processing CSS: {href_clone} -> {css_url}");
-                match super::downloaders::download_css_async(
-                    css_url.clone(),
-                    client_clone,
-                    &config_clone,
-                )
-                .await
-                {
+                
+                // Submit to queue (handles rate limiting internally)
+                let bytes = match queue_manager_clone.submit_download(css_url.clone()).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!("Failed to download CSS from {css_url}: {e}");
+                        return Err(InliningError {
+                            url: css_url,
+                            resource_type: ResourceType::Css,
+                            error: e.to_string(),
+                        });
+                    }
+                };
+                
+                // Convert bytes to string
+                match String::from_utf8(bytes.to_vec()) {
                     Ok(content) => {
                         log::debug!("Downloaded CSS content length: {} chars", content.len());
-                        log::info!("Successfully downloaded CSS from: {css_url}");
+                        log::debug!("Successfully downloaded CSS from: {css_url}");
                         Ok((href_clone, content, ResourceType::Css))
                     }
                     Err(e) => Err(InliningError {
                         url: css_url,
                         resource_type: ResourceType::Css,
-                        error: e.to_string(),
+                        error: format!("CSS content is not valid UTF-8: {e}"),
                     }),
                 }
             });
@@ -195,15 +189,13 @@ pub async fn inline_resources_from_info(
     for image in &resources.images {
         let base = base_url.clone();
         let src = image.url.clone();
-        let client_clone = client.clone();
-        let config_clone = config.clone();
-        let rate_rps_clone = rate_rps;
 
         // Check if this is an SVG based on the URL
         let is_svg = src.to_lowercase().contains(".svg");
 
         if is_svg {
             // Process as SVG
+            let queue_manager_clone = queue_manager.clone();
             let future = Box::pin(async move {
                 let svg_url = match super::utils::resolve_url(&base, &src) {
                     Ok(url) => url,
@@ -216,40 +208,43 @@ pub async fn inline_resources_from_info(
                     }
                 };
 
-                // Apply rate limiting if configured
-                if let Some(rate) = rate_rps_clone {
-                    match crate::crawl_engine::rate_limiter::check_http_rate_limit(&svg_url, rate)
-                        .await
-                    {
-                        crate::crawl_engine::rate_limiter::RateLimitDecision::Deny { .. } => {
-                            let error_msg = format!("Rate limited: {svg_url}");
-                            log::debug!("{error_msg}");
-                            return Err(InliningError {
-                                url: svg_url,
-                                resource_type: ResourceType::Svg,
-                                error: error_msg,
-                            });
-                        }
-                        crate::crawl_engine::rate_limiter::RateLimitDecision::Allow => {}
-                    }
-                }
-
                 log::debug!("Processing SVG: {src} -> {svg_url}");
-                match super::downloaders::download_svg_async(
-                    svg_url.clone(),
-                    client_clone,
-                    &config_clone,
-                )
-                .await
-                {
-                    Ok(svg_content) => {
+                
+                // Submit to queue (handles rate limiting internally)
+                let bytes = match queue_manager_clone.submit_download(svg_url.clone()).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!("Failed to download SVG from {svg_url}: {e}");
+                        return Err(InliningError {
+                            url: svg_url,
+                            resource_type: ResourceType::Svg,
+                            error: e.to_string(),
+                        });
+                    }
+                };
+                
+                // Convert bytes to string and clean up
+                match String::from_utf8(bytes.to_vec()) {
+                    Ok(mut svg_content) => {
+                        // Clean up SVG for inline usage (remove XML declaration, comment DOCTYPE)
+                        svg_content = svg_content.replace("<?xml version=\"1.0\" encoding=\"UTF-8\"?>", "");
+                        
+                        if let Some(doctype_start) = svg_content.find("<!DOCTYPE svg")
+                            && let Some(doctype_end_offset) = svg_content[doctype_start..].find('>')
+                        {
+                            let doctype_end = doctype_start + doctype_end_offset + 1;
+                            let doctype = &svg_content[doctype_start..doctype_end];
+                            let commented = format!("<!--{doctype}-->");
+                            svg_content.replace_range(doctype_start..doctype_end, &commented);
+                        }
+                        
                         log::debug!("Successfully downloaded SVG: {svg_url}");
                         Ok((src, svg_content, ResourceType::Svg))
                     }
                     Err(e) => Err(InliningError {
                         url: svg_url,
                         resource_type: ResourceType::Svg,
-                        error: e.to_string(),
+                        error: format!("SVG content is not valid UTF-8: {e}"),
                     }),
                 }
             });
@@ -257,6 +252,7 @@ pub async fn inline_resources_from_info(
             futures.push(future);
         } else {
             // Process as regular image
+            let queue_manager_clone = queue_manager.clone();
             let future = Box::pin(async move {
                 let image_url = match super::utils::resolve_url(&base, &src) {
                     Ok(url) => url,
@@ -269,43 +265,46 @@ pub async fn inline_resources_from_info(
                     }
                 };
 
-                // Apply rate limiting if configured
-                if let Some(rate) = rate_rps_clone {
-                    match crate::crawl_engine::rate_limiter::check_http_rate_limit(&image_url, rate)
-                        .await
-                    {
-                        crate::crawl_engine::rate_limiter::RateLimitDecision::Deny { .. } => {
-                            let error_msg = format!("Rate limited: {image_url}");
-                            log::debug!("{error_msg}");
-                            return Err(InliningError {
-                                url: image_url,
-                                resource_type: ResourceType::Image,
-                                error: error_msg,
-                            });
-                        }
-                        crate::crawl_engine::rate_limiter::RateLimitDecision::Allow => {}
-                    }
-                }
-
                 log::debug!("Processing image: {src} -> {image_url}");
-                match super::downloaders::download_and_encode_image_async(
-                    image_url.clone(),
-                    client_clone,
-                    &config_clone,
-                    max_inline_image_size_bytes,
-                )
-                .await
-                {
-                    Ok(data_url) => {
-                        log::debug!("Successfully downloaded image: {image_url}");
-                        Ok((src, data_url, ResourceType::Image))
+                
+                // Submit to queue (handles rate limiting internally)
+                let bytes = match queue_manager_clone.submit_download(image_url.clone()).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!("Failed to download image from {image_url}: {e}");
+                        return Err(InliningError {
+                            url: image_url,
+                            resource_type: ResourceType::Image,
+                            error: e.to_string(),
+                        });
                     }
-                    Err(e) => Err(InliningError {
-                        url: image_url,
-                        resource_type: ResourceType::Image,
-                        error: e.to_string(),
-                    }),
+                };
+                
+                // Check size limit and encode to base64 if appropriate
+                if let Some(max_size) = max_inline_image_size_bytes
+                    && bytes.len() > max_size
+                {
+                    log::debug!(
+                        "Image size ({} bytes) exceeds max_inline_size_bytes ({} bytes), keeping as external URL: {image_url}",
+                        bytes.len(),
+                        max_size
+                    );
+                    return Ok((src, image_url, ResourceType::Image));
                 }
+                
+                // Encode to base64 data URL
+                use base64::Engine;
+                let content_type = "image/jpeg"; // Default, ideally would detect from response headers
+                let encoded_capacity = base64::encoded_len(bytes.len(), false).unwrap_or(0);
+                let mut data_url = String::with_capacity(encoded_capacity + 30 + content_type.len());
+                
+                data_url.push_str("data:");
+                data_url.push_str(content_type);
+                data_url.push_str(";base64,");
+                base64::engine::general_purpose::STANDARD.encode_string(&bytes, &mut data_url);
+                
+                log::debug!("Successfully downloaded and encoded image: {image_url}");
+                Ok((src, data_url, ResourceType::Image))
             });
 
             futures.push(future);
@@ -336,7 +335,7 @@ pub async fn inline_resources_from_info(
                 }
             },
             Err(inlining_error) => {
-                log::warn!(
+                log::error!(
                     "Failed to download {} from {}: {}",
                     inlining_error.resource_type,
                     inlining_error.url,

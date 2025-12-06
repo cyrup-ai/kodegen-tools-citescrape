@@ -70,7 +70,7 @@ pub async fn save_markdown_content(
         }
     }
 
-    log::info!(
+    log::debug!(
         "Saved markdown for {} to {} (etag: {})",
         url,
         saved_path.display(),

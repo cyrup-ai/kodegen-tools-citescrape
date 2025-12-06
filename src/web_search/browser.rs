@@ -113,7 +113,7 @@ pub async fn launch_browser() -> Result<(Browser, JoinHandle<()>, PathBuf)> {
     };
 
     // Create unique temp directory for this browser instance
-    let user_data_dir = std::env::temp_dir().join(format!("enigo_chrome_{}", std::process::id()));
+    let user_data_dir = std::env::temp_dir().join(format!("kodegen_chrome_{}", std::process::id()));
 
     std::fs::create_dir_all(&user_data_dir).context("Failed to create user data directory")?;
 

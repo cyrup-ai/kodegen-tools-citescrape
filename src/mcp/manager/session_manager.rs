@@ -123,7 +123,7 @@ impl CrawlSessionManager {
 
         let cleaned = initial_count - sessions.len();
         if cleaned > 0 {
-            log::info!("Cleaned up {cleaned} crawl sessions");
+            log::debug!("Cleaned up {cleaned} crawl sessions");
         }
     }
 

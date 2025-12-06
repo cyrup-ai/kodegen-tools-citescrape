@@ -12,7 +12,7 @@ use anyhow::Result;
 use bloomfilter::Bloom;
 use chromiumoxide::browser::Browser;
 use html2md;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -90,7 +90,7 @@ pub async fn process_single_page(
         }
     }
 
-    info!("Crawling [depth {}]: {}", item.depth, item.url);
+    debug!("Crawling [depth {}]: {}", item.depth, item.url);
 
     // Create page
     let page = match browser.new_page("about:blank").await {

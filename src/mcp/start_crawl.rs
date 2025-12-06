@@ -3,10 +3,9 @@
 //! Unified tool with 5 actions: CRAWL, READ, LIST, KILL, SEARCH
 //! Pattern based on: packages/kodegen-tools-terminal/src/tool.rs
 
-use kodegen_mcp_schema::citescrape::{ScrapeAction, ScrapeUrlArgs, ScrapeUrlOutput, ScrapeUrlPromptArgs, SCRAPE_URL};
-use kodegen_mcp_tool::{Tool, ToolExecutionContext, ToolResponse};
-use kodegen_mcp_tool::error::McpError;
-use rmcp::model::{PromptArgument, PromptMessage};
+use kodegen_mcp_schema::citescrape::{ScrapeAction, ScrapeUrlArgs, ScrapeUrlOutput, ScrapeUrlPrompts, SCRAPE_URL};
+use kodegen_mcp_schema::{Tool, ToolExecutionContext, ToolResponse};
+use kodegen_mcp_schema::McpError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -60,7 +59,7 @@ impl ScrapeUrlTool {
 
 impl Tool for ScrapeUrlTool {
     type Args = ScrapeUrlArgs;
-    type PromptArgs = ScrapeUrlPromptArgs;
+    type Prompts = ScrapeUrlPrompts;
 
     fn name() -> &'static str {
         SCRAPE_URL
@@ -196,13 +195,5 @@ impl Tool for ScrapeUrlTool {
         );
 
         Ok(ToolResponse::new(summary, result))
-    }
-
-    fn prompt_arguments() -> Vec<PromptArgument> {
-        vec![]
-    }
-
-    async fn prompt(&self, _args: Self::PromptArgs) -> Result<Vec<PromptMessage>, McpError> {
-        Ok(vec![])
     }
 }

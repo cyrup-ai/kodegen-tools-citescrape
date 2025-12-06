@@ -227,7 +227,7 @@ pub async fn download_managed_browser() -> Result<PathBuf> {
 pub async fn launch_browser(
     headless: bool,
     chrome_data_dir: Option<PathBuf>,
-) -> Result<(Browser, JoinHandle<()>)> {
+) -> Result<(Browser, JoinHandle<()>, PathBuf)> {
     // First try to find the browser
     let chrome_path = match find_browser_executable().await {
         Ok(path) => path,
@@ -239,7 +239,7 @@ pub async fn launch_browser(
 
     // Use provided chrome_data_dir or fall back to process ID
     let user_data_dir = chrome_data_dir.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("enigo_chrome_{}", std::process::id()))
+        std::env::temp_dir().join(format!("kodegen_chrome_{}", std::process::id()))
     });
 
     std::fs::create_dir_all(&user_data_dir).context("Failed to create user data directory")?;
@@ -248,7 +248,7 @@ pub async fn launch_browser(
     let mut config_builder = BrowserConfigBuilder::default()
         .request_timeout(Duration::from_secs(30))
         .window_size(1920, 1080)
-        .user_data_dir(user_data_dir)
+        .user_data_dir(user_data_dir.clone())
         .chrome_executable(chrome_path);
 
     // Set headless mode based on parameter
@@ -327,7 +327,7 @@ pub async fn launch_browser(
         info!("Browser handler task completed");
     });
 
-    Ok((browser, handler_task))
+    Ok((browser, handler_task, user_data_dir))
 }
 
 /// Apply stealth mode settings to evade bot detection

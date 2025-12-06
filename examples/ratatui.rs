@@ -14,8 +14,16 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize detailed logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Initialize detailed logging with chromiumoxide and tantivy spam reduction
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .filter_module("chromiumoxide::handler", log::LevelFilter::Off)
+        .filter_module("chromiumoxide::conn", log::LevelFilter::Off)
+        .filter_module("tantivy::indexer::index_writer", log::LevelFilter::Warn)
+        .filter_module("tantivy::indexer::prepared_commit", log::LevelFilter::Warn)
+        .filter_module("tantivy::indexer::segment_updater", log::LevelFilter::Warn)
+        .filter_module("tantivy::directory::managed_directory", log::LevelFilter::Warn)
+        .filter_module("tantivy::directory::file_watcher", log::LevelFilter::Warn)
+        .init();
 
     log::info!("🚀 Starting FULL SITE crawl of ratatui.rs documentation");
     log::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");

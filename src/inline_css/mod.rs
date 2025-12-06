@@ -5,6 +5,7 @@
 
 // Sub-modules
 pub mod css_downloader;
+pub mod domain_queue;
 pub mod downloaders;
 pub mod image_downloader;
 pub mod orchestrator;

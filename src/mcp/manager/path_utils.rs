@@ -4,7 +4,7 @@
 //! from web URLs while maintaining consistency across crawl operations.
 
 use kodegen_config::KodegenConfig;
-use kodegen_mcp_tool::error::McpError;
+use kodegen_mcp_schema::McpError;
 use std::path::PathBuf;
 use url::Url;
 

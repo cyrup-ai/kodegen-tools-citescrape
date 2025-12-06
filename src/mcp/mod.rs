@@ -53,7 +53,7 @@
 //!     StartCrawlTool, GetCrawlResultsTool, SearchCrawlResultsTool,
 //!     CrawlSessionManager, SearchEngineCache
 //! };
-//! use kodegen_mcp_tool::Tool;
+//! use kodegen_mcp_schema::Tool;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create shared managers (once at startup)
@@ -71,7 +71,7 @@
 //!     engine_cache.clone(),
 //! );
 //!
-//! // Tools implement kodegen_mcp_tool::Tool trait for MCP registration
+//! // Tools implement kodegen_mcp_schema::Tool trait for MCP registration
 //! println!("Tool name: {}", StartCrawlTool::name());
 //! println!("Description: {}", StartCrawlTool::description());
 //! # Ok(())
@@ -116,6 +116,7 @@
 //!
 //! Handle errors appropriately in your MCP server implementation.
 
+pub mod fetch;
 pub mod manager;
 pub mod registry;        // NEW
 pub mod session;         // NEW
@@ -134,5 +135,6 @@ pub use session::CrawlSession;     // NEW
 pub use validation::ErrorContext;
 
 // Re-export tools
+pub use fetch::FetchTool;
 pub use start_crawl::ScrapeUrlTool;
 pub use web_search::WebSearchTool;

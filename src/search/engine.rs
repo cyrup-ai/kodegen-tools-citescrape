@@ -186,7 +186,7 @@ impl SearchEngine {
                 .map_err(|e| SearchError::CommitFailed(format!("Index commit failed: {e}")))?;
 
             let commit_duration = start.elapsed();
-            tracing::info!(
+            tracing::debug!(
                 duration_ms = commit_duration.as_millis(),
                 "Index commit completed"
             );

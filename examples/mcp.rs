@@ -69,9 +69,19 @@ async fn wait_for_crawl_completion(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
+    // Initialize logging with chromiumoxide and tantivy spam reduction
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
+        .with(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("info".parse()?)
+                .add_directive("chromiumoxide::handler=off".parse()?)
+                .add_directive("chromiumoxide::conn=off".parse()?)
+                .add_directive("tantivy::indexer::index_writer=warn".parse()?)
+                .add_directive("tantivy::indexer::prepared_commit=warn".parse()?)
+                .add_directive("tantivy::indexer::segment_updater=warn".parse()?)
+                .add_directive("tantivy::directory::managed_directory=warn".parse()?)
+                .add_directive("tantivy::directory::file_watcher=warn".parse()?)
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 

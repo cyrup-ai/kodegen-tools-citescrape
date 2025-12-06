@@ -57,6 +57,13 @@ async fn main() -> Result<()> {
             WebSearchTool::new(browser_manager.clone()),
         );
 
+        // Register fetch tool (simplified single-page fetcher)
+        (tool_router, prompt_router) = register_tool(
+            tool_router,
+            prompt_router,
+            FetchTool::new(crawl_registry.clone()),
+        );
+
         // CRITICAL: Start cleanup tasks after all tools are registered
         engine_cache.start_cleanup_task();
 
@@ -65,7 +72,7 @@ async fn main() -> Result<()> {
             let registry = crawl_registry.clone();
             Box::pin(async move {
                 let cleaned = registry.cleanup_connection(&connection_id).await;
-                log::info!(
+                log::debug!(
                     "Connection {}: cleaned up {} crawl session(s) (output directories preserved)",
                     connection_id,
                     cleaned

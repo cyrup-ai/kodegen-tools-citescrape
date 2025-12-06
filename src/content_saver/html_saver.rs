@@ -33,7 +33,7 @@ pub async fn save_html_content(
 
     let inlined_html = match inline_result {
         Ok(inlined) => {
-            log::info!(
+            log::debug!(
                 "Successfully inlined {} resources for: {} ({} failures)",
                 inlined.successes,
                 url,
@@ -92,7 +92,7 @@ pub async fn save_html_content_with_resources(
 
     let inlined_html = match inline_future {
         Ok(inlined) => {
-            log::info!(
+            log::debug!(
                 "Successfully inlined {} resources for: {} ({} failures)",
                 inlined.successes,
                 url,

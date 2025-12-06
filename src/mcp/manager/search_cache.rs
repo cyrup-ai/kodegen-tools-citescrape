@@ -6,7 +6,7 @@
 use super::timestamp_utils::{instant_to_nanos, nanos_to_instant};
 use crate::config::CrawlConfig;
 use crate::search::{IndexingSender, SearchEngine};
-use kodegen_mcp_tool::error::McpError;
+use kodegen_mcp_schema::McpError;
 use log;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -126,7 +126,7 @@ impl SearchEngineCache {
 
             if let Some(evict_key) = oldest_key {
                 engines.remove(&evict_key);
-                log::info!(
+                log::debug!(
                     "Evicted LRU engine {:?} to make room for {:?} (limit: {})",
                     evict_key,
                     output_dir,
@@ -148,7 +148,7 @@ impl SearchEngineCache {
         let indexing_sender =
             match crate::search::IncrementalIndexingService::start(engine_for_indexing).await {
                 Ok((_service, sender)) => {
-                    log::info!(
+                    log::debug!(
                         "Incremental indexing service started for output_dir: {output_dir:?}"
                     );
                     Some(Arc::new(sender))
@@ -275,7 +275,7 @@ impl SearchEngineCache {
             let should_keep = age < cutoff;
 
             if !should_keep {
-                log::info!("Evicting idle search engine: {path:?} (idle: {age:?})");
+                log::debug!("Evicting idle search engine: {path:?} (idle: {age:?})");
             }
 
             should_keep
@@ -299,7 +299,7 @@ impl SearchEngineCache {
 
             if let Some(key) = oldest_key {
                 engines.remove(&key);
-                log::info!("LRU eviction: {:?} (cache size: {})", key, engines.len());
+                log::debug!("LRU eviction: {:?} (cache size: {})", key, engines.len());
             } else {
                 // This should never happen now (no lock contention)
                 break;
@@ -308,7 +308,7 @@ impl SearchEngineCache {
 
         let cleaned = initial_count.saturating_sub(engines.len());
         if cleaned > 0 {
-            log::info!(
+            log::debug!(
                 "Cleaned up {} search engines (current size: {})",
                 cleaned,
                 engines.len()

@@ -227,7 +227,7 @@ pub async fn extract_page_data(
     url: String,
     config: ExtractPageDataConfig,
 ) -> Result<super::schema::PageData> {
-    log::info!("Starting to extract page data for URL: {url}");
+    log::debug!("Starting to extract page data for URL: {url}");
 
     // Launch all extractions in parallel with tokio::try_join!
     let (metadata, resources, timing, security, title, interactive_elements_vec, links) = tokio::try_join!(
@@ -319,7 +319,7 @@ pub async fn extract_page_data(
         .await
         {
             Ok(()) => {
-                log::info!("HTML content saved successfully for: {url}");
+                log::debug!("HTML content saved successfully for: {url}");
             }
             Err(e) => {
                 log::warn!("Failed to save HTML for {url}: {e}");
@@ -329,7 +329,7 @@ pub async fn extract_page_data(
         }
     }
 
-    log::info!("Successfully extracted page data for URL: {url}");
+    log::debug!("Successfully extracted page data for URL: {url}");
     Ok(super::schema::PageData {
         url: url.clone(),
         title,
