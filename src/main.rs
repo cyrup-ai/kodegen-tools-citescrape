@@ -1,10 +1,11 @@
 // Category HTTP Server: Citescrape Tools
 //
 // This binary serves web crawling and search tools over HTTP/HTTPS transport.
-// Managed by kodegend daemon, typically running on port 30445.
+// Managed by kodegend daemon, typically running on port kodegen_config::PORT_CITESCRAPE (30439).
 
 use anyhow::Result;
-use kodegen_server_http::{run_http_server, Managers, RouterSet, ShutdownHook, register_tool, ConnectionCleanupFn};
+use kodegen_config::CATEGORY_CITESCRAPE;
+use kodegen_server_http::{ServerBuilder, Managers, RouterSet, ShutdownHook, register_tool, ConnectionCleanupFn};
 use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
 use std::sync::Arc;
 use std::future::Future;
@@ -24,66 +25,67 @@ impl ShutdownHook for BrowserManagerWrapper {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    run_http_server("citescrape", |_config, _tracker| {
-        Box::pin(async move {
-        let mut tool_router = ToolRouter::new();
-        let mut prompt_router = PromptRouter::new();
-        let managers = Managers::new();
+    ServerBuilder::new()
+        .category(CATEGORY_CITESCRAPE)
+        .register_tools(|| async {
+            let mut tool_router = ToolRouter::new();
+            let mut prompt_router = PromptRouter::new();
+            let managers = Managers::new();
 
-        // Create managers
-        let engine_cache = Arc::new(kodegen_tools_citescrape::SearchEngineCache::new());
-        let browser_manager = Arc::new(kodegen_tools_citescrape::BrowserManager::new());
+            // Create managers
+            let engine_cache = Arc::new(kodegen_tools_citescrape::SearchEngineCache::new());
+            let browser_manager = Arc::new(kodegen_tools_citescrape::BrowserManager::new());
 
-        // Create crawl registry (NEW - replaces CrawlSessionManager)
-        let crawl_registry = Arc::new(kodegen_tools_citescrape::CrawlRegistry::new(engine_cache.clone()));
+            // Create crawl registry (NEW - replaces CrawlSessionManager)
+            let crawl_registry = Arc::new(kodegen_tools_citescrape::CrawlRegistry::new(engine_cache.clone()));
 
-        // Register browser manager for shutdown (closes Chrome)
-        managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
+            // Register browser manager for shutdown (closes Chrome)
+            managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
 
-        // Register tools
-        use kodegen_tools_citescrape::*;
+            // Register tools
+            use kodegen_tools_citescrape::*;
 
-        // Register unified scrape_url tool with registry
-        (tool_router, prompt_router) = register_tool(
-            tool_router,
-            prompt_router,
-            ScrapeUrlTool::new(crawl_registry.clone()),
-        );
+            // Register unified scrape_url tool with registry
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                ScrapeUrlTool::new(crawl_registry.clone()),
+            );
 
-        // Keep web_search tool (unchanged)
-        (tool_router, prompt_router) = register_tool(
-            tool_router,
-            prompt_router,
-            WebSearchTool::new(browser_manager.clone()),
-        );
+            // Keep web_search tool (unchanged)
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                WebSearchTool::new(browser_manager.clone()),
+            );
 
-        // Register fetch tool (simplified single-page fetcher)
-        (tool_router, prompt_router) = register_tool(
-            tool_router,
-            prompt_router,
-            FetchTool::new(crawl_registry.clone()),
-        );
+            // Register fetch tool (simplified single-page fetcher)
+            (tool_router, prompt_router) = register_tool(
+                tool_router,
+                prompt_router,
+                FetchTool::new(crawl_registry.clone()),
+            );
 
-        // CRITICAL: Start cleanup tasks after all tools are registered
-        engine_cache.start_cleanup_task();
+            // CRITICAL: Start cleanup tasks after all tools are registered
+            engine_cache.start_cleanup_task();
 
-        // Create cleanup callback for connection dropped notification
-        let cleanup: ConnectionCleanupFn = Arc::new(move |connection_id: String| {
-            let registry = crawl_registry.clone();
-            Box::pin(async move {
-                let cleaned = registry.cleanup_connection(&connection_id).await;
-                log::debug!(
-                    "Connection {}: cleaned up {} crawl session(s) (output directories preserved)",
-                    connection_id,
-                    cleaned
-                );
-            }) as Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-        });
+            // Create cleanup callback for connection dropped notification
+            let cleanup: ConnectionCleanupFn = Arc::new(move |connection_id: String| {
+                let registry = crawl_registry.clone();
+                Box::pin(async move {
+                    let cleaned = registry.cleanup_connection(&connection_id).await;
+                    log::debug!(
+                        "Connection {}: cleaned up {} crawl session(s) (output directories preserved)",
+                        connection_id,
+                        cleaned
+                    );
+                }) as Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            });
 
-        let mut router_set = RouterSet::new(tool_router, prompt_router, managers);
-        router_set.connection_cleanup = Some(cleanup);
-        Ok(router_set)
+            let mut router_set = RouterSet::new(tool_router, prompt_router, managers);
+            router_set.connection_cleanup = Some(cleanup);
+            Ok(router_set)
         })
-    })
-    .await
+        .run()
+        .await
 }

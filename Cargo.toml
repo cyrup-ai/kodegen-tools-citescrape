@@ -1,7 +1,7 @@
 
 [package]
 name = "kodegen_tools_citescrape"
-version = "0.8.0"
+version = "0.10.0"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 authors = ["KODEGEN.ᴀɪ"]
@@ -31,11 +31,10 @@ macos = "public.app-category.developer-tools"
 
 [dependencies]
 
-kodegen_mcp_schema = { version = "0.8" }
-kodegen_server_http = { version = "0.8" }
-kodegen_config = { version = "0.8" }
-kodegen_config_manager = { version = "0.8" }
-kodegen_utils = { version = "0.8" }
+kodegen_mcp_schema = { version = "0.10" }
+kodegen_server_http = { version = "0.10" }
+kodegen_config = { version = "0.10" }
+kodegen_config_manager = { version = "0.10" }
 
 log = "0.4"
 env_logger = "0.11"
@@ -107,7 +106,7 @@ rayon = "1"
 bloomfilter = "3"
 
 [dev-dependencies]
-kodegen_mcp_client = { version = "0.8" }
+kodegen_mcp_client = { version = "0.10" }
 assert_fs = "1"
 mockito = "1"
 proptest = "1"
