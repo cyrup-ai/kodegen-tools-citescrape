@@ -23,7 +23,7 @@
 
 ## Quick Start
 
-### Installation 
+### Installation
 
 ```bash
 # Clone the repository
