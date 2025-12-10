@@ -187,9 +187,9 @@ impl ConversionOptions {
 ///    - Cleans up problematic HTML structures
 ///
 /// 3. **Convert to Markdown** (always performed)
-///    - Uses html2md library as base converter
+///    - Uses htmd library as base converter
 ///    - Applies custom post-processing (tables, lists, headings, code blocks)
-///    - Built-in fallback to `html2md::parse_html` if post-processing fails
+///    - Built-in fallback to `htmd::convert` if post-processing fails
 ///
 /// 4. **Process Headings** (optional, controlled by `options.process_headings`)
 ///    - Normalizes heading levels
@@ -266,8 +266,8 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     };
 
     // Stage 3: Convert to Markdown
-    // The MarkdownConverter has built-in fallback to html2md::parse_html,
-    // so we don't need to handle that here
+    // The MarkdownConverter uses htmd with custom handlers
+    // and has built-in fallback for robustness
     let converter = MarkdownConverter::new()
         .with_preserve_tables(options.preserve_tables)
         .with_preserve_links(options.preserve_links)

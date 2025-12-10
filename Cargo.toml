@@ -1,7 +1,7 @@
 
 [package]
 name = "kodegen_tools_citescrape"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 authors = ["KODEGEN.ᴀɪ"]
@@ -52,17 +52,17 @@ anyhow = "1"
 lru = "0.16"
 
 # MCP tool dependencies
-rmcp = { version = "0.10", features = ["client", "schemars", "server", "transport-child-process", "transport-io", "transport-sse-client", "transport-sse-client-reqwest", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "0.11", features = ["client", "schemars", "server", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 html-escape = "0.2"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-chromiumoxide = { version = "0.7", features = ["tokio-runtime", "bytes", "_fetcher-native-tokio"], default-features = false }
-chromiumoxide_cdp = { version = "0.7" }
-chromiumoxide_types = { version = "0.7" }
-scraper = "0.24"
+chromiumoxide = { version = "0.8", features = ["tokio-runtime", "bytes", "_fetcher-native-tokio"], default-features = false }
+chromiumoxide_cdp = { version = "0.8" }
+chromiumoxide_types = { version = "0.8" }
+scraper = "0.25"
 ego-tree = "0.10"
 kuchiki = "0.8"
 lol_html = "2"
@@ -72,10 +72,11 @@ hex = "0.4"
 sanitize-filename = "0.6"
 imstr = "0.2"
 url = "2"
-html2md = "0.2"
-markup5ever_rcdom = "0.3"
+htmd = "0.5"
+html5ever = "=0.35"
+markup5ever_rcdom = "=0.35"
 flate2 = "1"
-convert_case = "0.8"
+convert_case = "0.10"
 tempfile = "3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 base64 = "0.22"
@@ -88,7 +89,7 @@ futures-core = "0.3"
 futures-executor = "0.3"
 
 # Syntax highlighting
-syntect = { version = "5.2", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 
 # Search indexing
 tantivy = "0.25"
@@ -129,12 +130,16 @@ name = "citescrape_demo"
 path = "examples/citescrape_demo.rs"
 
 [[example]]
-name = "direct_crawl_ratatui"
-path = "examples/direct_crawl_ratatui.rs"
+name = "ratatui"
+path = "examples/ratatui.rs"
 
 [[example]]
-name = "direct_web_search"
-path = "examples/direct_web_search.rs"
+name = "web_search"
+path = "examples/web_search.rs"
+
+[[example]]
+name = "claude_code"
+path = "examples/claude_code.rs"
 
 [[bin]]
 name = "kodegen-citescrape"

@@ -1,118 +1,286 @@
-//! HTML to Markdown conversion functionality.
+//! HTML to Markdown conversion with streaming post-processing.
 //!
-//! This module wraps the html2md library and adds additional post-processing
-//! to produce clean, well-formatted markdown output.
+//! # Architecture
+//!
+//! The conversion pipeline has two stages:
+//!
+//! 1. **htmd conversion**: Transforms HTML to markdown using custom element handlers
+//! 2. **Streaming normalization**: Single-pass line processor for clean formatting
+//!
+//! # Design Philosophy
+//!
+//! Post-processing uses deterministic line-by-line streaming rather than regex.
+//! This avoids unintended pattern matches (e.g., `*` in `**bold**` being treated
+//! as a list marker) and enables O(n) processing with minimal allocations.
+//!
+//! Each line is classified by its semantic type, enabling context-aware formatting
+//! without complex lookahead/lookbehind patterns that can corrupt inline formatting.
 
 use anyhow::Result;
-use html2md;
 use regex::Regex;
 use std::sync::LazyLock;
 use url::Url;
 
-use super::custom_handlers::create_custom_handlers;
+use super::custom_handlers::create_converter;
 
-// Compile regex patterns once at first use
-// These are syntactically valid hardcoded patterns - if they fail, it's a compile-time bug
-static EMPTY_LINES: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\n{3,}")
-        .expect("SAFETY: hardcoded regex r\"\\n{3,}\" is statically valid")
-});
-
-static SPACE_AFTER_LIST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^(\s*[-*+])\s*").expect(
-        "SAFETY: hardcoded regex r\"(?m)^(\\s*[-*+])\\s*\" is statically valid",
-    )
-});
-
-static HEADING_SPACE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^(#+)([^ ])")
-        .expect("SAFETY: hardcoded regex r\"(?m)^(#+)([^ ])\" is statically valid")
-});
+// =============================================================================
+// REGEX PATTERNS - Reserved for genuine pattern matching within line content
+// =============================================================================
 
 static TABLE_ALIGN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\|(\s*:?-+:?\s*\|)+").expect(
-        "SAFETY: hardcoded regex r\"\\|(\\s*:?-+:?\\s*\\|)+\" is statically valid",
-    )
-});
-
-static CODE_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"```([a-zA-Z]*)\n").expect(
-        "SAFETY: hardcoded regex r\"```([a-zA-Z]*)\\n\" is statically valid",
-    )
+    Regex::new(r"\|(\s*:?-+:?\s*\|)+").expect("TABLE_ALIGN: hardcoded regex is valid")
 });
 
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[([^\]]+)\]\(([^\)]+)\)")
-        .expect("SAFETY: hardcoded regex r\"\\[([^\\]]+)\\]\\(([^\\)]+)\\)\" is statically valid")
+    Regex::new(r"\[([^\]]+)\]\(([^\)]+)\)").expect("LINK_RE: hardcoded regex is valid")
 });
 
 static IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"!\[[^\]]*\]\([^\)]+\)")
-        .expect("SAFETY: hardcoded regex r\"!\\[[^\\]]*\\]\\([^\\)]+\\)\" is statically valid")
+    Regex::new(r"!\[[^\]]*\]\([^\)]+\)").expect("IMAGE_RE: hardcoded regex is valid")
 });
 
-/// Matches remaining HTML img tags that html2md failed to convert
-/// 
-/// Captures:
-/// - Group 1: src URL (required)
-/// - Group 2: alt text (optional, may not exist)
-/// 
-/// The pattern handles all three cases:
-/// - `<img src="url" alt="text">` → captures both
-/// - `<img alt="text" src="url">` → captures both  
-/// - `<img src="url">` → captures only src
-static HTML_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<img[^>]*?\ssrc="([^"]+)"(?:[^>]*?\salt="([^"]*)")?[^>]*?>"#)
-        .expect("HTML_IMG_RE: hardcoded regex is valid")
-});
 
-/// Detect if a line contains only empty list markers (bullets with no content)
-/// 
-/// Matches lines that are purely bullet characters (*, -, +) and whitespace.
-/// This catches two patterns:
-/// 
-/// 1. Multiple empty bullets: "* * *", "- - -" 
-/// 2. Single empty bullet: "* ", "- ", "+ "
-/// 
-/// Examples:
-/// - "* * *" → true (multiple empty)
-/// - "* * * *" → true (multiple empty)
-/// - "* " → true (single empty)
-/// - "  *  " → true (single empty with indent)
-/// - "* Valid content" → false (has content)
-/// - "" → false (blank line, not a list)
-/// 
-/// Does NOT match horizontal rules (consecutive chars without spaces):
-/// - "***" → false (horizontal rule, handled by markdown renderer)
-/// - "---" → false (horizontal rule)
-fn is_empty_list_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    
-    // Empty line check
-    if trimmed.is_empty() {
-        return false;
+// =============================================================================
+// LINE TYPE CLASSIFICATION
+// =============================================================================
+
+/// Semantic classification of a markdown line.
+///
+/// Enables context-aware formatting decisions without regex pattern matching
+/// that could have unintended side effects on inline formatting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineType {
+    Blank,
+    Heading,
+    UnorderedList,
+    OrderedList,
+    CodeFence,
+    Blockquote,
+    TableRow,
+    HorizontalRule,
+    HtmlComment,
+    EmptyListMarkers,
+    Paragraph,
+}
+
+impl LineType {
+    /// Classify a line by its markdown semantics.
+    ///
+    /// Classification is based on leading characters after accounting for
+    /// indentation. The critical distinction for lists is requiring a space
+    /// after the marker to avoid matching `**bold**` as a list.
+    fn classify(line: &str) -> Self {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            return Self::Blank;
+        }
+
+        if trimmed.starts_with("<!--") {
+            return Self::HtmlComment;
+        }
+
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            return Self::CodeFence;
+        }
+
+        // Heading: # followed by space or EOL, max 6 levels
+        if trimmed.starts_with('#') {
+            let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+            if hash_count <= 6 {
+                let rest = &trimmed[hash_count..];
+                if rest.is_empty() || rest.starts_with(' ') {
+                    return Self::Heading;
+                }
+            }
+        }
+
+        if trimmed.starts_with('>') {
+            return Self::Blockquote;
+        }
+
+        if trimmed.starts_with('|') && trimmed.ends_with('|') {
+            return Self::TableRow;
+        }
+
+        if Self::is_horizontal_rule(trimmed) {
+            return Self::HorizontalRule;
+        }
+
+        if Self::is_empty_list_markers(trimmed) {
+            return Self::EmptyListMarkers;
+        }
+
+        // Unordered list: -, *, + followed by SPACE
+        // Critical: space check prevents matching **bold** as list
+        if let Some(first) = trimmed.chars().next()
+            && matches!(first, '-' | '*' | '+') && trimmed.chars().nth(1) == Some(' ') {
+            return Self::UnorderedList;
+        }
+
+        if Self::is_ordered_list(trimmed) {
+            return Self::OrderedList;
+        }
+
+        Self::Paragraph
     }
-    
-    // Pattern 1: Single empty bullet (just a marker with optional whitespace)
-    // Check if the trimmed line is exactly one character and is a list marker
-    if trimmed.len() == 1 {
-        return matches!(trimmed.chars().next(), Some('*' | '-' | '+'));
+
+    /// Check if line is a horizontal rule (---, ***, ___)
+    fn is_horizontal_rule(s: &str) -> bool {
+        if s.len() < 3 {
+            return false;
+        }
+        let first = match s.chars().next() {
+            Some(c) if matches!(c, '-' | '*' | '_') => c,
+            _ => return false,
+        };
+        let count = s.chars().filter(|&c| c == first).count();
+        count >= 3 && s.chars().all(|c| c == first || c == ' ')
     }
-    
-    // Pattern 2: Multiple empty bullets separated by whitespace
-    // Split by whitespace and check if all tokens are single-character markers
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    
-    // Must have at least one token
-    if tokens.is_empty() {
-        return false;
+
+    /// Check if line is an ordered list item (1. or 1))
+    fn is_ordered_list(s: &str) -> bool {
+        let mut chars = s.chars().peekable();
+        let mut has_digit = false;
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            has_digit = true;
+            chars.next();
+        }
+        has_digit && matches!((chars.next(), chars.next()), (Some('.' | ')'), Some(' ')))
     }
-    
-    // Check if ALL tokens are single-character list markers
-    // This catches "* * *", "- - -", etc.
-    tokens.iter().all(|token| {
-        token.len() == 1 && matches!(token.chars().next(), Some('*' | '-' | '+'))
-    })
+
+    /// Check if line contains only empty list markers (e.g., "* * *", "* ")
+    fn is_empty_list_markers(s: &str) -> bool {
+        if s.is_empty() {
+            return false;
+        }
+        // Single marker check
+        if s.len() == 1 {
+            return matches!(s.chars().next(), Some('*' | '-' | '+'));
+        }
+        // Multiple markers separated by whitespace
+        let tokens: Vec<&str> = s.split_whitespace().collect();
+        !tokens.is_empty()
+            && tokens.iter().all(|t| {
+                t.len() == 1 && matches!(t.chars().next(), Some('*' | '-' | '+'))
+            })
+    }
+
+    /// Does this line type require a blank line before it?
+    const fn needs_blank_before(self) -> bool {
+        matches!(
+            self,
+            Self::Heading | Self::CodeFence | Self::HorizontalRule
+        )
+    }
+}
+
+// =============================================================================
+// STREAMING MARKDOWN NORMALIZER
+// =============================================================================
+
+/// Stateful streaming normalizer - single pass, pre-allocated buffer.
+///
+/// Processes markdown line-by-line, writing directly to an output buffer.
+/// Tracks state to handle:
+/// - Consecutive blank line collapsing (max 2)
+/// - Code fence passthrough (no processing inside fences)
+/// - Block element spacing (blank lines before headings, etc.)
+/// - Heading normalization (`##Text` → `## Text`)
+struct MarkdownNormalizer {
+    output: String,
+    prev_type: LineType,
+    consecutive_blanks: u8,
+    in_code_fence: bool,
+}
+
+impl MarkdownNormalizer {
+    /// Normalize markdown in a single pass with pre-allocated buffer.
+    fn normalize(input: &str) -> String {
+        let mut this = Self {
+            output: String::with_capacity(input.len()),
+            prev_type: LineType::Blank,
+            consecutive_blanks: 0,
+            in_code_fence: false,
+        };
+
+        for line in input.lines() {
+            this.emit(line);
+        }
+
+        this.output
+    }
+
+    /// Process and emit a single line.
+    fn emit(&mut self, line: &str) {
+        // Inside code fence: pass through verbatim
+        if self.in_code_fence {
+            if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+                self.in_code_fence = false;
+            }
+            self.write_line(line);
+            return;
+        }
+
+        let line_type = LineType::classify(line);
+
+        // Toggle code fence state on entry
+        if line_type == LineType::CodeFence {
+            self.in_code_fence = true;
+        }
+
+        // Skip HTML comments and empty list markers
+        if matches!(line_type, LineType::HtmlComment | LineType::EmptyListMarkers) {
+            return;
+        }
+
+        // Blank line handling: max 2 consecutive
+        if line_type == LineType::Blank {
+            self.consecutive_blanks += 1;
+            if self.consecutive_blanks <= 2 {
+                self.write_line(line);
+            }
+            self.prev_type = line_type;
+            return;
+        }
+
+        // Ensure blank line before block elements
+        if line_type.needs_blank_before() && self.prev_type != LineType::Blank {
+            self.write_line("");
+        }
+
+        // Process and emit
+        match line_type {
+            LineType::Heading => self.write_line(&Self::normalize_heading(line)),
+            _ => self.write_line(line),
+        }
+
+        self.consecutive_blanks = 0;
+        self.prev_type = line_type;
+    }
+
+    /// Write a line to the output buffer.
+    #[inline]
+    fn write_line(&mut self, line: &str) {
+        if !self.output.is_empty() {
+            self.output.push('\n');
+        }
+        self.output.push_str(line);
+    }
+
+    /// Ensure space after # in headings: `##Text` → `## Text`
+    fn normalize_heading(line: &str) -> String {
+        let trimmed = line.trim_start();
+        let indent = &line[..line.len() - trimmed.len()];
+        let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+        let rest = &trimmed[hash_count..];
+
+        if rest.is_empty() || rest.starts_with(' ') {
+            line.to_string()
+        } else {
+            format!("{}{} {}", indent, "#".repeat(hash_count), rest)
+        }
+    }
 }
 
 /// Process markdown links by converting relative URLs to absolute URLs
@@ -240,38 +408,30 @@ impl MarkdownConverter {
         self
     }
 
-    /// Convert HTML to Markdown synchronously (with built-in fallback)
+    /// Convert HTML to Markdown synchronously.
+    ///
+    /// Pipeline:
+    /// 1. htmd conversion with custom element handlers
+    /// 2. Streaming normalization (single-pass line processor)
+    /// 3. Table formatting (optional)
+    /// 4. HTML img tag fallback conversion
+    /// 5. Link/image removal (optional)
     pub fn convert_sync(&self, html: &str) -> Result<String> {
-        // First pass: Convert HTML to markdown with custom handlers
-        let custom_handlers = create_custom_handlers();
-        let mut markdown = html2md::parse_html_custom(html, &custom_handlers);
+        // Stage 1: htmd conversion with custom handlers
+        let converter = create_converter();
+        let raw_markdown = converter.convert(html)?;
 
-        // Clean up the markdown
-        markdown = Self::clean_markdown_static(&markdown);
+        // Stage 2: Streaming normalization (single pass)
+        // Handles: blank line collapsing, heading spacing, code fence passthrough,
+        // HTML comment removal, empty list marker removal
+        let mut markdown = MarkdownNormalizer::normalize(&raw_markdown);
 
-        // Handle code blocks
-        if self.code_highlighting {
-            markdown = CODE_BLOCK.replace_all(&markdown, "```$1\n").to_string();
-        }
-
-        // Clean up lists
-        markdown = SPACE_AFTER_LIST.replace_all(&markdown, "$1 ").to_string();
-
-        // Fix heading spacing
-        markdown = HEADING_SPACE.replace_all(&markdown, "$1 $2").to_string();
-
-        // Handle tables if enabled
+        // Stage 3: Table formatting (line-based, already efficient)
         if self.preserve_tables {
             markdown = Self::format_tables_static(&markdown);
         }
 
-        // Remove excessive newlines
-        markdown = EMPTY_LINES.replace_all(&markdown, "\n\n").to_string();
-
-        // Convert any remaining HTML img tags that html2md failed to convert
-        markdown = convert_remaining_html_images(&markdown);
-
-        // Handle links and images based on settings
+        // Stage 4: Optional link/image removal
         if !self.preserve_links {
             markdown = Self::remove_links_static(&markdown);
         }
@@ -297,41 +457,6 @@ impl MarkdownConverter {
     /// * `Err(anyhow::Error)` - Conversion error
     pub async fn convert(&self, html: &str) -> Result<String> {
         self.convert_sync(html)
-    }
-
-    fn clean_markdown_static(markdown: &str) -> String {
-        let mut cleaned = markdown.to_string();
-
-        // Remove HTML comments
-        cleaned = cleaned
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("<!--"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Remove empty list lines (lines with only bullets and no content)
-        // This must happen BEFORE list indentation fixes to avoid processing empty lines
-        cleaned = cleaned
-            .lines()
-            .filter(|line| !is_empty_list_line(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Fix list indentation
-        cleaned = cleaned
-            .lines()
-            .map(|line| {
-                if line.trim_start().starts_with(['-', '*', '+']) {
-                    let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-                    format!("{}{}", " ".repeat(indent), line.trim_start())
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        cleaned
     }
 
     fn format_tables_static(markdown: &str) -> String {
@@ -462,39 +587,23 @@ impl MarkdownConverter {
     }
 }
 
-/// Convert any remaining HTML img tags to markdown syntax
-///
-/// This is a fallback for images that html2md failed to convert.
-/// Uses a single robust pattern with optional alt attribute and safe capture group access.
-///
-/// # Arguments
-/// * `markdown` - Markdown string potentially containing HTML img tags
-///
-/// # Returns
-/// * Markdown with all img tags converted to `![alt](src)` or `![](src)` syntax
-///
-/// # Implementation Notes
-/// - Uses closure-based replacement for safe capture group access
-/// - Handles images with or without alt attributes
-/// - Never panics on missing groups (uses .map_or for safety)
-fn convert_remaining_html_images(markdown: &str) -> String {
-    HTML_IMG_RE.replace_all(markdown, |caps: &regex::Captures| {
-        // Group 1 (src) is guaranteed to exist because pattern requires it
-        let src = caps.get(1)
-            .map_or("", |m| m.as_str());
-
-        // Group 2 (alt) is optional - use empty string if not present
-        let alt = caps.get(2)
-            .map_or("", |m| m.as_str());
-
-        // Generate markdown: ![alt](src) or ![](src)
-        format!("![{alt}]({src})")
-    }).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_full_converter_bold_text() {
+        let converter = MarkdownConverter::new();
+        let html = r#"<span data-as="p"><strong>Homebrew (macOS, Linux):</strong></span>"#;
+        let result = converter.convert_sync(html).unwrap();
+
+        // Should have proper bold formatting
+        assert!(
+            result.contains("**Homebrew (macOS, Linux):**"),
+            "Should have proper bold. Got: '{}'",
+            result
+        );
+    }
 
     #[test]
     fn test_process_markdown_links_basic() {

@@ -1,4 +1,4 @@
-//! Full site crawl example for ratatui.rs documentation
+//! Full site crawl example for Claude Code documentation
 //!
 //! This example demonstrates:
 //! - Full site crawling with all output formats (PNG, HTML, MD, JSON)
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Configure crawl with ALL features enabled
-    let output_dir = PathBuf::from("docs/ratatui.rs");
+    let output_dir = PathBuf::from("docs/code.claude.com");
 
     // Delete existing output directory to ensure fresh crawl
     if output_dir.exists() {
@@ -34,22 +34,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::remove_dir_all(&output_dir)?;
     }
 
-    log::info!("🚀 Starting FULL SITE crawl of ratatui.rs documentation");
+    log::info!("🚀 Starting FULL SITE crawl of Claude Code documentation");
     log::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let search_index_dir = output_dir.join(".search_index");
 
     let config = CrawlConfig::builder()
         .storage_dir(output_dir.clone())
-        .start_url("https://ratatui.rs/")
-        .limit(None) // ✅ Crawl ALL pages (no limit)
-        .max_depth(10) // ✅ Deep crawl (all levels)
-        .save_markdown(true) // ✅ Save markdown
-        // JSON is always saved by default (no setter method exists)
-        .save_raw_html(true) // ✅ Save HTML
-        .save_screenshots(true) // ✅ Save PNG screenshots
-        .search_index_dir(Some(search_index_dir.clone())) // ✅ Enable Tantivy search (automatic indexing)
+        .start_url("https://code.claude.com/docs/en/")
+        .limit(None) // Crawl ALL pages (no limit)
+        .max_depth(10) // Deep crawl (all levels)
+        .save_markdown(true) // Save markdown
+        .save_raw_html(true) // Save HTML
+        .save_screenshots(true) // Save PNG screenshots
+        .search_index_dir(Some(search_index_dir.clone())) // Enable Tantivy search
         .crawl_rate_rps(2.0) // Polite: 2 pages per second
-        .allow_subdomains(false) // Stay on ratatui.rs only
+        .allow_subdomains(false) // Stay on docs.anthropic.com only
         .build()
         .expect("Failed to build config");
 
@@ -70,12 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     log::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    // Initialize search engine and incremental indexing (exactly like MCP path)
+    // Initialize search engine and incremental indexing
     log::info!("🔧 Initializing search engine and incremental indexing...");
     let engine = SearchEngine::create(&config).await?;
     let (_service, indexing_sender) = IncrementalIndexingService::start(engine).await?;
 
-    // Attach indexing sender to config (exactly like MCP does in start_crawl.rs)
+    // Attach indexing sender to config
     let config = config.with_indexing_sender(Arc::new(indexing_sender));
     log::info!("✅ Incremental indexing service started");
 
@@ -133,12 +132,13 @@ async fn test_search(config: &CrawlConfig) -> Result<(), Box<dyn std::error::Err
     log::info!("📝 Running test queries using SearchQueryBuilder:");
     log::info!("");
 
-    // Test queries using existing SearchQueryBuilder API
+    // Test queries for Claude Code documentation
     let test_queries = vec![
-        ("ratatui", "Basic search for 'ratatui'"),
+        ("claude code", "Basic search for 'claude code'"),
         ("installation", "Search for installation docs"),
-        ("tutorial", "Search for tutorials"),
-        ("widget", "Search for widget information"),
+        ("hooks", "Search for hooks information"),
+        ("MCP", "Search for MCP server docs"),
+        ("terminal", "Search for terminal commands"),
     ];
 
     for (query_str, description) in test_queries {

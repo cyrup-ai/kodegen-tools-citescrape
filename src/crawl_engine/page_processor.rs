@@ -11,7 +11,6 @@
 use anyhow::Result;
 use bloomfilter::Bloom;
 use chromiumoxide::browser::Browser;
-use html2md;
 use log::{debug, error, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -189,8 +188,8 @@ pub async fn process_single_page(
             match convert_html_to_markdown(&page_data.content, &conversion_options).await {
                 Ok(md) => md,
                 Err(e) => {
-                    warn!("Markdown conversion failed: {e}, using html2md fallback");
-                    html2md::parse_html(&page_data.content)
+                    warn!("Markdown conversion failed: {e}, using htmd fallback");
+                    htmd::convert(&page_data.content).unwrap_or_default()
                 }
             };
 
