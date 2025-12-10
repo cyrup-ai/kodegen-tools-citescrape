@@ -13,8 +13,6 @@ use std::sync::Arc;
 
 const ANSI_CYAN: &str = "\x1b[36m";
 const ANSI_RESET: &str = "\x1b[0m";
-const ICON_SEARCH: &str = "󰍉";
-const ICON_LIST: &str = "󰮒";
 
 // =============================================================================
 // Tool Struct
@@ -87,8 +85,8 @@ impl Tool for WebSearchTool {
             &results.results[0].title
         };
 
-        let line1 = format!("{}{} Web Search: {}{}", ANSI_CYAN, ICON_SEARCH, results.query, ANSI_RESET);
-        let line2 = format!("  {} Results: {} · Top: {}", ICON_LIST, count, first_title);
+        let line1 = format!("{}Web Search: {}{}", ANSI_CYAN, results.query, ANSI_RESET);
+        let line2 = format!("  Results: {} · Top: {}", count, first_title);
         let summary = format!("{}\n{}", line1, line2);
 
         // Build typed output
