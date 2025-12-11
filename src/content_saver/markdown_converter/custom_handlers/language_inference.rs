@@ -80,10 +80,27 @@ pub fn infer_language_from_content(code: &str) -> Option<String> {
         return Some("toml".to_string());
     }
 
+    // PRIORITY 2.5: Rust struct/enum definitions (before YAML to prevent confusion)
+    // These contain : and indentation but are NOT YAML
+    if (code.contains("pub struct ") || code.contains("struct "))
+        && code.contains(": ")
+        && (code.contains("#[derive") || code.contains("impl ") || code.contains("pub fn "))
+    {
+        return Some("rust".to_string());
+    }
+
     // PRIORITY 3: YAML configuration files
+    // Must exclude Rust structs which have similar patterns
     if (code.contains(": ") || code.contains(":\n"))
         && !code.contains("fn ") // Avoid Rust functions
         && !code.contains("class ") // Avoid Python classes
+        // NEW: Exclude Rust patterns
+        && !code.contains("#[") // Rust attributes
+        && !code.contains("pub struct ") // Rust structs
+        && !code.contains("impl ") // Rust implementations
+        && !code.contains("-> ") // Rust return types
+        && !code.contains("::") // Rust path separator
+        // Positive YAML indicators
         && (code.starts_with("---")
             || code.contains("  ") // YAML relies on indentation
             || code.lines().filter(|l| l.trim_start().starts_with("- ")).count() >= 2)
@@ -282,6 +299,36 @@ pub fn validate_html_language(html_lang: &str, code: &str) -> bool {
         return false; // HTML says programming language, but content is config
     }
 
+    // Rust indicators - if present, YAML hints are wrong
+    if html_lang_lower == "yaml" {
+        // Strong Rust patterns that YAML never has
+        if code.contains("#[derive")
+            || code.contains("pub struct ")
+            || code.contains("impl ")
+            || code.contains("pub fn ")
+            || code.contains("-> ") // Function return type
+            || code.contains("::") // Path separator
+            // Rust primitive types in field declarations
+            || code.contains(": u8")
+            || code.contains(": u16")
+            || code.contains(": u32")
+            || code.contains(": u64")
+            || code.contains(": i8")
+            || code.contains(": i16")
+            || code.contains(": i32")
+            || code.contains(": i64")
+            || code.contains(": bool")
+            || code.contains(": f32")
+            || code.contains(": f64")
+            || code.contains(": usize")
+            || code.contains(": isize")
+            // Rust type annotations in structs
+            || (code.contains("struct ") && code.contains(": "))
+        {
+            return false; // HTML says yaml, but content is Rust
+        }
+    }
+
     true // HTML hint seems reasonable
 }
 
@@ -393,5 +440,34 @@ edition = "2021""#;
     #[test]
     fn test_short_code_no_inference() {
         assert_eq!(infer_language_from_content("x = 1"), None);
+    }
+
+    #[test]
+    fn test_infer_rust_struct_not_yaml() {
+        let code = r#"#[derive(Debug, Default)]
+pub struct App {
+    counter: u8,
+    exit: bool,
+}"#;
+        assert_eq!(infer_language_from_content(code), Some("rust".to_string()));
+    }
+
+    #[test]
+    fn test_validate_rejects_yaml_for_rust_struct() {
+        let code = r#"#[derive(Debug)]
+pub struct App {
+    counter: u8,
+}"#;
+        assert!(!validate_html_language("yaml", code));
+    }
+
+    #[test]
+    fn test_validate_accepts_yaml_for_actual_yaml() {
+        let code = r#"name: my-app
+version: 1.0.0
+dependencies:
+  - rust
+  - tokio"#;
+        assert!(validate_html_language("yaml", code));
     }
 }

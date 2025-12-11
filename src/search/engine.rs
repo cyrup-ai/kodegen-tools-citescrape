@@ -78,11 +78,18 @@ impl SearchEngine {
             .reader()
             .with_context(|| "Failed to create index reader")?;
 
-        // Create query parser for multiple fields
-        let query_parser = QueryParser::for_index(
+        // Create query parser for searchable fields only
+        // NOTE: raw_markdown is EXCLUDED from default search - it uses WhitespaceTokenizer
+        // (no stemming) which causes inconsistent matches. Users can still explicitly
+        // search it via "raw_markdown:term" syntax if needed.
+        let mut query_parser = QueryParser::for_index(
             &index,
-            vec![schema.title, schema.plain_content, schema.raw_markdown],
+            vec![schema.title, schema.plain_content],
         );
+
+        // Boost title matches higher than content for better relevance
+        query_parser.set_field_boost(schema.title, 2.0);
+        query_parser.set_field_boost(schema.plain_content, 1.0);
 
         Ok(SearchEngine {
             index,
@@ -162,6 +169,24 @@ impl SearchEngine {
     #[must_use]
     pub fn query_parser(&self) -> &QueryParser {
         &self.query_parser
+    }
+
+    /// Get the text analyzer (tokenizer) for a specific field
+    ///
+    /// Returns the TextAnalyzer configured for the field's indexing options.
+    /// Returns None if the field is not a text field or has no tokenizer configured.
+    pub fn get_text_analyzer(&self, field: tantivy::schema::Field) -> Option<tantivy::tokenizer::TextAnalyzer> {
+        use tantivy::schema::FieldType;
+
+        let field_entry = self.schema.schema.get_field_entry(field);
+
+        if let FieldType::Str(text_options) = field_entry.field_type()
+            && let Some(indexing_options) = text_options.get_indexing_options()
+        {
+            let tokenizer_name = indexing_options.tokenizer();
+            return self.index.tokenizers().get(tokenizer_name);
+        }
+        None
     }
 
     /// Delete document by URL

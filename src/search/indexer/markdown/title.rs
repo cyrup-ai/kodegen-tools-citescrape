@@ -2,6 +2,8 @@
 
 use imstr::ImString;
 
+use crate::utils::string_utils::safe_truncate_boundary;
+
 /// Extract title from markdown with full edge case handling
 #[inline]
 pub(crate) fn extract_title_from_markdown_optimized(markdown: &str) -> ImString {
@@ -90,12 +92,12 @@ pub(crate) fn extract_title_from_markdown_optimized(markdown: &str) -> ImString 
         })
         .map(|line| {
             let cleaned = clean_header_text(line.trim());
-            if cleaned.len() > 80 {
-                // Smart truncation at word boundary
-                let boundary = cleaned.as_str()[..77]
-                    .rfind(|c: char| c.is_whitespace() || "-,;:".contains(c))
-                    .unwrap_or(77);
-                ImString::from(format!("{}...", &cleaned.as_str()[..boundary].trim_end()))
+            
+            // Check CHARACTER count, not byte count
+            if cleaned.chars().count() > 80 {
+                // Smart truncation at word boundary within first 77 CHARACTERS
+                let boundary = safe_truncate_boundary(cleaned.as_str(), 77, " -,;:");
+                ImString::from(format!("{}...", cleaned.as_str()[..boundary].trim_end()))
             } else {
                 cleaned
             }

@@ -304,6 +304,7 @@ impl IncrementalIndexingService {
                             file_path.as_path(),
                             url,
                             &super::super::indexer::IndexingLimits::default(),
+                            "0", // Default crawl_id for incremental updates
                         )
                         .map_err(|e| anyhow::anyhow!("{e}"))
                     }

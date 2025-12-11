@@ -16,6 +16,7 @@ use syntect::util::as_24_bit_terminal_escaped;
 
 use super::registry::CrawlRegistry;
 use super::start_crawl::ScrapeUrlTool;
+use crate::utils::get_mirror_path;
 
 /// Global syntax set for markdown highlighting (loaded once)
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
@@ -137,13 +138,25 @@ impl Tool for FetchTool {
         let scrape_result = self.scrape_tool.execute(scrape_args, ctx).await?;
         let scrape_output = scrape_result.metadata;
 
-        // Get the output directory and find the markdown file
+        // Get the output directory
         let output_dir = scrape_output.output_dir.ok_or_else(|| {
             McpError::Other(anyhow::anyhow!("No output directory returned from scrape"))
         })?;
 
-        // Find the index.md or first .md file in the output directory
-        let md_path = find_markdown_file(&output_dir).await?;
+        // Use deterministic path calculation (same as crawler uses to save)
+        let md_path = get_mirror_path(&args.url, std::path::Path::new(&output_dir), "index.md")
+            .await
+            .map_err(|e| McpError::Other(anyhow::anyhow!("Failed to calculate markdown path: {}", e)))?;
+
+        // Verify file exists
+        if !tokio::fs::try_exists(&md_path).await.unwrap_or(false) {
+            return Err(McpError::Other(anyhow::anyhow!(
+                "Markdown file not found at expected path: {}",
+                md_path.display()
+            )));
+        }
+
+        let md_path_str = md_path.to_string_lossy().to_string();
 
         // Read the markdown content
         let markdown_content = tokio::fs::read_to_string(&md_path)
@@ -164,7 +177,7 @@ impl Tool for FetchTool {
 
         let output = FetchOutput {
             display,
-            path: md_path,
+            path: md_path_str,
             search_helper,
             url: args.url,
             title: title.clone(),
@@ -181,32 +194,3 @@ impl Tool for FetchTool {
     }
 }
 
-/// Find the primary markdown file in the output directory
-async fn find_markdown_file(output_dir: &str) -> Result<String, McpError> {
-    let dir_path = std::path::Path::new(output_dir);
-
-    // Try index.md first
-    let index_path = dir_path.join("index.md");
-    if index_path.exists() {
-        return Ok(index_path.to_string_lossy().to_string());
-    }
-
-    // Otherwise find any .md file
-    let mut entries = tokio::fs::read_dir(dir_path)
-        .await
-        .map_err(|e| McpError::Other(anyhow::anyhow!("Failed to read directory: {}", e)))?;
-
-    while let Some(entry) = entries.next_entry().await.map_err(|e| {
-        McpError::Other(anyhow::anyhow!("Failed to read entry: {}", e))
-    })? {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "md") {
-            return Ok(path.to_string_lossy().to_string());
-        }
-    }
-
-    Err(McpError::Other(anyhow::anyhow!(
-        "No markdown file found in {}",
-        output_dir
-    )))
-}

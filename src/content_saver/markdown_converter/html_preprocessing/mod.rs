@@ -15,4 +15,5 @@ mod table_preprocessing;
 // Re-export public API
 pub use main_content_extraction::extract_main_content;
 pub use html_cleaning::clean_html_content;
+pub use html_cleaning::normalize_html_structure;
 pub use table_preprocessing::preprocess_tables;

@@ -226,17 +226,26 @@ impl ConversionOptions {
 /// assert!(markdown.contains("**important**"));
 /// ```
 pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) -> Result<String> {
+    // Stage 0: Normalize HTML structure (PREVENTIVE - Layer 3 defense against HTML leakage)
+    let normalized_html = match html_preprocessing::normalize_html_structure(html) {
+        Ok(normalized) => normalized,
+        Err(e) => {
+            tracing::debug!("HTML normalization failed: {}, using original HTML", e);
+            html.to_string()
+        }
+    };
+
     // Stage 1: Extract main content (with fallback to full HTML)
     let main_html = if options.extract_main_content {
-        match extract_main_content(html) {
+        match extract_main_content(&normalized_html) {
             Ok(content) => content,
             Err(e) => {
                 tracing::debug!("Main content extraction failed: {}, using full HTML", e);
-                html.to_string()
+                normalized_html
             }
         }
     } else {
-        html.to_string()
+        normalized_html
     };
 
     // Stage 2: Clean HTML (with passthrough if disabled)
@@ -286,6 +295,14 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Stage 3.6: Filter collapsed code section indicators
     // Removes "X collapsed lines" UI artifacts from code viewer widgets
     let markdown = markdown_postprocessing::filter_collapsed_lines(&markdown);
+    
+    // Stage 3.7: Strip bold markers from code fences
+    // Fixes corrupted fences like **```rust that should be ```rust
+    let markdown = markdown_postprocessing::strip_bold_from_code_fences(&markdown);
+    
+    // Stage 3.8: Strip trailing asterisks after code fences (safety net)
+    // Removes any `**` or `****` that appear after closing code fences
+    let markdown = markdown_postprocessing::strip_trailing_asterisks_after_code_fences(&markdown);
 
     // Stage 4: Process markdown headings (with passthrough if disabled)
     let processed_markdown = if options.process_headings {
@@ -294,11 +311,14 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
         markdown
     };
 
+    // Stage 4.5: Strip residual HTML tags (DEFENSIVE - Layer 2 defense against HTML leakage)
+    let markdown = markdown_postprocessing::strip_residual_html_tags(&processed_markdown);
+
     // Stage 5: Normalize whitespace (with passthrough if disabled)
     let final_markdown = if options.normalize_whitespace {
-        normalize_whitespace(&processed_markdown)
+        normalize_whitespace(&markdown)
     } else {
-        processed_markdown
+        markdown
     };
 
     Ok(final_markdown)

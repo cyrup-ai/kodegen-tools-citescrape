@@ -30,6 +30,7 @@ pub struct ProcessedMarkdown {
     pub crawl_date: DateTime<Utc>,
     pub file_size: u64,
     pub word_count: u64,
+    pub crawl_id: ImString,
 }
 
 /// Phase of batch indexing operation

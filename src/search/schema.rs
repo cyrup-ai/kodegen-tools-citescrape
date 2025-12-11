@@ -35,6 +35,8 @@ pub struct SearchSchema {
     pub crawl_date: Field,
     pub file_size: Field,
     pub word_count: Field,
+    pub domain: Field,   // NEW: For domain-scoped searches
+    pub crawl_id: Field, // NEW: Crawl session identifier
 }
 
 /// Schema builder for flexible configuration and validation
@@ -116,6 +118,8 @@ impl SearchSchema {
             "crawl_date",
             "file_size",
             "word_count",
+            "domain",
+            "crawl_id",
         ];
 
         let existing_fields: HashSet<&str> = self
@@ -149,6 +153,8 @@ impl SearchSchema {
             ("crawl_date", "Date"),
             ("file_size", "U64"),
             ("word_count", "U64"),
+            ("domain", "Text"),
+            ("crawl_id", "Text"),
         ];
 
         for (field_name, expected_type) in &field_type_expectations {
@@ -543,6 +549,26 @@ impl SearchSchemaBuilder {
             NumericOptions::default().set_stored().set_indexed(),
         );
 
+        // Add domain field for filtering
+        let domain_options = TextOptions::default()
+            .set_stored()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer(EXACT_MATCH_TOKENIZER)
+                    .set_index_option(IndexRecordOption::Basic),
+            );
+        let domain = schema_builder.add_text_field("domain", domain_options);
+
+        // Add crawl_id field for filtering
+        let crawl_id_options = TextOptions::default()
+            .set_stored()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer(EXACT_MATCH_TOKENIZER)
+                    .set_index_option(IndexRecordOption::Basic),
+            );
+        let crawl_id = schema_builder.add_text_field("crawl_id", crawl_id_options);
+
         let schema = schema_builder.build();
 
         let search_schema = SearchSchema {
@@ -556,6 +582,8 @@ impl SearchSchemaBuilder {
             crawl_date,
             file_size,
             word_count,
+            domain,
+            crawl_id,
         };
 
         // Validate if enabled
@@ -600,6 +628,8 @@ impl Default for SearchSchema {
             crawl_date: tantivy::schema::Field::from_field_id(6),
             file_size: tantivy::schema::Field::from_field_id(7),
             word_count: tantivy::schema::Field::from_field_id(8),
+            domain: tantivy::schema::Field::from_field_id(9),
+            crawl_id: tantivy::schema::Field::from_field_id(10),
         }
     }
 }

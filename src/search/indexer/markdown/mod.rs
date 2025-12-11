@@ -19,6 +19,7 @@ pub(crate) fn process_markdown_content_optimized(
     markdown: &str,
     url: &ImString,
     file_path: &Path,
+    crawl_id: &str,
 ) -> Result<ProcessedMarkdown> {
     // Extract title efficiently
     let title = title::extract_title_from_markdown_optimized(markdown);
@@ -45,5 +46,6 @@ pub(crate) fn process_markdown_content_optimized(
         crawl_date,
         file_size,
         word_count,
+        crawl_id: ImString::from(crawl_id),
     })
 }

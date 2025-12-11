@@ -225,7 +225,7 @@ fn extract_validation(
 pub async fn extract_page_data(
     page: Page,
     url: String,
-    config: ExtractPageDataConfig,
+    config: &ExtractPageDataConfig,
 ) -> Result<super::schema::PageData> {
     log::debug!("Starting to extract page data for URL: {url}");
 
@@ -257,7 +257,27 @@ pub async fn extract_page_data(
         extract_links(page.clone()),
     )?;
 
-    // Get HTML content
+    // ============ OPTIONAL: Scroll to trigger lazy-loaded content ============
+    // For sites with infinite scroll or lazy-loading, scroll to bottom first
+    // This triggers all lazy-loaded content to start loading
+    super::extractors::scroll_to_bottom(&page, 500).await
+        .context("Failed to scroll page for lazy-loaded content")?;
+    // ========================================================================
+
+    // ============ CRITICAL FIX: Wait for page to be fully loaded ============
+    // This ensures all JavaScript has executed and dynamic content is rendered
+    // before we extract the HTML content. Without this, we only get the initial
+    // HTML skeleton, missing all JavaScript-rendered content.
+    //
+    // This uses the same wait_for_page_load() that screenshots use, ensuring
+    // consistency: if screenshots capture full content, HTML will too.
+    super::extractors::wait_for_page_load(&page, 10).await
+        .context("Failed to wait for page load before content extraction")?;
+    
+    log::debug!("Page fully loaded, extracting complete HTML content for: {url}");
+    // ========================================================================
+
+    // Get HTML content (now complete!)
     let content = page
         .content()
         .await

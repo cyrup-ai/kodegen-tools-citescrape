@@ -148,6 +148,7 @@ impl MarkdownIndexer {
                             tx: &tx,
                             start_time,
                             config: &config,
+                            crawl_id: "0", // Default crawl_id for batch indexing
                         };
                         batch::process_batch_with_writer(&ctx, batch, &mut writer);
 
@@ -197,6 +198,7 @@ impl MarkdownIndexer {
                     tx: &tx,
                     start_time,
                     config: &config,
+                    crawl_id: "0", // Default crawl_id for batch indexing
                 };
                 batch::process_batch_with_writer(&ctx, file_batch, &mut writer);
             }
@@ -261,6 +263,7 @@ impl MarkdownIndexer {
             &file_path,
             &url,
             &batch::IndexingLimits::default(),
+            "0", // Default crawl_id for single file indexing
         )?;
 
         // Commit using Tantivy's async Future-based API (non-blocking)

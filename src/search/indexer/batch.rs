@@ -105,6 +105,7 @@ pub(crate) struct BatchContext<'a> {
     >,
     pub start_time: Instant,
     pub config: &'a BatchConfig,
+    pub crawl_id: &'a str,
 }
 
 /// Process a batch of files with optimal performance (using shared writer)
@@ -147,7 +148,7 @@ pub(crate) fn process_batch_with_writer(
             }
 
             // Prepare document in parallel (CPU-intensive work)
-            match prepare_document_from_file(ctx.engine, file_path, url, &ctx.config.limits) {
+            match prepare_document_from_file(ctx.engine, file_path, url, &ctx.config.limits, ctx.crawl_id) {
                 Ok(doc) => {
                     ctx.progress.processed.fetch_add(1, Ordering::Relaxed);
                     Some(doc)
@@ -190,6 +191,7 @@ fn prepare_document_from_file(
     file_path: &Path,
     url: &ImString,
     limits: &IndexingLimits,
+    crawl_id: &str,
 ) -> Result<TantivyDocument> {
     // Reuse thread-local buffers (each thread has its own)
     DECOMPRESSION_BUFFER.with(|buffer| {
@@ -283,7 +285,14 @@ fn prepare_document_from_file(
             }
             
             // Process markdown
-            let processed = process_markdown_content_optimized(&markdown, url, file_path)?;
+            let processed = process_markdown_content_optimized(&markdown, url, file_path, crawl_id)?;
+            
+            // Extract domain from URL
+            let domain = url.as_str()
+                .strip_prefix("https://")
+                .or_else(|| url.as_str().strip_prefix("http://"))
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("");
             
             // Create document
             let mut doc = TantivyDocument::default();
@@ -299,6 +308,8 @@ fn prepare_document_from_file(
             );
             doc.add_u64(engine.schema().file_size, processed.file_size);
             doc.add_u64(engine.schema().word_count, processed.word_count);
+            doc.add_text(engine.schema().domain, domain);
+            doc.add_text(engine.schema().crawl_id, crawl_id);
             
             Ok(doc)
         })
@@ -312,8 +323,9 @@ pub(crate) fn index_single_file_sync(
     file_path: &Path,
     url: &ImString,
     limits: &IndexingLimits,
+    crawl_id: &str,
 ) -> Result<()> {
-    let doc = prepare_document_from_file(engine, file_path, url, limits)?;
+    let doc = prepare_document_from_file(engine, file_path, url, limits, crawl_id)?;
     writer
         .add_document(doc)
         .with_context(|| format!("Failed to add document to index: {}", url.as_str()))?;

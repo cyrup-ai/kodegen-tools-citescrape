@@ -570,8 +570,12 @@ impl MarkdownConverter {
 
     /// Clean up a regular table row
     fn clean_table_row(row: &str) -> String {
-        // Normalize spacing
-        let cells: Vec<&str> = row.split('|').map(|s| s.trim()).collect();
+        // Normalize spacing and filter empty cells
+        let cells: Vec<&str> = row
+            .split('|')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         
         format!("|{}|", cells.join("|"))
     }

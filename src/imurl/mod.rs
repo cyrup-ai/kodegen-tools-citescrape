@@ -56,6 +56,24 @@ impl ImUrl {
         self.url.fragment()
     }
 
+    /// Returns a normalized URL with the fragment removed.
+    ///
+    /// This is essential for URL deduplication in web crawling, where
+    /// fragment anchors (#section) represent the same HTTP resource.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let url = ImUrl::parse("https://example.com/page#section1")?;
+    /// let normalized = url.without_fragment()?;
+    /// assert_eq!(normalized.as_str(), "https://example.com/page");
+    /// ```
+    pub fn without_fragment(&self) -> Result<Self> {
+        let mut url = (*self.url).clone();
+        url.set_fragment(None);
+        Self::parse(url.as_str())
+    }
+
     pub fn with_path(&self, path: &str) -> Result<Self> {
         let mut url = (*self.url).clone();
         url.set_path(path);

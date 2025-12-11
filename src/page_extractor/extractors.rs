@@ -28,7 +28,7 @@ use chromiumoxide::cdp::browser_protocol::page::{
 /// # Arguments
 /// * `page` - Page to wait for
 /// * `max_wait_secs` - Maximum time to wait (default 10s recommended)
-async fn wait_for_page_load(page: &Page, max_wait_secs: u64) -> Result<()> {
+pub async fn wait_for_page_load(page: &Page, max_wait_secs: u64) -> Result<()> {
     use std::time::{Duration, Instant};
     
     let start = Instant::now();
@@ -97,6 +97,155 @@ async fn wait_for_page_load(page: &Page, max_wait_secs: u64) -> Result<()> {
     
     log::debug!("Page load wait complete after {:.2}s", start.elapsed().as_secs_f64());
     Ok(())
+}
+
+/// Scroll to bottom of page to trigger lazy-loaded content
+///
+/// This function scrolls the page in increments to trigger lazy-loading
+/// of content that only appears when scrolled into view.
+///
+/// # Arguments
+/// * `page` - Page to scroll
+/// * `scroll_pause_ms` - Milliseconds to wait between scroll increments
+pub async fn scroll_to_bottom(page: &Page, scroll_pause_ms: u64) -> Result<()> {
+    log::debug!("Scrolling page to trigger lazy-loaded content");
+    
+    let scroll_script = r#"
+        (async function() {
+            const distance = 200; // Scroll 200px at a time
+            const delay = 100; // Wait 100ms between scrolls
+            
+            let lastHeight = document.documentElement.scrollHeight;
+            let currentHeight = 0;
+            
+            while (currentHeight < lastHeight) {
+                window.scrollBy(0, distance);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                currentHeight = window.pageYOffset + window.innerHeight;
+                lastHeight = document.documentElement.scrollHeight;
+            }
+            
+            // Scroll back to top
+            window.scrollTo(0, 0);
+            
+            return {
+                totalHeight: lastHeight,
+                scrollsPerformed: Math.ceil(lastHeight / distance)
+            };
+        })()
+    "#;
+    
+    match page.evaluate(scroll_script).await {
+        Ok(result) => {
+            if let Ok(value) = result.into_value::<serde_json::Value>() {
+                let total_height = value.get("totalHeight").and_then(|v| v.as_i64()).unwrap_or(0);
+                let scrolls = value.get("scrollsPerformed").and_then(|v| v.as_i64()).unwrap_or(0);
+                log::debug!("Scrolled page: {} pixels in {} increments", total_height, scrolls);
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to scroll page: {}", e);
+        }
+    }
+    
+    // Final pause to let any triggered lazy-loads complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(scroll_pause_ms)).await;
+    
+    Ok(())
+}
+
+/// Capture screenshot with retry logic for transient CDP errors
+///
+/// CDP error -32000 "Unable to capture screenshot" can occur transiently when:
+/// - Page is scrolling to hash fragment
+/// - Viewport is in transition
+/// - Rendering pipeline is not ready
+///
+/// This function implements exponential backoff retry to handle these cases.
+///
+/// # Arguments
+/// * `page` - Page to screenshot
+/// * `params` - CDP screenshot parameters
+/// * `max_attempts` - Maximum retry attempts (default: 3)
+///
+/// # Returns
+/// * `Ok(Vec<u8>)` - Screenshot data
+/// * `Err` - Persistent error after all retries
+async fn capture_screenshot_with_retry(
+    page: &Page,
+    params: CaptureScreenshotParams,
+    max_attempts: u32,
+) -> Result<Vec<u8>> {
+    use std::time::Duration;
+    
+    let mut last_error = None;
+    
+    for attempt in 1..=max_attempts {
+        // Exponential backoff: 0ms, 500ms, 1500ms
+        if attempt > 1 {
+            let delay_ms = match attempt {
+                2 => 500,
+                3 => 1500,
+                _ => 2000,
+            };
+            log::debug!(
+                "Screenshot attempt {} of {} (retry after {}ms)",
+                attempt,
+                max_attempts,
+                delay_ms
+            );
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        
+        match page.screenshot(params.clone()).await {
+            Ok(data) => {
+                if attempt > 1 {
+                    log::info!(
+                        "Screenshot succeeded on attempt {} after retry",
+                        attempt
+                    );
+                }
+                return Ok(data);
+            }
+            Err(e) => {
+                let error_string = e.to_string();
+                
+                // Check if this is the transient CDP -32000 error
+                if error_string.contains("-32000") || error_string.contains("Unable to capture screenshot") {
+                    log::debug!(
+                        "Transient screenshot error on attempt {}: {}",
+                        attempt,
+                        error_string
+                    );
+                    last_error = Some(e);
+                    
+                    // Continue to next attempt if not final
+                    if attempt < max_attempts {
+                        continue;
+                    }
+                } else {
+                    // Non-transient error, fail immediately
+                    return Err(anyhow::anyhow!(
+                        "Screenshot failed with non-retryable error: {e}"
+                    ));
+                }
+            }
+        }
+    }
+    
+    // All retries exhausted - use if let to avoid unwrap()
+    if let Some(e) = last_error {
+        Err(anyhow::anyhow!(
+            "Screenshot failed after {} attempts: {}",
+            max_attempts,
+            e
+        ))
+    } else {
+        Err(anyhow::anyhow!(
+            "Screenshot failed after {} attempts with no error captured",
+            max_attempts
+        ))
+    }
 }
 
 /// Extract page metadata with zero allocation
@@ -228,11 +377,11 @@ pub async fn extract_links(page: Page) -> Result<Vec<super::schema::CrawlLink>> 
 
 /// Take a screenshot of the page
 pub async fn capture_screenshot(page: Page, url: &str, output_dir: &std::path::Path) -> Result<()> {
-    let url = url.to_string();
+    let url_str = url.to_string();
     let output_dir = output_dir.to_path_buf();
 
     // Get mirror path (async)
-    let path = crate::utils::get_mirror_path(&url, &output_dir, "index.png").await?;
+    let path = crate::utils::get_mirror_path(&url_str, &output_dir, "index.png").await?;
 
     // Ensure .gitignore exists in domain directory
     crate::utils::ensure_domain_gitignore(&path, &output_dir).await?;
@@ -243,10 +392,54 @@ pub async fn capture_screenshot(page: Page, url: &str, output_dir: &std::path::P
     )
     .await?;
 
-    // ============ FIX: Wait for page to be fully loaded ============
-    // Without this, screenshots will be blank for JS-heavy sites
+    // Wait for page to be fully loaded
     wait_for_page_load(&page, 10).await?;
-    // ================================================================
+
+    // ============ FIX: Hash fragment handling ============
+    // URLs with hash fragments (e.g., #section-id) trigger in-page
+    // navigation AFTER page load. Add extra wait for scroll to complete.
+    if url_str.contains('#') {
+        log::debug!("URL contains hash fragment, waiting for scroll to complete");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    // =====================================================
+
+    // ============ FIX: Validate viewport dimensions ============
+    // Ensure viewport is in valid state before screenshot attempt.
+    // Invalid viewport (0x0 or transitioning) causes CDP error -32000.
+    let viewport_check = page.evaluate(r#"
+        (function() {
+            return {
+                width: window.innerWidth,
+                height: window.innerHeight,
+                scrollY: window.scrollY,
+                documentHeight: document.documentElement.scrollHeight
+            };
+        })()
+    "#).await;
+    
+    if let Ok(result) = viewport_check
+        && let Ok(viewport) = result.into_value::<serde_json::Value>() {
+        let width = viewport.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+        let height = viewport.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+        
+        log::debug!(
+            "Viewport: {}x{}, scrollY: {}, docHeight: {}",
+            width,
+            height,
+            viewport.get("scrollY").and_then(|v| v.as_u64()).unwrap_or(0),
+            viewport.get("documentHeight").and_then(|v| v.as_u64()).unwrap_or(0)
+        );
+        
+        if width == 0 || height == 0 {
+            return Err(anyhow::anyhow!(
+                "Invalid viewport dimensions: {}x{}, cannot capture screenshot",
+                width,
+                height
+            ));
+        }
+    }
+    // ===========================================================
 
     let params = CaptureScreenshotParams {
         quality: Some(100),
@@ -255,16 +448,16 @@ pub async fn capture_screenshot(page: Page, url: &str, output_dir: &std::path::P
         ..Default::default()
     };
 
-    let screenshot_data = page
-        .screenshot(params)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to capture screenshot: {e}"))?;
+    // ============ FIX: Use retry logic for CDP call ============
+    // CDP error -32000 is often transient. Retry with exponential backoff.
+    let screenshot_data = capture_screenshot_with_retry(&page, params, 3).await?;
+    // ===========================================================
 
     // Save compressed file directly with async/await
     let (_saved_path, _metadata) =
         crate::content_saver::save_compressed_file(screenshot_data, &path, "image/png", false)
             .await?;
 
-    log::debug!("Screenshot captured and saved successfully for URL: {url}");
+    log::debug!("Screenshot captured and saved successfully for URL: {url_str}");
     Ok(())
 }

@@ -16,3 +16,6 @@ pub use heading_extraction::{extract_heading_level, normalize_heading_level};
 pub use processor::process_markdown_headings;
 pub use whitespace_normalization::normalize_whitespace;
 pub use code_block_cleaning::filter_collapsed_lines;
+pub use code_block_cleaning::strip_bold_from_code_fences;
+pub use code_block_cleaning::strip_trailing_asterisks_after_code_fences;
+pub use code_block_cleaning::strip_residual_html_tags;

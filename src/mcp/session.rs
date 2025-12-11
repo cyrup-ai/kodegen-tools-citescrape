@@ -279,11 +279,20 @@ impl CrawlSession {
         // Get or initialize search engine
         let entry = self.engine_cache.get_or_init(self.output_dir.clone(), &config).await?;
 
+        // Extract domain from url for filtering
+        let domain_filter = url.as_ref().and_then(|u| {
+            u.strip_prefix("https://")
+                .or_else(|| u.strip_prefix("http://"))
+                .and_then(|s| s.split('/').next())
+                .map(|s| s.to_string())
+        });
+
         // Execute search (reuse existing SearchQueryBuilder)
         let search_results = SearchQueryBuilder::new(&query)
             .limit(limit)
             .offset(_offset)
             .highlight(highlight)
+            .domain_filter(domain_filter)
             .execute_with_metadata((*entry.engine).clone())
             .await?;
 

@@ -36,7 +36,7 @@ pub async fn save_json_data(
 
 /// Save page data as JSON
 pub async fn save_page_data(
-    page_data: std::sync::Arc<crate::page_extractor::schema::PageData>,
+    page_data: crate::page_extractor::schema::PageData,
     url: String,
     output_dir: std::path::PathBuf,
 ) -> Result<()> {
@@ -45,9 +45,12 @@ pub async fn save_page_data(
     // Ensure .gitignore exists in domain directory
     ensure_domain_gitignore(&path, &output_dir).await?;
 
+    // Wrap in Arc for spawn_blocking (internal implementation detail)
+    let page_data_arc = std::sync::Arc::new(page_data);
+
     // PageData serialization (keep spawn_blocking - CPU intensive)
     let json_content =
-        tokio::task::spawn_blocking(move || serde_json::to_string_pretty(&*page_data))
+        tokio::task::spawn_blocking(move || serde_json::to_string_pretty(&*page_data_arc))
             .await
             .map_err(|e| anyhow::anyhow!("PageData serialization task panicked: {e}"))??;
 

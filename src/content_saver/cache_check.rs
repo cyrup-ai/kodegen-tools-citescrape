@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use chromiumoxide::cdp::browser_protocol::network::{EventResponseReceived, Headers};
+use chromiumoxide::cdp::browser_protocol::network::{
+    EventResponseReceived, Headers, RequestId, ResourceType,
+};
 use chromiumoxide::listeners::EventStream;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
@@ -83,22 +85,35 @@ pub fn extract_etag_from_headers(headers: &Headers) -> Option<String> {
 /// Listens to responseReceived events until we find the main document response.
 /// Returns true if etag matches (cache hit), false otherwise.
 ///
+/// Uses Request ID tracking to handle redirects correctly - all responses in a
+/// redirect chain share the same request_id, allowing us to match the final
+/// response regardless of URL transformations (HTTP→HTTPS, www, trailing slash).
+///
 /// # Arguments
 /// * `events` - Event stream of network responses from CDP
-/// * `url` - The URL to match against response events
+/// * `_url` - The URL to match against response events (kept for signature compatibility)
 /// * `expected_etag` - The etag from cached file to compare
 /// * `timeout_duration` - How long to wait for response (configurable per crawl)
 pub async fn check_etag_from_events(
     events: &mut EventStream<EventResponseReceived>,
-    url: &str,
+    _url: &str,
     expected_etag: &str,
     timeout_duration: Duration,
 ) -> bool {
     // Use provided timeout instead of hardcoded value
     let result = timeout(timeout_duration, async {
+        let mut main_request_id: Option<RequestId> = None;
+
         while let Some(event) = events.next().await {
-            // Only check main document, not images/css/js
-            if event.response.url == url {
+            // Track first Document type request
+            if main_request_id.is_none() && event.r#type == ResourceType::Document {
+                main_request_id = Some(event.request_id.clone());
+            }
+
+            // Check ETag for main document (works across redirects)
+            if let Some(ref req_id) = main_request_id
+                && event.request_id == *req_id
+            {
                 if let Some(received_etag) = extract_etag_from_headers(&event.response.headers) {
                     return received_etag == expected_etag;
                 }

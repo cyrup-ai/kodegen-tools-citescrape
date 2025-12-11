@@ -13,6 +13,8 @@ pub struct SearchQueryBuilder {
     limit: usize,
     offset: usize,
     highlight: bool,
+    domain_filter: Option<String>,
+    crawl_id_filter: Option<String>,
 }
 
 impl SearchQueryBuilder {
@@ -23,6 +25,8 @@ impl SearchQueryBuilder {
             limit: 10,
             offset: 0,
             highlight: true,
+            domain_filter: None,
+            crawl_id_filter: None,
         }
     }
 
@@ -47,15 +51,31 @@ impl SearchQueryBuilder {
         self
     }
 
+    /// Set domain filter for search results
+    #[must_use]
+    pub fn domain_filter(mut self, domain: Option<impl Into<String>>) -> Self {
+        self.domain_filter = domain.map(|d| d.into());
+        self
+    }
+
+    /// Set crawl_id filter for search results
+    #[must_use]
+    pub fn crawl_id_filter(mut self, crawl_id: Option<impl Into<String>>) -> Self {
+        self.crawl_id_filter = crawl_id.map(|c| c.into());
+        self
+    }
+
     /// Execute the search query and return results
     pub async fn execute(self, engine: SearchEngine) -> Result<Vec<SearchResultItem>> {
         let query = self.query.clone();
         let limit = self.limit;
         let offset = self.offset;
         let highlight = self.highlight;
+        let domain_filter = self.domain_filter.as_deref();
+        let crawl_id_filter = self.crawl_id_filter.as_deref();
 
         let search_results =
-            execute_search_query(&engine, &query, limit, offset, highlight).await?;
+            execute_search_query(&engine, &query, limit, offset, highlight, domain_filter, crawl_id_filter).await?;
         Ok(search_results.results)
     }
 
@@ -65,7 +85,9 @@ impl SearchQueryBuilder {
         let limit = self.limit;
         let offset = self.offset;
         let highlight = self.highlight;
+        let domain_filter = self.domain_filter.as_deref();
+        let crawl_id_filter = self.crawl_id_filter.as_deref();
 
-        execute_search_query(&engine, &query, limit, offset, highlight).await
+        execute_search_query(&engine, &query, limit, offset, highlight, domain_filter, crawl_id_filter).await
     }
 }

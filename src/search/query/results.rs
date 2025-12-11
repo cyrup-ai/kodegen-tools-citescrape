@@ -41,6 +41,7 @@ pub(crate) fn convert_to_search_result(
     engine: &SearchEngine,
     score: f32,
     generators: Option<&SnippetGenerators>,
+    _query_terms: &[String],
 ) -> Result<SearchResultItem> {
     let schema = engine.schema();
 

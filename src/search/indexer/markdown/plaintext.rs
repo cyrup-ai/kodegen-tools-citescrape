@@ -25,24 +25,39 @@ pub(crate) fn markdown_to_plain_text_optimized(markdown: &str) -> ImString {
     let mut in_math_block = false;
     let mut list_depth = 0;
     let mut last_was_blank = true;
+    let mut html_block_line_count = 0;
+    const MAX_HTML_BLOCK_LINES: usize = 50;
 
     // Process line by line with reusable buffer (Option 3: Hybrid Approach)
     let mut line_buffer = String::with_capacity(256);
-    let lines = markdown.lines().peekable();
 
-    for line in lines {
+    for line in markdown.lines() {
         let trimmed = line.trim();
         let indent_level = line.len() - line.trim_start().len();
 
         // Handle code blocks (both ``` and ~~~)
         if !in_code_block && (trimmed.starts_with("```") || trimmed.starts_with("~~~")) {
             in_code_block = true;
-            code_fence = trimmed.chars().take(3).collect();
+            
+            // Capture full fence: character type and count
+            let fence_char = trimmed.chars().next().unwrap(); // '`' or '~'
+            let fence_count = trimmed.chars().take_while(|&c| c == fence_char).count();
+            
+            // Store the exact fence string for matching (e.g., "```" or "`````")
+            code_fence = fence_char.to_string().repeat(fence_count);
             continue;
-        } else if in_code_block && trimmed.starts_with(&code_fence) {
-            in_code_block = false;
-            code_fence.clear();
-            continue;
+        } else if in_code_block && !code_fence.is_empty() {
+            // Closing fence must have same char type and equal or greater count
+            let fence_char = code_fence.chars().next().unwrap();
+            let fence_count = code_fence.len();
+            let line_fence_count = trimmed.chars().take_while(|&c| c == fence_char).count();
+            
+            // Valid closing: same type, count >= opening, at least 3 chars
+            if line_fence_count >= fence_count && line_fence_count >= 3 {
+                in_code_block = false;
+                code_fence.clear();
+                continue;
+            }
         }
 
         if in_code_block {
@@ -71,12 +86,21 @@ pub(crate) fn markdown_to_plain_text_optimized(markdown: &str) -> ImString {
         // Handle HTML blocks
         if trimmed.starts_with('<') && !trimmed.starts_with("<!--") && is_html_block_tag(trimmed) {
             in_html_block = true;
+            html_block_line_count = 0;
         }
 
         if in_html_block {
-            if trimmed.ends_with('>') && is_closing_html_tag(trimmed) {
+            html_block_line_count += 1;
+            
+            // Check all escape conditions: proper closing tag, consecutive empty lines, or line limit
+            if (trimmed.ends_with('>') && is_closing_html_tag(trimmed))
+                || (trimmed.is_empty() && last_was_blank)
+                || (html_block_line_count > MAX_HTML_BLOCK_LINES)
+            {
                 in_html_block = false;
+                html_block_line_count = 0;
             }
+            
             continue;
         }
 
@@ -100,7 +124,7 @@ pub(crate) fn markdown_to_plain_text_optimized(markdown: &str) -> ImString {
         );
 
         // Clean up the processed line (UTF-8 safe allocating version)
-        line_buffer = clean_inline_formatting(line_buffer.clone());
+        line_buffer = clean_inline_formatting(line_buffer);
 
         // Add to result with proper spacing
         let cleaned = line_buffer.trim();
@@ -131,7 +155,7 @@ fn process_markdown_line_inplace(
     let trimmed = line.trim();
 
     // Handle tables
-    if trimmed.starts_with('|') && trimmed.ends_with('|') {
+    if trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() > 2 {
         let inner = &trimmed[1..trimmed.len() - 1];
 
         // Check if this is a separator row
@@ -156,7 +180,10 @@ fn process_markdown_line_inplace(
             }
             return;
         }
-    } else if *in_table && trimmed.is_empty() {
+    }
+
+    // Not a table line - reset table state if it was set
+    if *in_table {
         *in_table = false;
     }
 
@@ -164,14 +191,15 @@ fn process_markdown_line_inplace(
     buffer.push_str(line);
 
     // Remove headers (ATX style)
-    if let Some(pos) = buffer.find(|c: char| c != '#')
-        && pos > 0
-        && pos <= 6
-        && buffer.len() > pos
-        && buffer[pos..].starts_with(' ')
-    {
-        // Remove the header markers
-        buffer.drain(..=pos);
+    if let Some(pos) = buffer.find(|c: char| c != '#') {
+        // ATX-style header: 1-6 '#' characters followed by space
+        if (1..=6).contains(&pos) && buffer.len() > pos {
+            // Safety: find() returns valid UTF-8 boundary, and pos < len is verified
+            if buffer[pos..].starts_with(' ') {
+                // Remove header markers including the trailing space
+                buffer.drain(..=pos);
+            }
+        }
     }
 
     // Handle lists (ordered and unordered) - in-place
@@ -182,9 +210,13 @@ fn process_markdown_line_inplace(
         // Find where '>' is and remove it along with following whitespace
         if let Some(pos) = buffer.find('>') {
             buffer.drain(..=pos);
-            // Remove leading whitespace after '>'
-            while buffer.starts_with(char::is_whitespace) {
-                buffer.remove(0);
+            // Remove leading whitespace after '>' - O(n) single drain
+            let ws_end = buffer
+                .chars()
+                .position(|c| !c.is_whitespace())
+                .unwrap_or(buffer.len());
+            if ws_end > 0 {
+                buffer.drain(..ws_end);
             }
         } else {
             break;

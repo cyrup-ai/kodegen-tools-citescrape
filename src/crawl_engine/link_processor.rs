@@ -3,7 +3,6 @@
 //! This module handles extracting links from pages and managing the crawl queue.
 
 use anyhow::Result;
-use bloomfilter::Bloom;
 use chromiumoxide::Page;
 use log::{debug, warn};
 use std::collections::VecDeque;
@@ -11,11 +10,39 @@ use std::collections::VecDeque;
 use super::crawl_types::CrawlQueue;
 use crate::page_extractor::extractors::extract_links;
 
-/// State for managing the crawl queue and visited URLs
-/// Uses Bloom filter to prevent unbounded memory growth on large crawls
+/// Normalize a URL string by stripping fragment anchors.
+///
+/// Fragment identifiers (#foo) are client-side navigation markers that don't
+/// represent different HTTP resources. This function removes them to enable
+/// proper URL deduplication during crawling.
+///
+/// # Arguments
+/// * `url` - URL string to normalize
+///
+/// # Returns
+/// * `Ok(String)` - Normalized URL without fragment
+/// * `Err` - If URL parsing fails
+///
+/// # Examples
+///
+/// ```
+/// let normalized = normalize_url("https://example.com/page#section")?;
+/// assert_eq!(normalized, "https://example.com/page");
+/// ```
+fn normalize_url(url: &str) -> Result<String> {
+    let mut parsed = url::Url::parse(url)
+        .map_err(|e| anyhow::anyhow!("Failed to parse URL for normalization: {}", e))?;
+    parsed.set_fragment(None);
+    Ok(parsed.to_string())
+}
+
+/// State for managing the crawl queue
+/// 
+/// Note: URL deduplication is handled at two levels:
+/// 1. Orchestrator level: DashSet prevents re-crawling visited URLs
+/// 2. Queue level: Manual deduplication in page_processor prevents duplicate queue entries
 pub struct CrawlState {
     pub queue: VecDeque<CrawlQueue>,
-    pub visited_urls: Bloom<String>,
     pub max_depth: u8,
 }
 
@@ -25,10 +52,9 @@ pub async fn process_page_links(
     current_item: CrawlQueue,
     crawl_state: CrawlState,
     config: &crate::config::CrawlConfig,
-) -> Result<(VecDeque<CrawlQueue>, Bloom<String>)> {
+) -> Result<VecDeque<CrawlQueue>> {
     let CrawlState {
         queue,
-        visited_urls,
         max_depth,
     } = crawl_state;
     let mut crawl_queue = queue;
@@ -47,21 +73,34 @@ pub async fn process_page_links(
                     filtered_links.len()
                 );
 
-                // Add new links to queue (Bloom filter check - 1% false positive rate)
+                // Add new links to queue
+                // Note: Deduplication is handled by orchestrator's DashSet
                 for link_url in filtered_links {
-                    if !visited_urls.check(&link_url) {
-                        // Validate URL before adding to queue to prevent parse failures downstream
-                        if url::Url::parse(&link_url).is_ok() {
-                            crawl_queue.push_back(CrawlQueue {
-                                url: link_url,
-                                depth: current_item.depth + 1,
-                            });
-                        } else {
+                    // Normalize URL by stripping fragment for deduplication
+                    let normalized_url = match normalize_url(&link_url) {
+                        Ok(url) => url,
+                        Err(e) => {
                             warn!(
                                 target: "citescrape::links",
-                                "Skipping invalid URL: {link_url}"
+                                "Failed to normalize URL {}: {}, skipping",
+                                link_url, e
                             );
+                            continue;
                         }
+                    };
+                    
+                    // Add to queue - deduplication happens at page_processor level (queue comparison)
+                    // and orchestrator level (DashSet prevents re-visiting URLs)
+                    if url::Url::parse(&normalized_url).is_ok() {
+                        crawl_queue.push_back(CrawlQueue {
+                            url: normalized_url,  // Store normalized URL (no fragment)
+                            depth: current_item.depth + 1,
+                        });
+                    } else {
+                        warn!(
+                            target: "citescrape::links",
+                            "Skipping invalid normalized URL: {normalized_url}"
+                        );
                     }
                 }
             }
@@ -75,5 +114,5 @@ pub async fn process_page_links(
             }
         }
     }
-    Ok((crawl_queue, visited_urls))
+    Ok(crawl_queue)
 }

@@ -7,6 +7,7 @@
 // Sub-modules
 pub mod circuit_breaker;
 pub mod cleanup;
+pub mod content_validator;
 pub mod crawl_types;
 pub mod crawler;
 pub mod domain_limiter;
@@ -34,6 +35,9 @@ pub use crawler::{ChromiumoxideCrawler, extract_valid_urls, should_visit_url};
 
 // Re-export circuit breaker types
 pub use circuit_breaker::{CircuitBreaker, CircuitState, DomainHealth, extract_domain};
+
+// Re-export content validator types
+pub use content_validator::{validate_page_content, ContentValidationResult};
 
 // Re-export domain limiter
 pub use domain_limiter::DomainLimiter;
