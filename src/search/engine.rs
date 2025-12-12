@@ -42,12 +42,47 @@ impl SearchEngine {
             .await
             .with_context(|| "Failed to build schema")?;
 
-        // Open or create Tantivy index with the proper schema
+        // Open or create Tantivy index with schema compatibility check
         let index = if index_dir.join("meta.json").exists() {
-            Index::open_in_dir(&index_dir)
-                .with_context(|| format!("Failed to open existing index at {index_dir:?}"))?
+            let existing_index = Index::open_in_dir(&index_dir)
+                .with_context(|| format!("Failed to open existing index at {index_dir:?}"))?;
+
+            // SCHEMA COMPATIBILITY CHECK
+            // Compare schema field counts to detect version mismatch
+            let existing_field_count = existing_index.schema().num_fields();
+            let expected_field_count = schema.schema.num_fields();
+
+            if existing_field_count != expected_field_count {
+                tracing::warn!(
+                    existing_fields = existing_field_count,
+                    expected_fields = expected_field_count,
+                    "Schema mismatch detected - recreating index"
+                );
+
+                // Close existing index handle before deletion
+                drop(existing_index);
+
+                // Remove old incompatible index
+                std::fs::remove_dir_all(&index_dir)
+                    .with_context(|| format!("Failed to remove old index at {index_dir:?}"))?;
+                std::fs::create_dir_all(&index_dir)
+                    .with_context(|| format!("Failed to recreate index directory at {index_dir:?}"))?;
+
+                // Create new index with current schema
+                let mmap_directory = MmapDirectory::open(&index_dir)
+                    .with_context(|| format!("Failed to create index directory at {index_dir:?}"))?;
+                Index::create(
+                    mmap_directory,
+                    schema.schema.clone(),
+                    IndexSettings::default(),
+                )
+                .with_context(|| "Failed to create new Tantivy index")?
+            } else {
+                // Schema matches - use existing index
+                existing_index
+            }
         } else {
-            // Create index with the PROPER schema (not empty default)
+            // Create brand new index with the PROPER schema (not empty default)
             let mmap_directory = MmapDirectory::open(&index_dir)
                 .with_context(|| format!("Failed to create index directory at {index_dir:?}"))?;
             Index::create(

@@ -22,6 +22,17 @@ const RAW_MARKDOWN_TOKENIZER: &str = "raw_markdown";
 const CONTENT_SEARCH_TOKENIZER: &str = "content_search";
 const NGRAM_TOKENIZER: &str = "ngram_search";
 
+/// Schema version - increment when adding/removing/modifying fields
+/// Version history:
+/// - v1: Initial 9-field schema (url, path, title, raw_markdown, plain_content, snippet, crawl_date, file_size, word_count)
+/// - v2: Added domain, crawl_id fields (11 total)
+#[allow(dead_code)]
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// Expected field count for current schema version
+#[allow(dead_code)]
+pub const EXPECTED_FIELD_COUNT: usize = 11;
+
 /// Production search schema with optimized dual indexing for markdown content
 #[derive(Debug, Clone)]
 pub struct SearchSchema {
@@ -615,21 +626,9 @@ impl Default for SearchSchemaBuilder {
 
 impl Default for SearchSchema {
     fn default() -> Self {
-        // We can't use async in Default, so return a fallback schema
-        // Fallback schema with basic fields only
-        SearchSchema {
-            schema: tantivy::schema::SchemaBuilder::new().build(),
-            url: tantivy::schema::Field::from_field_id(0),
-            path: tantivy::schema::Field::from_field_id(1),
-            title: tantivy::schema::Field::from_field_id(2),
-            raw_markdown: tantivy::schema::Field::from_field_id(3),
-            plain_content: tantivy::schema::Field::from_field_id(4),
-            snippet: tantivy::schema::Field::from_field_id(5),
-            crawl_date: tantivy::schema::Field::from_field_id(6),
-            file_size: tantivy::schema::Field::from_field_id(7),
-            word_count: tantivy::schema::Field::from_field_id(8),
-            domain: tantivy::schema::Field::from_field_id(9),
-            crawl_id: tantivy::schema::Field::from_field_id(10),
-        }
+        panic!(
+            "SearchSchema::default() is not supported. \
+             Use SearchSchema::builder().build().await instead."
+        );
     }
 }
