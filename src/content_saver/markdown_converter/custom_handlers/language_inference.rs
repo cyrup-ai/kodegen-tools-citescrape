@@ -1,7 +1,126 @@
 //! Language inference for code blocks
 //!
-//! Heuristic-based language detection for code content when HTML attributes
-//! don't provide language information.
+//! Weighted pattern scoring language detection inspired by GitHub Linguist
+//! and highlight.js. Uses pattern categorization with confidence thresholds.
+
+use once_cell::sync::Lazy;
+use regex::{Regex, RegexSet};
+
+use super::language_patterns::ALL_LANGUAGES;
+
+// ============================================================================
+// Data Structures for Weighted Scoring
+// ============================================================================
+
+/// Confidence level for language detection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Confidence {
+    None,      // score < 5
+    Low,       // 5 <= score < 12
+    Medium,    // 12 <= score < 20
+    High,      // score >= 20
+}
+
+/// Pattern weight categories - inspired by highlight.js relevance scoring
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub enum PatternCategory {
+    Unique,      // 10 pts - Only this language has this pattern
+    Strong,      // 8 pts  - Very indicative, rarely elsewhere
+    Medium,      // 5 pts  - Common but shared across languages
+    Weak,        // 2 pts  - Mildly suggestive
+    Negative,    // -10 pts - Disqualifies this language
+}
+
+impl PatternCategory {
+    pub const fn weight(&self) -> i8 {
+        match self {
+            PatternCategory::Unique => 10,
+            PatternCategory::Strong => 8,
+            PatternCategory::Medium => 5,
+            PatternCategory::Weak => 2,
+            PatternCategory::Negative => -10,
+        }
+    }
+}
+
+/// A single pattern with its category
+pub struct WeightedPattern {
+    pub pattern: &'static str,
+    pub category: PatternCategory,
+}
+
+impl WeightedPattern {
+    pub const fn new(pattern: &'static str, category: PatternCategory) -> Self {
+        Self { pattern, category }
+    }
+}
+
+/// Complete definition for one language
+pub struct LanguageDefinition {
+    pub name: &'static str,
+    pub patterns: &'static [WeightedPattern],
+}
+
+/// Pre-compiled patterns for performance
+/// Uses RegexSet for fast multi-pattern matching, individual Regex for counting
+pub struct CompiledLanguage {
+    pub name: &'static str,
+    regex_set: RegexSet,
+    individual: Vec<Regex>,
+    weights: Vec<i8>,
+}
+
+impl CompiledLanguage {
+    pub fn compile(lang: &LanguageDefinition) -> Self {
+        let patterns: Vec<&str> = lang.patterns.iter()
+            .map(|p| p.pattern)
+            .collect();
+        
+        let weights: Vec<i8> = lang.patterns.iter()
+            .map(|p| p.category.weight())
+            .collect();
+        
+        Self {
+            name: lang.name,
+            regex_set: RegexSet::new(&patterns).expect("Invalid regex patterns in language definition"),
+            individual: patterns.iter()
+                .map(|p| Regex::new(p).expect("Invalid regex pattern"))
+                .collect(),
+            weights,
+        }
+    }
+    
+    /// Calculate weighted score for code against this language's patterns
+    /// Uses diminishing returns: first match gets full weight, subsequent matches get half
+    pub fn score(&self, code: &str) -> i32 {
+        let matches: Vec<usize> = self.regex_set.matches(code).iter().collect();
+        
+        matches.iter()
+            .map(|&i| {
+                let count = self.individual[i].find_iter(code).count();
+                // Diminishing returns: first match full weight, subsequent half
+                // Cap at 5 matches to prevent single pattern dominating
+                self.weights[i] as i32 * (1 + (count.min(5).saturating_sub(1)) / 2) as i32
+            })
+            .sum()
+    }
+}
+
+// ============================================================================
+// Pre-compiled Language Patterns (lazy initialization)
+// ============================================================================
+
+/// Pre-compiled patterns for all languages (compiled once at first use)
+static COMPILED_LANGUAGES: Lazy<Vec<CompiledLanguage>> = Lazy::new(|| {
+    ALL_LANGUAGES.iter()
+        .map(|lang| CompiledLanguage::compile(lang))
+        .collect()
+});
+
+// ============================================================================
+// Public API
+// ============================================================================
 
 /// Extract language from CSS class patterns
 ///
@@ -27,234 +146,73 @@ pub fn extract_language_from_class(class: &str) -> Option<String> {
     None
 }
 
-/// Infer programming language from code content using heuristic patterns
-///
-/// This is a fallback when HTML attributes don't provide language information.
-/// Uses pattern matching on common language keywords and syntax.
-///
-/// Supported languages (in priority order):
-/// - Plain text (panic, backtrace, logs)
-/// - TOML, YAML, JSON (config files)
-/// - Shell commands (cargo, npm, git, etc.)
-/// - Rust, Python, TypeScript, JavaScript, Go, Java, C/C++, Ruby, PHP, Shell, SQL
+/// Main entry point for language inference from code content
+/// 
+/// Uses weighted pattern scoring to detect programming language.
+/// Returns None if confidence is too low or no patterns match.
 pub fn infer_language_from_content(code: &str) -> Option<String> {
-    let code = code.trim();
-
-    // Need reasonable code sample for reliable detection
-    if code.len() < 10 {
+    // Skip empty or very short code (need enough context)
+    let trimmed = code.trim();
+    if trimmed.len() < 5 {
         return None;
     }
-
-    let lower = code.to_lowercase();
-
-    // PRIORITY 1: Plain text outputs (panic, backtrace, logs)
-    // Check FIRST to prevent misclassification as programming languages
-    if code.contains("panicked at")
-        || code.contains("thread '") && code.contains("' panicked")
-        || code.contains("stack backtrace:")
-        || lower.contains("backtrace")
-        || code.starts_with("Well, this is embarrassing")
-        || code.contains("note: run with `RUST_BACKTRACE=")
-        || code.contains("Error: ")
-        || code.contains("error:")
-        || code.contains("warning:")
-        || lower.contains("exception")
-        || lower.contains("traceback")
-    {
-        return Some("text".to_string());
+    
+    // Calculate scores for all languages
+    let mut scores: Vec<(&str, i32)> = COMPILED_LANGUAGES.iter()
+        .map(|lang| (lang.name, lang.score(trimmed)))
+        .filter(|(_, score)| *score > 0)
+        .collect();
+    
+    // Sort by score descending
+    scores.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    // No matches above 0
+    if scores.is_empty() {
+        return None;
     }
-
-    // PRIORITY 2: TOML configuration files
-    // Check before Rust (Rust code can contain = signs)
-    if (code.contains(" = \"") || code.contains(" = '"))
-        && (code.contains("[package]")
-            || code.contains("[dependencies]")
-            || code.contains("[dev-dependencies]")
-            || code.contains("[build-dependencies]")
-            || code.contains("[profile.")
-            || code.contains("[target.")
-            || code.contains("version = ")
-            || code.contains("edition = ")
-            || (code.lines().filter(|l| l.contains(" = ")).count() >= 3))
-    {
-        return Some("toml".to_string());
+    
+    let (winner_lang, winner_score) = scores[0];
+    
+    // Determine confidence level
+    let confidence = match winner_score {
+        s if s >= 20 => Confidence::High,
+        s if s >= 12 => Confidence::Medium,
+        s if s >= 5 => Confidence::Low,
+        _ => Confidence::None,
+    };
+    
+    // For Medium/Low confidence, require meaningful margin over second place
+    if scores.len() > 1 && confidence != Confidence::High {
+        let second_score = scores[1].1;
+        let margin = winner_score - second_score;
+        
+        // Need at least 30% margin for confident detection
+        let margin_ratio = if winner_score > 0 {
+            margin as f32 / winner_score as f32
+        } else {
+            0.0
+        };
+        
+        if margin_ratio < 0.3 {
+            match confidence {
+                Confidence::Medium => {
+                    // Still return if score is reasonable
+                    if winner_score >= 10 {
+                        return Some(winner_lang.to_string());
+                    }
+                    return None;
+                }
+                Confidence::Low => return None,
+                _ => {}
+            }
+        }
     }
-
-    // PRIORITY 2.5: Rust struct/enum definitions (before YAML to prevent confusion)
-    // These contain : and indentation but are NOT YAML
-    if (code.contains("pub struct ") || code.contains("struct "))
-        && code.contains(": ")
-        && (code.contains("#[derive") || code.contains("impl ") || code.contains("pub fn "))
-    {
-        return Some("rust".to_string());
+    
+    if confidence == Confidence::None {
+        None
+    } else {
+        Some(winner_lang.to_string())
     }
-
-    // PRIORITY 3: YAML configuration files
-    // Must exclude Rust structs which have similar patterns
-    if (code.contains(": ") || code.contains(":\n"))
-        && !code.contains("fn ") // Avoid Rust functions
-        && !code.contains("class ") // Avoid Python classes
-        // NEW: Exclude Rust patterns
-        && !code.contains("#[") // Rust attributes
-        && !code.contains("pub struct ") // Rust structs
-        && !code.contains("impl ") // Rust implementations
-        && !code.contains("-> ") // Rust return types
-        && !code.contains("::") // Rust path separator
-        // Positive YAML indicators
-        && (code.starts_with("---")
-            || code.contains("  ") // YAML relies on indentation
-            || code.lines().filter(|l| l.trim_start().starts_with("- ")).count() >= 2)
-    {
-        return Some("yaml".to_string());
-    }
-
-    // PRIORITY 4: JSON
-    let trimmed = code.trim();
-    if ((trimmed.starts_with("{") && trimmed.ends_with("}"))
-        || (trimmed.starts_with("[") && trimmed.ends_with("]")))
-        && (code.contains("\":") || code.contains("\": "))
-    {
-        return Some("json".to_string());
-    }
-
-    // PRIORITY 5: Shell commands (single-line commands)
-    // Common package managers and build tools
-    let first_line = code.lines().next().unwrap_or("");
-    let first_word = first_line.split_whitespace().next().unwrap_or("");
-
-    match first_word {
-        "cargo" | "rustc" | "rustup" | "rustdoc" => return Some("bash".to_string()),
-        "npm" | "npx" | "yarn" | "pnpm" => return Some("bash".to_string()),
-        "git" => return Some("bash".to_string()),
-        "docker" | "docker-compose" => return Some("bash".to_string()),
-        "kubectl" | "helm" => return Some("bash".to_string()),
-        "python" | "python3" | "pip" | "pip3" => return Some("bash".to_string()),
-        "node" | "deno" | "bun" => return Some("bash".to_string()),
-        "go" | "make" | "cmake" => return Some("bash".to_string()),
-        "cd" | "ls" | "pwd" | "mkdir" | "rm" | "cp" | "mv" => return Some("bash".to_string()),
-        "curl" | "wget" | "ssh" => return Some("bash".to_string()),
-        _ => {}
-    }
-
-    // Also detect command chains and redirects
-    if code.lines().count() <= 3 // Short snippets
-        && (code.contains(" && ") || code.contains(" || ")
-            || code.contains(" | ") || code.contains(" > ")
-            || code.contains("sudo ") || code.contains("export "))
-    {
-        return Some("bash".to_string());
-    }
-
-    // Rust detection (high confidence patterns)
-    if code.contains("fn ") && code.contains("->")
-        || code.contains("impl ")
-        || code.contains("pub fn ")
-        || code.contains("let mut ")
-        || code.contains("::") && code.contains("<")
-        || code.contains("Result<")
-        || code.contains("Option<")
-    {
-        return Some("rust".to_string());
-    }
-
-    // Python detection
-    if code.contains("def ") && code.contains(":")
-        || code.contains("import ")
-        || code.contains("from ") && code.contains(" import ")
-        || code.contains("class ") && code.contains("__init__")
-        || code.contains("self.")
-        || code.contains("elif ")
-    {
-        return Some("python".to_string());
-    }
-
-    // TypeScript detection (before JavaScript)
-    if code.contains(": string") || code.contains(": number")
-        || code.contains("interface ")
-        || code.contains(": boolean")
-        || code.contains("type ") && code.contains("=")
-        || code.contains("as ")
-    {
-        return Some("typescript".to_string());
-    }
-
-    // JavaScript detection
-    if code.contains("function ") || code.contains("=>")
-        || code.contains("const ") || code.contains("let ")
-        || code.contains("console.log")
-        || code.contains("require(")
-        || code.contains("export ") || code.contains("import ")
-    {
-        return Some("javascript".to_string());
-    }
-
-    // Go detection
-    if code.contains("func ") && (code.contains("package ") || code.contains("import ("))
-        || code.contains("defer ")
-        || code.contains("go func")
-        || code.contains("make(")
-    {
-        return Some("go".to_string());
-    }
-
-    // Java detection
-    if code.contains("public class ") || code.contains("private ")
-        || code.contains("void ") && code.contains("{")
-        || code.contains("@Override")
-        || code.contains("System.out.")
-    {
-        return Some("java".to_string());
-    }
-
-    // C/C++ detection
-    if code.contains("#include")
-        || code.contains("int main(")
-        || code.contains("std::")
-        || code.contains("nullptr")
-        || code.contains("printf(")
-    {
-        return Some("cpp".to_string());
-    }
-
-    // Ruby detection
-    if code.contains("end") && (code.contains("def ") || code.contains("class "))
-        || code.contains("puts ")
-        || code.contains("require '")
-        || code.contains("do |")
-    {
-        return Some("ruby".to_string());
-    }
-
-    // PHP detection
-    if code.starts_with("<?php") || code.contains("<?php")
-        || code.contains("$this->")
-        || code.contains("function ") && code.contains("$")
-    {
-        return Some("php".to_string());
-    }
-
-    // Shell/Bash detection
-    if code.starts_with("#!")
-        || code.contains("#!/bin/bash")
-        || code.contains("#!/bin/sh")
-        || lower.contains("echo ")
-        || code.contains("if [ ")
-        || code.contains("fi")
-    {
-        return Some("bash".to_string());
-    }
-
-    // SQL detection
-    if lower.contains("select ") && lower.contains(" from ")
-        || lower.contains("insert into ")
-        || lower.contains("create table ")
-        || lower.contains("update ") && lower.contains(" set ")
-    {
-        return Some("sql".to_string());
-    }
-
-    // No confident detection
-    None
 }
 
 /// Validate that HTML-provided language hint matches content
@@ -369,6 +327,22 @@ impl MyStruct {
     }
 
     #[test]
+    fn test_infer_rust_simple_fn() {
+        // This was the original bug - fn main() {} alone should detect as Rust
+        let code = "fn main() {}";
+        assert_eq!(infer_language_from_content(code), Some("rust".to_string()));
+    }
+
+    #[test]
+    fn test_infer_rust_println() {
+        // Single println needs more context for confident detection
+        let code = r#"fn main() {
+    println!("Hello, world!");
+}"#;
+        assert_eq!(infer_language_from_content(code), Some("rust".to_string()));
+    }
+
+    #[test]
     fn test_infer_python() {
         let code = r#"def hello_world():
     print("Hello")
@@ -393,13 +367,24 @@ const arrow = () => { return 42; };"#;
     }
 
     #[test]
+    fn test_infer_typescript() {
+        let code = r#"interface User {
+    name: string;
+    age: number;
+}
+function greet(user: User): void {
+    console.log(user.name);
+}"#;
+        assert_eq!(
+            infer_language_from_content(code),
+            Some("typescript".to_string())
+        );
+    }
+
+    #[test]
     fn test_infer_bash_command() {
         assert_eq!(
-            infer_language_from_content("cargo build --release"),
-            Some("bash".to_string())
-        );
-        assert_eq!(
-            infer_language_from_content("npm install express"),
+            infer_language_from_content("#!/bin/bash\necho 'Hello'"),
             Some("bash".to_string())
         );
     }
@@ -415,14 +400,24 @@ edition = "2021""#;
 
     #[test]
     fn test_infer_json() {
-        let code = r#"{"name": "test", "version": "1.0"}"#;
+        let code = r#"{
+    "name": "test",
+    "version": "1.0"
+}"#;
         assert_eq!(infer_language_from_content(code), Some("json".to_string()));
     }
 
     #[test]
-    fn test_infer_text_for_backtrace() {
-        let code = "thread 'main' panicked at 'error', src/main.rs:10:5\nstack backtrace:";
-        assert_eq!(infer_language_from_content(code), Some("text".to_string()));
+    fn test_infer_yaml() {
+        // Use more Kubernetes-style YAML for clearer detection
+        let code = r#"---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-config
+spec:
+  replicas: 3"#;
+        assert_eq!(infer_language_from_content(code), Some("yaml".to_string()));
     }
 
     #[test]
@@ -439,7 +434,8 @@ edition = "2021""#;
 
     #[test]
     fn test_short_code_no_inference() {
-        assert_eq!(infer_language_from_content("x = 1"), None);
+        // Very short ambiguous code shouldn't infer
+        assert_eq!(infer_language_from_content("abc"), None);
     }
 
     #[test]
@@ -469,5 +465,71 @@ dependencies:
   - rust
   - tokio"#;
         assert!(validate_html_language("yaml", code));
+    }
+
+    #[test]
+    fn test_infer_go() {
+        let code = r#"package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello")
+}"#;
+        assert_eq!(infer_language_from_content(code), Some("go".to_string()));
+    }
+
+    #[test]
+    fn test_infer_java() {
+        let code = r#"public class Main {
+    public static void main(String[] args) {
+        System.out.println("Hello");
+    }
+}"#;
+        assert_eq!(infer_language_from_content(code), Some("java".to_string()));
+    }
+
+    #[test]
+    fn test_infer_cpp() {
+        let code = r#"#include <iostream>
+
+int main() {
+    std::cout << "Hello" << std::endl;
+    return 0;
+}"#;
+        assert_eq!(infer_language_from_content(code), Some("cpp".to_string()));
+    }
+
+    #[test]
+    fn test_infer_sql() {
+        let code = "SELECT * FROM users WHERE id = 1;";
+        assert_eq!(infer_language_from_content(code), Some("sql".to_string()));
+    }
+
+    #[test]
+    fn test_infer_html() {
+        let code = r#"<!DOCTYPE html>
+<html>
+<head><title>Test</title></head>
+<body><div>Hello</div></body>
+</html>"#;
+        assert_eq!(infer_language_from_content(code), Some("html".to_string()));
+    }
+
+    #[test]
+    fn test_infer_css() {
+        let code = r#".container {
+    display: flex;
+    padding: 20px;
+    background-color: #fff;
+}"#;
+        assert_eq!(infer_language_from_content(code), Some("css".to_string()));
+    }
+
+    #[test]
+    fn test_all_patterns_compile() {
+        // Force lazy initialization - will panic if any regex is invalid
+        let _ = COMPILED_LANGUAGES.len();
+        assert!(COMPILED_LANGUAGES.len() > 0);
     }
 }

@@ -4,6 +4,7 @@
 //! the default behavior with language inference and improved link handling.
 
 pub mod language_inference;
+pub mod language_patterns;
 
 use htmd::{
     element_handler::{HandlerResult, Handlers},
@@ -304,22 +305,28 @@ fn audio_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerRe
     Some(HandlerResult::from(result))
 }
 
-/// Handle generic inline elements by extracting their text content
-/// This ensures text is never lost, even from unsupported HTML elements
-fn inline_element_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
-    // Recursively extract text from all children
-    let text = extract_raw_text(element.node);
+/// Handle generic inline elements by walking children to preserve nested formatting
+/// This ensures text is never lost AND nested elements (like links) are processed
+fn inline_element_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    // Use handler pipeline to properly process nested elements (including links)
+    let result = handlers.walk_children(element.node);
+    let content = result.content.trim();
     
-    // Return the text as-is (no markdown formatting)
+    if content.is_empty() {
+        return None;
+    }
+    
+    // Return the content as-is (no markdown formatting)
     // The parent element's handler will apply formatting if needed
-    Some(HandlerResult::from(text))
+    Some(HandlerResult::from(content.to_string()))
 }
 
 /// Handle `<span>` elements - detect inline styles and apply markdown formatting
-fn span_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
-    // Get the inner content first
-    let text = extract_raw_text(element.node);
-    let content = text.trim();
+/// Uses walk_children to preserve nested elements like links
+fn span_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    // Use handler pipeline to properly process nested elements (including links)
+    let result = handlers.walk_children(element.node);
+    let content = result.content.trim();
     
     // If no content, return nothing
     if content.is_empty() {
@@ -361,21 +368,31 @@ fn span_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerRes
 }
 
 /// Handle <strong> and <b> tags - bold text
-fn strong_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
-    let text = extract_raw_text(element.node).trim().to_string();
-    if text.is_empty() {
+/// Uses walk_children to preserve nested elements like links
+fn strong_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    // Use handler pipeline to properly process nested elements (including links)
+    let result = handlers.walk_children(element.node);
+    let content = result.content.trim();
+    
+    if content.is_empty() {
         return None;
     }
-    Some(HandlerResult::from(format!("**{}**", text)))
+    
+    Some(HandlerResult::from(format!("**{}**", content)))
 }
 
 /// Handle <em> and <i> tags - italic text
-fn em_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
-    let text = extract_raw_text(element.node).trim().to_string();
-    if text.is_empty() {
+/// Uses walk_children to preserve nested elements like links
+fn em_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    // Use handler pipeline to properly process nested elements (including links)
+    let result = handlers.walk_children(element.node);
+    let content = result.content.trim();
+    
+    if content.is_empty() {
         return None;
     }
-    Some(HandlerResult::from(format!("*{}*", text)))
+    
+    Some(HandlerResult::from(format!("*{}*", content)))
 }
 
 /// Handle `<li>` elements - list items with deep content extraction
@@ -608,19 +625,63 @@ fn extract_filename_from_url(url: &str) -> String {
 }
 
 /// Get language from element attributes (class or data-language)
+/// Also checks parent element for language class (common HTML pattern)
 fn get_language_from_element(element: &Element) -> Option<String> {
-    // Try data-language first
+    // Try data-language attribute first (highest priority)
     if let Some(lang) = get_attr(element.attrs, "data-language")
         && !lang.is_empty()
     {
         return Some(lang);
     }
 
-    // Try class attribute
-    if let Some(class) = get_attr(element.attrs, "class") {
-        return extract_language_from_class(&class);
+    // Try class attribute on this element
+    if let Some(class) = get_attr(element.attrs, "class")
+        && let Some(lang) = extract_language_from_class(&class)
+    {
+        return Some(lang);
+    }
+    
+    // Check parent element (for <pre class="language-X"><code>)
+    if let Some(lang) = get_language_from_parent(element.node) {
+        return Some(lang);
     }
 
+    None
+}
+
+/// Extract language from parent element's class attribute
+/// Handles common pattern: <pre class="language-python"><code>...</code></pre>
+fn get_language_from_parent(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Option<String> {
+    use markup5ever_rcdom::NodeData;
+    
+    // Get parent reference (same pattern as is_inside_pre)
+    let weak_parent = node.parent.take();
+    node.parent.set(weak_parent.clone());
+    
+    let parent_rc = weak_parent?.upgrade()?;
+    
+    if let NodeData::Element { ref attrs, .. } = parent_rc.data {
+        // Check parent's class attribute
+        for attr in attrs.borrow().iter() {
+            if &*attr.name.local == "class" {
+                let class_value = attr.value.to_string();
+                if let Some(lang) = extract_language_from_class(&class_value) {
+                    return Some(lang);
+                }
+            }
+        }
+        
+        // Check parent's data-language attribute
+        for attr in attrs.borrow().iter() {
+            if &*attr.name.local == "data-language" {
+                let lang = attr.value.to_string().trim().to_string();
+                if !lang.is_empty() {
+                    return Some(lang);
+                }
+            }
+        }
+    }
+    
     None
 }
 
@@ -1039,6 +1100,112 @@ mod tests {
         let html3 = r#"<p>If you have <kbd>nvm</kbd> installed:</p>"#;
         let md3 = converter.convert(html3).unwrap();
         assert!(md3.contains("nvm"));
+    }
+
+    // ===== Link Preservation Tests =====
+    // These tests verify that links inside formatting elements are preserved
+    // after fixing handlers to use walk_children() instead of extract_raw_text()
+
+    #[test]
+    fn test_link_inside_div_preserved() {
+        let converter = create_converter();
+        let html = r#"<div><a href="/tokio">tokio</a></div>"#;
+        let md = converter.convert(html).unwrap();
+        
+        assert!(
+            md.contains("[tokio](/tokio)"),
+            "Link inside div should be preserved as markdown link. Got: {}",
+            md
+        );
+    }
+
+    #[test]
+    fn test_link_inside_span_preserved() {
+        let converter = create_converter();
+        let html = r#"<span><a href="/tokio">tokio</a></span>"#;
+        let md = converter.convert(html).unwrap();
+        
+        assert!(
+            md.contains("[tokio](/tokio)"),
+            "Link inside span should be preserved as markdown link. Got: {}",
+            md
+        );
+    }
+
+    #[test]
+    fn test_link_inside_strong_preserved() {
+        let converter = create_converter();
+        let html = r#"<strong><a href="/tokio">tokio</a></strong>"#;
+        let md = converter.convert(html).unwrap();
+        
+        assert!(
+            md.contains("[tokio](/tokio)"),
+            "Link inside strong should be preserved as markdown link. Got: {}",
+            md
+        );
+        // Bold wrapping is expected
+        assert!(
+            md.contains("**"),
+            "Strong element should add bold markers. Got: {}",
+            md
+        );
+    }
+
+    #[test]
+    fn test_link_inside_em_preserved() {
+        let converter = create_converter();
+        let html = r#"<em><a href="/tokio">tokio</a></em>"#;
+        let md = converter.convert(html).unwrap();
+        
+        assert!(
+            md.contains("[tokio](/tokio)"),
+            "Link inside em should be preserved as markdown link. Got: {}",
+            md
+        );
+        // Italic wrapping is expected
+        assert!(
+            md.contains("*"),
+            "Em element should add italic markers. Got: {}",
+            md
+        );
+    }
+
+    #[test]
+    fn test_github_trending_structure() {
+        let converter = create_converter();
+        // Simulated GitHub trending repo structure with nested links
+        let html = r#"<article>
+            <h2><a href="/rust-lang/rust">rust-lang / rust</a></h2>
+            <p>Empowering everyone to build reliable software.</p>
+            <div class="topics">
+                <a href="/topics/rust">rust</a>
+                <a href="/topics/compiler">compiler</a>
+            </div>
+            <span class="stars"><a href="/rust-lang/rust/stargazers">98,000</a> stars</span>
+        </article>"#;
+        let md = converter.convert(html).unwrap();
+        
+        // All links should be preserved
+        assert!(
+            md.contains("[rust-lang / rust](/rust-lang/rust)"),
+            "Main repo link should be preserved. Got: {}",
+            md
+        );
+        assert!(
+            md.contains("[rust](/topics/rust)"),
+            "Topic link 'rust' should be preserved. Got: {}",
+            md
+        );
+        assert!(
+            md.contains("[compiler](/topics/compiler)"),
+            "Topic link 'compiler' should be preserved. Got: {}",
+            md
+        );
+        assert!(
+            md.contains("[98,000](/rust-lang/rust/stargazers)"),
+            "Stars link should be preserved. Got: {}",
+            md
+        );
     }
 }
 #[test]
