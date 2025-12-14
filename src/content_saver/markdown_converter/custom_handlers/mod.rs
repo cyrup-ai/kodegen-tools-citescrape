@@ -560,8 +560,7 @@ fn normalize_code_whitespace(content: &str) -> String {
 fn is_inside_pre(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> bool {
     use markup5ever_rcdom::NodeData;
 
-    let mut current = node.parent.take();
-    node.parent.set(current.clone());
+    let mut current = node.parent.get();
 
     while let Some(weak_parent) = current {
         if let Some(parent) = weak_parent.upgrade() {
@@ -570,8 +569,7 @@ fn is_inside_pre(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> bool {
             {
                 return true;
             }
-            current = parent.parent.take();
-            parent.parent.set(current.clone());
+            current = parent.parent.get();
         } else {
             break;
         }
@@ -655,10 +653,8 @@ fn get_language_from_parent(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Opti
     use markup5ever_rcdom::NodeData;
     
     // Get parent reference (same pattern as is_inside_pre)
-    let weak_parent = node.parent.take();
-    node.parent.set(weak_parent.clone());
-    
-    let parent_rc = weak_parent?.upgrade()?;
+    let weak_parent = node.parent.get()?;
+    let parent_rc = weak_parent.upgrade()?;
     
     if let NodeData::Element { ref attrs, .. } = parent_rc.data {
         // Check parent's class attribute
@@ -1276,4 +1272,35 @@ fn test_empty_paragraphs_skipped() {
     let newline_count = md.matches('\n').count();
     // Should have some newlines but not excessive
     assert!(newline_count < 15, "Should not have excessive newlines from empty elements. Got: {}", md);
+}
+
+#[test]
+fn test_github_trending_exact_html() {
+    let converter = create_converter();
+    // Exact structure from GitHub trending page
+    let html = r#"
+    <article class="Box-row">
+      <h2 class="h3 lh-condensed">
+        <a href="/rustdesk/rustdesk" class="Link">
+          <span class="text-normal">rustdesk /</span>
+          rustdesk
+        </a>
+      </h2>
+      <p class="col-9 color-fg-muted my-1 pr-4">
+        An open-source remote desktop application
+      </p>
+    </article>
+    "#;
+    let md = converter.convert(html).unwrap();
+    
+    eprintln!("OUTPUT: {}", md);
+    
+    // The link MUST be preserved
+    assert!(
+        md.contains("[rustdesk /rustdesk](/rustdesk/rustdesk)") || 
+        md.contains("[rustdesk / rustdesk](/rustdesk/rustdesk)") ||
+        md.contains("(/rustdesk/rustdesk)"),
+        "Link href must be preserved! Got: '{}'",
+        md
+    );
 }

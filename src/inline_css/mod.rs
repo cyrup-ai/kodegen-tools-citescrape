@@ -14,6 +14,9 @@ pub mod svg_downloader;
 pub mod types;
 pub mod utils;
 
+#[cfg(test)]
+mod kuchiki_test;
+
 // Re-exports for public API
 pub use orchestrator::{inline_all_resources, inline_resources_from_info};
 pub use types::{InliningError, InliningResult, ResourceType};

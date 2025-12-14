@@ -372,16 +372,21 @@ fn remove_interactive_elements_from_dom(html: &str) -> String {
         // ========================================================================
         
         // ARIA role-based (semantic buttons that aren't <button> tags)
-        "[role='button']",
+        // IMPORTANT: Use :not(a) to preserve <a role="button" href="..."> navigation links
+        // which are legitimate links styled as buttons, not actual interactive buttons
+        ":not(a)[role='button']",
         
         // ARIA label patterns for common UI actions
         // Note: CSS selectors support substring matching with *= operator
         "[aria-label*='Copy']",     // Catches "Copy page", "Copy code", "Copy to clipboard"
         "[aria-label*='copy']",     // Lowercase variant
-        "[aria-label*='Share']",    // Share buttons
-        "[aria-label*='share']",
-        "[aria-label*='Edit']",     // Edit page links
-        "[aria-label*='edit']",
+        // Share buttons (but preserve share links that navigate to share pages)
+        ":not(a)[aria-label*='Share']",
+        ":not(a)[aria-label*='share']",
+        // Note: "Edit" labels often appear on legitimate navigation links (e.g., "Edit on GitHub")
+        // Use :not(a) to preserve anchor-based edit links while removing button-based ones
+        ":not(a)[aria-label*='Edit']",
+        ":not(a)[aria-label*='edit']",
         "[aria-label*='Print']",    // Print page buttons
         "[aria-label*='print']",
         

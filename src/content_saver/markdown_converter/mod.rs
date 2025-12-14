@@ -516,3 +516,92 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+#[test]
+fn test_basic_link_full_pipeline() {
+    use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+    
+    let html = r#"<a href="/rustdesk/rustdesk">rustdesk / rustdesk</a>"#;
+    let options = ConversionOptions::default();
+    let md = convert_html_to_markdown_sync(html, &options).unwrap();
+    
+    eprintln!("INPUT: {}", html);
+    eprintln!("OUTPUT: '{}'", md);
+    
+    assert!(md.contains("(/rustdesk/rustdesk)"), "Link must be preserved! Got: '{}'", md);
+}
+
+#[test]
+fn test_github_h2_link_full_pipeline() {
+    use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+    
+    let html = r#"<h2 class="h3 lh-condensed">
+    <a href="/rustdesk/rustdesk" class="Link">
+      <span class="text-normal">rustdesk /</span>
+      rustdesk
+    </a>
+  </h2>"#;
+    let options = ConversionOptions::default();
+    let md = convert_html_to_markdown_sync(html, &options).unwrap();
+    
+    eprintln!("INPUT: {}", html);
+    eprintln!("OUTPUT: '{}'", md);
+    
+    assert!(md.contains("(/rustdesk/rustdesk)"), "Link must be preserved! Got: '{}'", md);
+}
+
+    #[test]
+    fn test_basic_link_through_full_pipeline() {
+        // Test a simple link through the COMPLETE pipeline
+        let html = r#"<html><body><article><p>Check out <a href="/rustdesk/rustdesk">rustdesk / rustdesk</a> for remote desktop.</p></article></body></html>"#;
+
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default());
+        assert!(result.is_ok(), "Conversion failed: {:?}", result.err());
+
+        let markdown = result.unwrap();
+        println!("FULL PIPELINE OUTPUT: '{}'", markdown);
+        
+        // The link MUST be preserved as [text](url)
+        assert!(
+            markdown.contains("[rustdesk / rustdesk](/rustdesk/rustdesk)"),
+            "Link was lost in full pipeline! Got: {}",
+            markdown
+        );
+    }
+
+    #[test]
+    fn test_github_trending_structure_through_pipeline() {
+        // Simulate GitHub trending HTML structure
+        let html = r#"
+        <html>
+        <body>
+            <main>
+                <div class="Box">
+                    <article class="Box-row">
+                        <h2>
+                            <a href="/rustdesk/rustdesk" data-view-component="true">
+                                <span>rustdesk</span>
+                                /
+                                <span>rustdesk</span>
+                            </a>
+                        </h2>
+                        <p>An open-source remote desktop</p>
+                    </article>
+                </div>
+            </main>
+        </body>
+        </html>
+        "#;
+
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default());
+        assert!(result.is_ok(), "Conversion failed: {:?}", result.err());
+
+        let markdown = result.unwrap();
+        println!("GITHUB-LIKE OUTPUT: '{}'", markdown);
+        
+        // The link should be preserved
+        assert!(
+            markdown.contains("[") && markdown.contains("](/rustdesk/rustdesk)"),
+            "Link was lost! Got: {}",
+            markdown
+        );
+    }
