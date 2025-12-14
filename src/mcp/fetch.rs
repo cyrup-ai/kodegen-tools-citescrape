@@ -176,7 +176,6 @@ impl Tool for FetchTool {
         let search_helper = Self::generate_search_helper(scrape_output.crawl_id);
 
         let output = FetchOutput {
-            display,
             path: md_path_str,
             search_helper,
             url: args.url,
@@ -184,13 +183,7 @@ impl Tool for FetchTool {
             content_length: markdown_content.len(),
         };
 
-        let summary = format!(
-            "Fetched {} ({} bytes)",
-            output.title.as_deref().unwrap_or("page"),
-            output.content_length
-        );
-
-        Ok(ToolResponse::new(summary, output))
+        Ok(ToolResponse::new(display, output))
     }
 }
 
