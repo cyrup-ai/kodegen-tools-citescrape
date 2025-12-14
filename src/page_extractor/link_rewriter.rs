@@ -5,7 +5,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
 use url::Url;
 use uuid::Uuid;
@@ -15,6 +15,27 @@ use uuid::Uuid;
 /// 10,000 entries × 250 bytes ≈ 2.5 MB
 /// Balances memory usage with link rewriting coverage
 const DEFAULT_URL_CACHE_CAPACITY: usize = 10_000;
+
+/// Regex patterns for removing crawler data attributes (compiled once, cached globally)
+static DATA_CRAWLER_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#" data-crawler-id="[^"]*""#)
+        .expect("DATA_CRAWLER_ID_RE: hardcoded regex is valid")
+});
+
+static DATA_ORIGINAL_HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#" data-original-href="[^"]*""#)
+        .expect("DATA_ORIGINAL_HREF_RE: hardcoded regex is valid")
+});
+
+static DATA_ABSOLUTE_HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#" data-absolute-href="[^"]*""#)
+        .expect("DATA_ABSOLUTE_HREF_RE: hardcoded regex is valid")
+});
+
+static DATA_CRAWLER_CURRENT_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#" data-crawler-current-url="[^"]*""#)
+        .expect("DATA_CRAWLER_CURRENT_URL_RE: hardcoded regex is valid")
+});
 
 /// Internal state for `LinkRewriter` combining URL map and registration count
 struct LinkRewriterState {
@@ -386,29 +407,11 @@ impl LinkRewriter {
     /// Remove crawler-specific data attributes from final HTML
     #[must_use]
     pub fn remove_crawler_data_attrs(html: &str) -> String {
-        // Remove our tracking attributes using regex - if any regex fails to compile,
-        // just return the original HTML since these are optional cleanup operations
-        let re1 = match Regex::new(r#" data-crawler-id="[^"]*""#) {
-            Ok(re) => re,
-            Err(_) => return html.to_string(),
-        };
-        let re2 = match Regex::new(r#" data-original-href="[^"]*""#) {
-            Ok(re) => re,
-            Err(_) => return html.to_string(),
-        };
-        let re3 = match Regex::new(r#" data-absolute-href="[^"]*""#) {
-            Ok(re) => re,
-            Err(_) => return html.to_string(),
-        };
-        let re4 = match Regex::new(r#" data-crawler-current-url="[^"]*""#) {
-            Ok(re) => re,
-            Err(_) => return html.to_string(),
-        };
-
-        let result = re1.replace_all(html, "");
-        let result = re2.replace_all(&result, "");
-        let result = re3.replace_all(&result, "");
-        let result = re4.replace_all(&result, "");
+        // Use cached regex patterns for optimal performance
+        let result = DATA_CRAWLER_ID_RE.replace_all(html, "");
+        let result = DATA_ORIGINAL_HREF_RE.replace_all(&result, "");
+        let result = DATA_ABSOLUTE_HREF_RE.replace_all(&result, "");
+        let result = DATA_CRAWLER_CURRENT_URL_RE.replace_all(&result, "");
 
         result.to_string()
     }

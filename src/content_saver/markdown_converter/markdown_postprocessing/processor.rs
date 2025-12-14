@@ -154,23 +154,35 @@ pub fn process_markdown_headings(markdown: &str) -> String {
             fence.count
         );
 
-        // Strategy: Look backwards from end to find last code-like line
-        let mut last_code_idx = processed_lines.len().saturating_sub(1);
-        for (idx, line) in processed_lines.iter().enumerate().rev() {
-            if looks_like_code(line) {
-                last_code_idx = idx;
-                break;
-            }
-        }
-
-        // Insert closing fence after last code line
         let closing = fence.char.to_string().repeat(fence.count);
-        processed_lines.insert(last_code_idx + 1, closing);
 
-        tracing::info!(
-            "Auto-closed fence at line {} (after last code-like content)",
-            last_code_idx + 1
-        );
+        // Handle edge case: empty processed_lines
+        if processed_lines.is_empty() {
+            tracing::warn!(
+                "Auto-closing fence on empty document (fence opened at line {})",
+                fence.line_number
+            );
+            processed_lines.push(closing);
+        } else {
+            // Strategy: Look backwards from end to find last code-like line
+            let mut last_code_idx = processed_lines.len() - 1;
+            for (idx, line) in processed_lines.iter().enumerate().rev() {
+                if looks_like_code(line) {
+                    last_code_idx = idx;
+                    break;
+                }
+            }
+
+            // Safe insert: clamp to valid range
+            let insert_pos = (last_code_idx + 1).min(processed_lines.len());
+            processed_lines.insert(insert_pos, closing);
+
+            tracing::info!(
+                "Auto-closed fence at line {} (after last code-like content at line {})",
+                insert_pos + 1,
+                last_code_idx + 1
+            );
+        }
     }
 
     let result = processed_lines.join("\n");

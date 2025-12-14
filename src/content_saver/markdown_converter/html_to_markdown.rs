@@ -18,6 +18,7 @@
 
 use anyhow::Result;
 use regex::Regex;
+use std::fmt::Write;
 use std::sync::LazyLock;
 use url::Url;
 
@@ -32,11 +33,17 @@ static TABLE_ALIGN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[([^\]]+)\]\(([^\)]+)\)").expect("LINK_RE: hardcoded regex is valid")
+    // Bounded quantifiers prevent catastrophic backtracking
+    // Limits: 500 chars for link text, 2000 chars for URL
+    Regex::new(r"\[([^\]]{1,500})\]\(([^\)]{1,2000})\)")
+        .expect("LINK_RE: hardcoded regex is valid")
 });
 
 static IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"!\[[^\]]*\]\([^\)]+\)").expect("IMAGE_RE: hardcoded regex is valid")
+    // Bounded quantifiers prevent catastrophic backtracking
+    // Limits: 200 chars for alt text, 2000 chars for image URL
+    Regex::new(r"!\[[^\]]{0,200}\]\([^\)]{1,2000}\)")
+        .expect("IMAGE_RE: hardcoded regex is valid")
 });
 
 
@@ -322,41 +329,56 @@ pub(crate) fn process_markdown_links(markdown: &str, base_url: &str) -> String {
         }
     };
 
-    LINK_RE
-        .replace_all(markdown, |caps: &regex::Captures| {
-            let text = &caps[1];
-            let url = &caps[2];
-
+    // Pre-calculate approximate result size
+    // Estimate: original length + 50 bytes per link for potential URL expansion
+    let link_count = markdown.matches("](").count();
+    let estimated_size = markdown.len() + (link_count * 50);
+    let mut result = String::with_capacity(estimated_size);
+    
+    let mut last_match_end = 0;
+    
+    for caps in LINK_RE.captures_iter(markdown) {
+        let m = caps.get(0).unwrap();
+        let text = caps.get(1).unwrap().as_str();
+        let url = caps.get(2).unwrap().as_str();
+        
+        // Append text before this match
+        result.push_str(&markdown[last_match_end..m.start()]);
+        
+        // Process link based on URL type
+        if url.starts_with('#') {
             // Fragment-only links: preserve as-is
-            if url.starts_with('#') {
-                return format!("[{text}]({url})");
-            }
-
+            write!(result, "[{text}]({url})").unwrap();
+        } else if url.starts_with("http://") || url.starts_with("https://") {
             // Already absolute: preserve as-is
-            if url.starts_with("http://") || url.starts_with("https://") {
-                return format!("[{text}]({url})");
-            }
-
+            write!(result, "[{text}]({url})").unwrap();
+        } else if url.starts_with("mailto:")
+            || url.starts_with("tel:")
+            || url.starts_with("javascript:")
+            || url.starts_with("data:")
+        {
             // Special protocols: preserve as-is
-            if url.starts_with("mailto:")
-                || url.starts_with("tel:")
-                || url.starts_with("javascript:")
-                || url.starts_with("data:")
-            {
-                return format!("[{text}]({url})");
-            }
-
+            write!(result, "[{text}]({url})").unwrap();
+        } else {
             // Resolve relative URL using RFC 3986 rules
             match base.join(url) {
-                Ok(resolved) => format!("[{text}]({})", resolved.as_str()),
+                Ok(resolved) => {
+                    write!(result, "[{text}]({})", resolved.as_str()).unwrap();
+                }
                 Err(e) => {
                     log::warn!("Failed to resolve URL '{url}' against base '{base_url}': {e}");
-                    // Fallback: preserve original URL
-                    format!("[{text}]({url})")
+                    write!(result, "[{text}]({url})").unwrap();
                 }
             }
-        })
-        .to_string()
+        }
+        
+        last_match_end = m.end();
+    }
+    
+    // Append remaining text after last match
+    result.push_str(&markdown[last_match_end..]);
+    
+    result
 }
 
 /// HTML to Markdown converter with configurable options
@@ -456,12 +478,32 @@ impl MarkdownConverter {
     /// * `Ok(String)` - Converted markdown
     /// * `Err(anyhow::Error)` - Conversion error
     pub async fn convert(&self, html: &str) -> Result<String> {
-        self.convert_sync(html)
+        // Clone converter config and html for spawn_blocking
+        let preserve_tables = self.preserve_tables;
+        let preserve_links = self.preserve_links;
+        let preserve_images = self.preserve_images;
+        let code_highlighting = self.code_highlighting;
+        let html = html.to_string();
+        
+        tokio::task::spawn_blocking(move || {
+            let converter = MarkdownConverter {
+                preserve_tables,
+                preserve_links,
+                preserve_images,
+                code_highlighting,
+            };
+            converter.convert_sync(&html)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("MarkdownConverter task panicked: {}", e))?
     }
 
     fn format_tables_static(markdown: &str) -> String {
+        // Pre-allocate result buffer with 10% extra capacity for table formatting
+        // This single allocation replaces thousands of small allocations
+        let mut result = String::with_capacity(markdown.len() + (markdown.len() / 10));
+        
         let lines: Vec<&str> = markdown.lines().collect();
-        let mut result = Vec::new();
         let mut i = 0;
         
         while i < lines.len() {
@@ -483,18 +525,28 @@ impl MarkdownConverter {
                     }
                 }
                 
-                // Process and format the table
+                // Format table and write directly to result buffer
                 let formatted_table = Self::format_markdown_table(&table_lines);
-                result.extend(formatted_table);
+                for formatted_line in formatted_table {
+                    result.push_str(&formatted_line);
+                    result.push('\n');
+                }
                 
                 continue;
             }
             
-            result.push(line.to_string());
+            // Write non-table line directly to buffer (no String allocation)
+            result.push_str(line);
+            result.push('\n');
             i += 1;
         }
         
-        result.join("\n")
+        // Remove trailing newline if present
+        if result.ends_with('\n') {
+            result.pop();
+        }
+        
+        result
     }
 
     /// Format a markdown table with proper alignment and spacing

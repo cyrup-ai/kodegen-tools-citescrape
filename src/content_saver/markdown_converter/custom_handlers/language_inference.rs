@@ -530,6 +530,6 @@ int main() {
     fn test_all_patterns_compile() {
         // Force lazy initialization - will panic if any regex is invalid
         let _ = COMPILED_LANGUAGES.len();
-        assert!(COMPILED_LANGUAGES.len() > 0);
+        assert!(!COMPILED_LANGUAGES.is_empty());
     }
 }

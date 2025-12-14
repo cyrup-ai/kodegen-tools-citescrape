@@ -348,8 +348,15 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
 /// let markdown = convert_html_to_markdown(html, &options).await?;
 /// ```
 pub async fn convert_html_to_markdown(html: &str, options: &ConversionOptions) -> Result<String> {
-    // Direct call to sync version (it's fast enough)
-    convert_html_to_markdown_sync(html, options)
+    // Clone inputs for spawn_blocking (ConversionOptions is Clone, html → String)
+    let html = html.to_string();
+    let options = options.clone();
+    
+    tokio::task::spawn_blocking(move || {
+        convert_html_to_markdown_sync(&html, &options)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("HTML-to-Markdown conversion task panicked: {}", e))?
 }
 
 #[cfg(test)]

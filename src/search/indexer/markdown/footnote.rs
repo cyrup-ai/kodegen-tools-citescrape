@@ -1,27 +1,15 @@
 //! Footnote marker removal using regex
 
 use regex::Regex;
+use std::sync::LazyLock;
 
-// Thread-local regex for footnote removal
-thread_local! {
-    static FOOTNOTE_REGEX: std::cell::RefCell<Option<Regex>> = const { std::cell::RefCell::new(None) };
-}
+/// Regex pattern for footnote markers (compiled once, cached globally)
+static FOOTNOTE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[\^[^\]]+\]")
+        .expect("FOOTNOTE_REGEX: hardcoded regex is valid")
+});
 
-/// Remove footnote markers `[^1]` style (legacy allocating version - prefer _inplace variant)
-// Library code: allocating version kept for compatibility
+/// Remove footnote markers `[^1]` style
 pub(crate) fn remove_footnote_markers(text: String) -> String {
-    FOOTNOTE_REGEX.with(|re_cell| {
-        let mut re_ref = re_cell.borrow_mut();
-
-        // Initialize regex if not already present
-        if re_ref.is_none() {
-            *re_ref = Regex::new(r"\[\^[^\]]+\]").ok();
-        }
-
-        // Use regex if available, otherwise return original text
-        match re_ref.as_ref() {
-            Some(re) => re.replace_all(&text, "").into_owned(),
-            None => text, // Return original if regex compilation failed
-        }
-    })
+    FOOTNOTE_REGEX.replace_all(&text, "").into_owned()
 }

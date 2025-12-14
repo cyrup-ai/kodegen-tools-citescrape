@@ -15,6 +15,7 @@ use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use tracing::{debug, warn};
 
 // ============================================================================
 // Static Selectors (compiled once at first use)
@@ -49,6 +50,31 @@ static TABLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<table[^>]*>.*?</table>")
         .expect("BUG: hardcoded table regex is statically valid")
 });
+
+// ============================================================================
+// Security Limits
+// ============================================================================
+
+/// Maximum grid rows to prevent memory exhaustion attacks
+///
+/// Real-world tables rarely exceed 500 rows. Data tables (financial reports,
+/// spreadsheets) typically have < 100 rows. Setting limit at 1000 provides
+/// generous headroom while preventing DoS.
+const MAX_GRID_ROWS: usize = 1000;
+
+/// Maximum grid columns to prevent memory exhaustion attacks  
+///
+/// Already enforced via colspan clamp (100). Real tables rarely exceed 20
+/// columns. Explicit constant documents security boundary.
+const MAX_GRID_COLS: usize = 100;
+
+/// Maximum total cells allowed in a table grid to prevent memory exhaustion.
+/// 
+/// Limit: 100,000 cells (~8 MB with 80 bytes per GridCell)
+/// 
+/// This prevents DoS attacks via malicious HTML tables with excessive
+/// colspan/rowspan combinations.
+const MAX_TOTAL_CELLS: usize = 100_000;
 
 // ============================================================================
 // Data Structures
@@ -231,10 +257,17 @@ fn normalize_data_table(table: &ElementRef) -> Result<String> {
 ///
 /// Algorithm:
 /// 1. Determine maximum columns by examining all rows
-/// 2. Create a 2D grid to hold all logical cells
-/// 3. Track cells occupied by rowspan from previous rows
-/// 4. For each cell, fill the grid positions it spans
-/// 5. Duplicate content across spanned cells
+/// 2. Enforce MAX_GRID_COLS security limit
+/// 3. Create a 2D grid to hold all logical cells
+/// 4. Track cells occupied by rowspan from previous rows
+/// 5. For each cell, fill the grid positions it spans
+/// 6. Enforce MAX_GRID_ROWS security limit during expansion
+/// 7. Duplicate content across spanned cells
+///
+/// # Security
+/// - MAX_GRID_ROWS: Prevents DoS via excessive rowspan accumulation
+/// - MAX_GRID_COLS: Prevents DoS via excessive colspan
+/// - Graceful truncation: Returns partial grid if limits exceeded
 fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
     let rows: Vec<_> = table.select(&TR_SELECTOR).collect();
     
@@ -243,13 +276,36 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
     }
     
     // Determine maximum columns needed
-    let max_cols = calculate_max_columns(&rows);
+    let max_cols = calculate_max_columns(&rows)?;
+    
+    // SECURITY: Enforce maximum grid width
+    if max_cols > MAX_GRID_COLS {
+        return Err(anyhow::anyhow!(
+            "Table too wide: {} columns (maximum allowed: {}). \
+             This limit prevents memory exhaustion attacks.",
+            max_cols,
+            MAX_GRID_COLS
+        ));
+    }
     
     // Initialize grid and rowspan tracker
     let mut grid: Vec<Vec<GridCell>> = Vec::new();
     let mut rowspan_tracker: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut total_cells = 0usize;  // NEW: Track total cells
     
     for (row_idx, row) in rows.iter().enumerate() {
+        // SECURITY: Enforce maximum grid height
+        if grid.len() >= MAX_GRID_ROWS {
+            warn!(
+                "Table exceeded maximum rows ({}), truncating at row {}. \
+                 Processed {} rows before limit.",
+                MAX_GRID_ROWS,
+                row_idx,
+                grid.len()
+            );
+            break;  // Stop processing, return partial grid
+        }
+        
         // Ensure this row exists in grid
         while grid.len() <= row_idx {
             grid.push(vec![GridCell::empty(); max_cols]);
@@ -271,12 +327,26 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
             let colspan = cell.value().attr("colspan")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(1)
-                .clamp(1, 100); // Cap at 100 to prevent explosion
+                .clamp(1, 100);
             
             let rowspan = cell.value().attr("rowspan")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(1)
-                .clamp(1, 100); // Cap at 100 to prevent explosion
+                .clamp(1, 100);
+            
+            // CHANGE 1: Use saturating multiplication for overflow safety
+            let cells_in_span = colspan.saturating_mul(rowspan);
+            
+            // CHANGE 2: Check total cell limit BEFORE allocation
+            let new_total = total_cells.saturating_add(cells_in_span);
+            if new_total > MAX_TOTAL_CELLS {
+                return Err(anyhow::anyhow!(
+                    "Table too large: exceeds maximum {} cells (attempted {})",
+                    MAX_TOTAL_CELLS,
+                    new_total
+                ));
+            }
+            total_cells = new_total;
             
             let is_header = cell.value().name() == "th";
             let align = extract_alignment(&cell);
@@ -284,9 +354,20 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
             
             // Fill grid cells for this span
             for r in 0..rowspan {
+                let target_row = row_idx.saturating_add(r);
+                
+                // SECURITY: Check if target_row would exceed maximum
+                if target_row >= MAX_GRID_ROWS {
+                    debug!(
+                        "Rowspan at cell ({}, {}) would exceed max rows ({}), \
+                         clamping expansion at row {}",
+                        row_idx, col_idx, MAX_GRID_ROWS, target_row
+                    );
+                    break;  // Stop expanding this cell vertically
+                }
+                
                 for c in 0..colspan {
-                    let target_row = row_idx + r;
-                    let target_col = col_idx + c;
+                    let target_col = col_idx.saturating_add(c);
                     
                     if target_col < max_cols {
                         // Mark cells as occupied for future rows (if rowspan > 1)
@@ -294,7 +375,7 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
                             rowspan_tracker.insert((target_row, target_col), r);
                         }
                         
-                        // Ensure grid has enough rows
+                        // Ensure grid has enough rows (now safe - already bounds-checked above)
                         while grid.len() <= target_row {
                             grid.push(vec![GridCell::empty(); max_cols]);
                         }
@@ -309,7 +390,7 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
                 }
             }
             
-            col_idx += colspan;
+            col_idx = col_idx.saturating_add(colspan);  // CHANGE 4: Saturating addition
         }
     }
     
@@ -317,20 +398,35 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
 }
 
 /// Calculate maximum columns needed for the table
-fn calculate_max_columns(rows: &[ElementRef]) -> usize {
-    rows.iter()
-        .map(|row| {
-            row.select(&CELL_SELECTOR)
-                .map(|cell| {
-                    cell.value().attr("colspan")
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(1)
-                        .max(1)
-                })
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(1)
+fn calculate_max_columns(rows: &[ElementRef]) -> Result<usize> {
+    let mut max_cols = 1usize;
+    
+    for row in rows {
+        let mut row_cols = 0usize;
+        
+        for cell in row.select(&CELL_SELECTOR) {
+            let colspan = cell.value().attr("colspan")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1)
+                .max(1);
+            
+            // Use saturating addition to prevent overflow
+            row_cols = row_cols.saturating_add(colspan);
+            
+            // Enforce per-row column limit
+            if row_cols > MAX_TOTAL_CELLS {
+                return Err(anyhow::anyhow!(
+                    "Table row too wide: {} columns exceeds maximum {}",
+                    row_cols,
+                    MAX_TOTAL_CELLS
+                ));
+            }
+        }
+        
+        max_cols = max_cols.max(row_cols);
+    }
+    
+    Ok(max_cols)
 }
 
 /// Extract alignment from cell attributes

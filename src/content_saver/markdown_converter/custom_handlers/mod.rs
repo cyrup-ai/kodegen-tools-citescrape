@@ -560,7 +560,9 @@ fn normalize_code_whitespace(content: &str) -> String {
 fn is_inside_pre(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> bool {
     use markup5ever_rcdom::NodeData;
 
-    let mut current = node.parent.get();
+    // Safe non-destructive read: take() + replace()
+    let mut current = node.parent.take();
+    node.parent.set(current.clone());
 
     while let Some(weak_parent) = current {
         if let Some(parent) = weak_parent.upgrade() {
@@ -569,7 +571,9 @@ fn is_inside_pre(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> bool {
             {
                 return true;
             }
-            current = parent.parent.get();
+            // Safe non-destructive read: take() + replace()
+            current = parent.parent.take();
+            parent.parent.set(current.clone());
         } else {
             break;
         }
@@ -652,8 +656,10 @@ fn get_language_from_element(element: &Element) -> Option<String> {
 fn get_language_from_parent(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Option<String> {
     use markup5ever_rcdom::NodeData;
     
-    // Get parent reference (same pattern as is_inside_pre)
-    let weak_parent = node.parent.get()?;
+    // Safe non-destructive read: take() + replace()
+    let weak_parent = node.parent.take();
+    node.parent.set(weak_parent.clone());
+    let weak_parent = weak_parent?;
     let parent_rc = weak_parent.upgrade()?;
     
     if let NodeData::Element { ref attrs, .. } = parent_rc.data {
