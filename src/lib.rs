@@ -5,6 +5,8 @@ pub mod crawl_engine;
 pub mod crawl_events;
 pub mod inline_css;
 pub mod kromekover;
+pub mod link_index;
+pub mod link_rewriter;
 pub mod mcp;
 pub mod page_extractor;
 pub mod runtime;
@@ -29,7 +31,10 @@ pub use imurl::ImUrl;
 
 // Test-accessible modules
 pub use crawl_engine::rate_limiter as crawl_rate_limiter;
-pub use page_extractor::link_rewriter;
+
+// New event-driven link rewriting (SQLite-backed)
+pub use link_index::LinkIndex;
+pub use link_rewriter::LinkRewriter;
 
 // MCP Tools and Managers
 pub use mcp::{

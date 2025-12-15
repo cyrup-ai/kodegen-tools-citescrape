@@ -16,7 +16,6 @@ use super::extractors::{
 /// Configuration for page data extraction
 pub struct ExtractPageDataConfig {
     pub output_dir: std::path::PathBuf,
-    pub link_rewriter: super::link_rewriter::LinkRewriter,
     pub max_inline_image_size_bytes: Option<usize>,
     pub crawl_rate_rps: Option<f64>,
     pub save_html: bool,
@@ -283,53 +282,18 @@ pub async fn extract_page_data(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get page content: {e}"))?;
 
-    // Phase 1: Mark all links with data attributes for discovery tracking
-    let content_with_data_attrs = config
-        .link_rewriter
-        .mark_links_for_discovery(&content, &url)
-        .await?;
+    // NOTE: Link rewriting is now handled AFTER page save via the event-driven
+    // LinkRewriter system. See link_rewriter module for details.
+    // The content is saved with original links, then rewritten in-place.
 
-    // Phase 2: Rewrite links using data attributes and registered URL mappings
-    let content_with_rewritten_links = config
-        .link_rewriter
-        .rewrite_links_from_data_attrs(content_with_data_attrs)
-        .await?;
-
-    // Convert Vec<InteractiveElement> to InteractiveElements (FIX for the bug!)
+    // Convert Vec<InteractiveElement> to InteractiveElements
     let interactive_elements = convert_interactive_elements(interactive_elements_vec);
 
-    // Get local path for URL registration BEFORE saving
-    // This allows us to register the URL→path mapping after successful save
-    let local_path_str =
-        match crate::utils::get_mirror_path(&url, &config.output_dir, "index.html").await {
-            Ok(path) => path.to_string_lossy().to_string(),
-            Err(e) => {
-                log::warn!("Failed to get mirror path for URL registration: {e}");
-                // Fallback path - registration will still work but path may be incorrect
-                config
-                    .output_dir
-                    .join("index.html")
-                    .to_string_lossy()
-                    .to_string()
-            }
-        };
-
-    // Register URL → local path mapping BEFORE saving
-    // This enables progressive rewriting: pages crawled later can immediately
-    // link to this page using relative paths instead of external URLs
-    config
-        .link_rewriter
-        .register_url(&url, &local_path_str)
-        .await;
-
-    log::debug!(
-        "Registered URL mapping: {url} → {local_path_str} (enables progressive link rewriting)"
-    );
-
     // Save HTML content if enabled
+    // NOTE: Links will be rewritten AFTER save by page_processor calling LinkRewriter::on_page_saved()
     if config.save_html {
         match content_saver::save_html_content_with_resources(
-            &content_with_rewritten_links,
+            &content,
             url.clone(),
             config.output_dir.clone(),
             &resources,
@@ -343,8 +307,6 @@ pub async fn extract_page_data(
             }
             Err(e) => {
                 log::warn!("Failed to save HTML for {url}: {e}");
-                // Note: URL is already registered even if save failed
-                // This is acceptable - worst case is a 404 for a registered path
             }
         }
     }
@@ -353,7 +315,7 @@ pub async fn extract_page_data(
     Ok(super::schema::PageData {
         url: url.clone(),
         title,
-        content: content_with_rewritten_links,
+        content,
         metadata,
         interactive_elements,
         links,

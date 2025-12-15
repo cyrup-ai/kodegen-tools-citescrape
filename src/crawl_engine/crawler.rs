@@ -1,12 +1,14 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use super::crawl_types::{CrawlError, Crawler};
 use crate::config::CrawlConfig;
 use crate::content_saver::{self};
 use crate::imurl::ImUrl;
-use crate::page_extractor::link_rewriter::LinkRewriter;
+use crate::link_index::LinkIndex;
+use crate::link_rewriter::LinkRewriter;
 use crate::runtime::CrawlRequest;
 
 // CacheMetadata is now imported from content_saver module
@@ -22,25 +24,31 @@ pub use content_saver::CacheMetadata;
 pub struct ChromiumoxideCrawler {
     config: CrawlConfig,
     chrome_data_dir: Option<PathBuf>,
-    link_rewriter: LinkRewriter,
 }
 
 impl ChromiumoxideCrawler {
     #[must_use]
     pub fn new(config: CrawlConfig) -> Self {
-        let link_rewriter = LinkRewriter::new(config.storage_dir());
         let chrome_data_dir = config.chrome_data_dir().cloned();
         Self {
             config,
             chrome_data_dir,
-            link_rewriter,
         }
     }
 
     async fn crawl_impl(&mut self) -> Result<()> {
         let config = self.config.clone();
-        let link_rewriter = self.link_rewriter.clone();
         let chrome_data_dir = self.chrome_data_dir.clone();
+
+        // Initialize LinkIndex (opens or creates SQLite database)
+        let link_index = Arc::new(
+            LinkIndex::open(config.storage_dir())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to open link index: {}", e))?
+        );
+
+        // Create LinkRewriter with the index
+        let link_rewriter = LinkRewriter::new(link_index, config.storage_dir().to_path_buf());
 
         let chrome_data_dir_path =
             super::crawl_impl(config, link_rewriter, chrome_data_dir).await?;
@@ -52,12 +60,10 @@ impl ChromiumoxideCrawler {
 
 impl Crawler for ChromiumoxideCrawler {
     fn new(config: CrawlConfig) -> Self {
-        let link_rewriter = LinkRewriter::new(config.storage_dir());
         let chrome_data_dir = config.chrome_data_dir().cloned();
         Self {
             config,
             chrome_data_dir,
-            link_rewriter,
         }
     }
 

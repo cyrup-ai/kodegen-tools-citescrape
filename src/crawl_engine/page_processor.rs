@@ -15,7 +15,6 @@ use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams,
     EventResponseReceived,
 };
-use dashmap::DashSet;
 use futures::StreamExt;
 use log::{debug, error, warn};
 use rand::Rng;
@@ -34,8 +33,8 @@ use crate::config::CrawlConfig;
 use crate::content_saver;
 use crate::content_saver::markdown_converter::{ConversionOptions, convert_html_to_markdown};
 use crate::crawl_events::{CrawlEventBus, types::{CrawlEvent, PageCrawlMetadata}};
+use crate::link_rewriter::LinkRewriter;
 use crate::page_extractor;
-use crate::page_extractor::link_rewriter::LinkRewriter;
 
 /// RAII guard for chromiumoxide Page that ensures proper cleanup
 ///
@@ -145,7 +144,6 @@ pub struct PageProcessorContext {
     pub circuit_breaker: Option<Arc<tokio::sync::Mutex<CircuitBreaker>>>,
     pub total_pages: Arc<AtomicUsize>,
     pub queue: Arc<tokio::sync::Mutex<VecDeque<CrawlQueue>>>,
-    pub visited: Arc<DashSet<String>>,  // Shared with orchestrator
     pub indexing_sender: Option<Arc<crate::search::IndexingSender>>,
 }
 
@@ -457,7 +455,6 @@ pub async fn process_single_page(
 
     let extract_config = crate::page_extractor::page_data::ExtractPageDataConfig {
         output_dir: ctx.config.storage_dir.clone(),
-        link_rewriter: ctx.link_rewriter.clone(),
         max_inline_image_size_bytes: ctx.config.max_inline_image_size_bytes,
         crawl_rate_rps: ctx.config.crawl_rate_rps,
         save_html: ctx.config.save_raw_html(),
@@ -605,6 +602,32 @@ pub async fn process_single_page(
 
     let html_size = page_data.content.len();
 
+    // EVENT-DRIVEN LINK REWRITING: Register page and rewrite links
+    // This happens AFTER HTML is saved to disk (in extract_page_data)
+    if ctx.config.save_raw_html() {
+        // Get the local path where HTML was saved
+        if let Ok(local_path) = crate::utils::get_mirror_path(&item.url, &ctx.config.storage_dir, "index.html").await {
+            // Extract outbound links from the HTML content
+            let outbound_links = crate::link_rewriter::extract_links_from_html(&page_data.content, &item.url);
+
+            // Trigger event-driven link rewriting
+            match ctx.link_rewriter.on_page_saved(&item.url, &local_path, outbound_links).await {
+                Ok(result) => {
+                    if result.outbound_rewritten > 0 || result.inbound_updated > 0 {
+                        debug!(
+                            "Link rewriting for {}: {} outbound rewritten, {} inbound pages updated",
+                            item.url, result.outbound_rewritten, result.inbound_updated
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("Link rewriting failed for {}: {}", item.url, e);
+                    // Non-fatal: page is saved, just links weren't rewritten
+                }
+            }
+        }
+    }
+
     // Save markdown if requested (only executed if validation passed)
     if ctx.config.save_markdown() {
         match content_saver::save_markdown_content(
@@ -663,7 +686,8 @@ pub async fn process_single_page(
 
         match process_page_links(page_guard.page().clone(), item.clone(), crawl_state, &ctx.config).await {
             Ok(new_queue) => {
-                // Add new discovered links using O(1) lock-free DashSet deduplication
+                // Add new discovered links to queue
+                // Deduplication is handled by orchestrator's visited DashSet when popping
                 let mut added = 0;
 
                 for new_item in new_queue {
@@ -679,15 +703,13 @@ pub async fn process_single_page(
                         }
                     };
                     
-                    // O(1) lock-free check-and-insert: DashSet.insert() returns true if newly inserted
-                    if ctx.visited.insert(normalized_new.clone()) {
-                        let mut q = ctx.queue.lock().await;
-                        q.push_back(CrawlQueue {
-                            url: normalized_new,
-                            depth: new_item.depth,
-                        });
-                        added += 1;
-                    }
+                    // Add to queue - orchestrator handles visited check when popping
+                    let mut q = ctx.queue.lock().await;
+                    q.push_back(CrawlQueue {
+                        url: normalized_new,
+                        depth: new_item.depth,
+                    });
+                    added += 1;
                 }
 
                 added

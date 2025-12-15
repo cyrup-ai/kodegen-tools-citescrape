@@ -28,7 +28,7 @@ pub use orchestrator::crawl_pages;
 pub use progress::{NoOpProgress, ProgressReporter};
 
 // Re-export rate limiter types
-pub use rate_limiter::{RateLimitDecision, check_crawl_rate_limit, check_http_rate_limit};
+pub use rate_limiter::{CrawlRateLimiter, RateLimitDecision, check_crawl_rate_limit, check_http_rate_limit};
 
 // Re-export crawler types and functions
 pub use crawler::{ChromiumoxideCrawler, extract_valid_urls, should_visit_url};

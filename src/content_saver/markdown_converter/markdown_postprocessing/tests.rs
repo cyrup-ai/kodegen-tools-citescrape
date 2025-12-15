@@ -386,3 +386,108 @@ This is prose text.
         "Heading should be AFTER closing fence (outside fence), but fence closes at line {closing_idx} and heading is at line {heading_idx}"
     );
 }
+
+
+// =============================================================================
+// Shell Operator Spacing Tests
+// =============================================================================
+
+#[test]
+fn test_pipe_operator_spacing() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::repair_shell_syntax;
+    
+    let markdown = r#"```bash
+curl-fsSLhttps://claude.ai/install.sh|bash
+```"#;
+
+    let result = repair_shell_syntax(markdown);
+    
+    eprintln!("INPUT:\n{}", markdown);
+    eprintln!("OUTPUT:\n{}", result);
+    
+    // Should have proper spacing around pipe
+    assert!(result.contains("| bash"), "Pipe operator should have spacing. Got: {}", result);
+}
+
+#[test]
+fn test_all_shell_operators_spacing() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::repair_shell_syntax;
+    
+    let markdown = r#"```bash
+command1|command2
+command1>output.txt
+command1>>append.txt
+command1<input.txt
+command1&
+command1&&command2
+command1||command2
+```"#;
+
+    let result = repair_shell_syntax(markdown);
+    
+    eprintln!("OUTPUT:\n{}", result);
+    
+    // All operators should have proper spacing
+    assert!(result.contains("command1 | command2"), "Pipe should have spacing");
+    assert!(result.contains("command1 > output.txt"), "Redirect out should have spacing");
+    assert!(result.contains("command1 >> append.txt"), "Redirect append should have spacing");
+    assert!(result.contains("command1 < input.txt"), "Redirect in should have spacing");
+    assert!(result.contains("command1 &"), "Background should have spacing (after command1)");
+    assert!(result.contains("command1 && command2"), "Double ampersand should have spacing");
+    assert!(result.contains("command1 || command2"), "Double pipe should have spacing");
+}
+
+#[test]
+fn test_only_shell_blocks_affected() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::repair_shell_syntax;
+    
+    // Non-shell code blocks should not be affected
+    let markdown = r#"```rust
+let result = items.iter().map(|x| x * 2).collect();
+if x>5 { }
+```"#;
+
+    let result = repair_shell_syntax(markdown);
+    
+    eprintln!("OUTPUT:\n{}", result);
+    
+    // Rust code should NOT be modified (no language tag means not shell)
+    assert!(result.contains("|x|"), "Rust closure syntax should be preserved");
+    assert!(result.contains("x>5"), "Rust comparison should be preserved without spacing");
+}
+
+#[test]
+fn test_shell_bracket_and_pipe_operators_together() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::repair_shell_syntax;
+    
+    let markdown = r#"```bash
+if[-f"file.txt"];then
+    cat file.txt|grep"pattern"
+fi
+```"#;
+
+    let result = repair_shell_syntax(markdown);
+    
+    eprintln!("OUTPUT:\n{}", result);
+    
+    // Should fix both bracket spacing AND pipe spacing
+    assert!(result.contains("if [ -f \"file.txt\" ]"), "Bracket spacing should be fixed");
+    assert!(result.contains("]; then"), "Semicolon spacing should be fixed");
+    assert!(result.contains("| grep"), "Pipe spacing should be fixed");
+}
+
+#[test]
+fn test_idempotent_shell_repair() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::repair_shell_syntax;
+    
+    let markdown = r#"```bash
+command1 | command2
+command1 > file.txt
+```"#;
+
+    let result1 = repair_shell_syntax(markdown);
+    let result2 = repair_shell_syntax(&result1);
+    
+    // Running twice should produce same result (idempotent)
+    assert_eq!(result1, result2, "Repair should be idempotent");
+}

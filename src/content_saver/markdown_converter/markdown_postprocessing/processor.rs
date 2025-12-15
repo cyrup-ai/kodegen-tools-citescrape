@@ -4,6 +4,7 @@
 
 use super::code_fence_detection::{detect_code_fence, looks_like_code, CodeFence};
 use super::heading_extraction::{extract_heading_level, normalize_heading_level, HEADING_PREFIXES};
+use super::shell_syntax_repair::repair_shell_syntax;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -61,6 +62,12 @@ pub fn process_markdown_headings(markdown: &str) -> String {
     
     // Convert back to lines for main processing
     let lines: Vec<&str> = cleaned_lines.to_vec();
+
+    // SHELL SYNTAX REPAIR PASS
+    // Apply BEFORE heading processing to ensure shell code is preserved correctly
+    let markdown_after_hr = lines.join("\n");
+    let markdown = repair_shell_syntax(&markdown_after_hr);
+    let lines: Vec<&str> = markdown.lines().collect();
 
     // SECOND PASS: Process all lines
     let mut processed_lines = Vec::new();
@@ -191,4 +198,26 @@ pub fn process_markdown_headings(markdown: &str) -> String {
     let result = SECTION_ANCHOR_RE.replace_all(&result, "");
 
     result.to_string()
+}
+
+
+/// Fix code fences that are merged with preceding text
+///
+/// Ensures code fences always start on a new line by inserting newlines
+/// before any fence that's merged with text (e.g., "text```" → "text\n\n```")
+///
+/// This fixes the bug where code fences appear merged with preceding content
+/// like "Set the following environment variables to enable Bedrock:```ruby"
+pub fn fix_merged_code_fences(markdown: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    
+    // Match text immediately followed by code fence (no newline)
+    static MERGED_FENCE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"([^\n])```")
+            .expect("MERGED_FENCE regex is valid")
+    });
+    
+    // Insert newline before code fence
+    MERGED_FENCE.replace_all(markdown, "$1\n\n```").to_string()
 }

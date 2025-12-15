@@ -52,7 +52,8 @@ mod custom_handlers;
 pub use html_preprocessing::{clean_html_content, extract_main_content};
 pub use html_to_markdown::MarkdownConverter;
 pub use markdown_postprocessing::{
-    extract_heading_level, normalize_heading_level, normalize_whitespace, process_markdown_headings,
+    extract_heading_level, normalize_heading_level, normalize_inline_formatting_spacing, 
+    normalize_whitespace, process_markdown_headings,
 };
 
 /// Configuration options for HTML to Markdown conversion
@@ -235,17 +236,33 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
         }
     };
 
+    // Stage 0.5: Preprocess expressive-code blocks (MUST happen before HTML cleaning!)
+    // This converts <div class="ec-line"> patterns to plain newline-separated text.
+    // HTML cleaning would otherwise remove these classes, losing newline information.
+    let ec_preprocessed = match html_preprocessing::preprocess_expressive_code(&normalized_html) {
+        Ok(processed) => processed,
+        Err(e) => {
+            tracing::warn!("Expressive-code preprocessing failed: {}, using unprocessed HTML", e);
+            normalized_html
+        }
+    };
+
+    // Stage 0.6: Protect code blocks from DOM parsing whitespace collapse
+    // MUST happen BEFORE extract_main_content and clean_html_content which use DOM parsing
+    let mut code_protector = html_preprocessing::CodeBlockProtector::new();
+    let protected_html = code_protector.protect(&ec_preprocessed);
+
     // Stage 1: Extract main content (with fallback to full HTML)
     let main_html = if options.extract_main_content {
-        match extract_main_content(&normalized_html) {
+        match extract_main_content(&protected_html) {
             Ok(content) => content,
             Err(e) => {
                 tracing::debug!("Main content extraction failed: {}, using full HTML", e);
-                normalized_html
+                protected_html
             }
         }
     } else {
-        normalized_html
+        protected_html
     };
 
     // Stage 2: Clean HTML (with passthrough if disabled)
@@ -261,7 +278,18 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
         main_html
     };
 
-    // Stage 2.5: Preprocess tables (NEW - always enabled when preserve_tables is true)
+    // Stage 2.1: Restore protected code blocks
+    // The CodeBlockProtector replaced <pre> blocks with placeholders to survive DOM parsing.
+    // Now restore the original blocks with preserved whitespace.
+    let clean_html = code_protector.restore(&clean_html);
+
+    // Stage 2.2: Convert <br> to newlines inside code blocks
+    // The expressive-code preprocessor uses <br> elements to preserve line breaks,
+    // but htmd doesn't convert <br> to newlines inside <code> elements.
+    // We need to convert them to actual newline characters before htmd processing.
+    let clean_html = html_preprocessing::convert_br_to_newlines_in_code(&clean_html);
+
+    // Stage 2.5: Preprocess tables (always enabled when preserve_tables is true)
     let preprocessed_html = if options.preserve_tables {
         match html_preprocessing::preprocess_tables(&clean_html) {
             Ok(processed) => processed,
@@ -285,6 +313,10 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
 
     let markdown = converter.convert_sync(&preprocessed_html)?;
 
+    // Stage 3.4: Fix merged code fences
+    // Ensures code fences always start on a new line (fixes "text```" → "text\n\n```")
+    let markdown = markdown_postprocessing::fix_merged_code_fences(&markdown);
+
     // Stage 3.5: Process markdown links (convert relative URLs to absolute)
     let markdown = if let Some(base_url) = &options.base_url {
         html_to_markdown::process_markdown_links(&markdown, base_url)
@@ -295,6 +327,11 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Stage 3.6: Filter collapsed code section indicators
     // Removes "X collapsed lines" UI artifacts from code viewer widgets
     let markdown = markdown_postprocessing::filter_collapsed_lines(&markdown);
+
+    // Stage 3.6.5: Fix and preserve shebang lines
+    // Fixes corrupted shebangs like "# !/bin/bash" → "#!/bin/bash"
+    // Preserves valid shebangs exactly as-is in code blocks
+    let markdown = markdown_postprocessing::fix_shebang_lines(&markdown);
     
     // Stage 3.7: Strip bold markers from code fences
     // Fixes corrupted fences like **```rust that should be ```rust
@@ -303,6 +340,15 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Stage 3.8: Strip trailing asterisks after code fences (safety net)
     // Removes any `**` or `****` that appear after closing code fences
     let markdown = markdown_postprocessing::strip_trailing_asterisks_after_code_fences(&markdown);
+    
+    // Stage 3.9: Remove duplicate code blocks
+    // Fixes bug where code blocks appear both as plain text and fenced
+    let markdown = markdown_postprocessing::remove_duplicate_code_blocks(&markdown);
+
+    // Stage 3.10: Repair shell syntax (pipe operators and test brackets)
+    // Fixes spacing around shell operators (|, >, >>, <, &, &&, ||) in shell code blocks
+    // Only processes code blocks with shell language tags (bash, sh, zsh, shell)
+    let markdown = markdown_postprocessing::repair_shell_syntax(&markdown);
 
     // Stage 4: Process markdown headings (with passthrough if disabled)
     let processed_markdown = if options.process_headings {
@@ -314,12 +360,20 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Stage 4.5: Strip residual HTML tags (DEFENSIVE - Layer 2 defense against HTML leakage)
     let markdown = markdown_postprocessing::strip_residual_html_tags(&processed_markdown);
 
+    // Stage 4.6: Normalize inline formatting spacing (safety net)
+    let markdown = markdown_postprocessing::normalize_inline_formatting_spacing(&markdown);
+
     // Stage 5: Normalize whitespace (with passthrough if disabled)
-    let final_markdown = if options.normalize_whitespace {
+    let normalized_markdown = if options.normalize_whitespace {
         normalize_whitespace(&markdown)
     } else {
         markdown
     };
+
+    // Stage 5.5: Ensure block element spacing (SAFETY NET - final defense)
+    // Fixes edge cases where blank lines between structural elements are missing
+    // This catches issues from htmd's normalize_content_for_buffer() and other sources
+    let final_markdown = markdown_postprocessing::ensure_block_element_spacing(&normalized_markdown);
 
     Ok(final_markdown)
 }
@@ -611,4 +665,71 @@ fn test_github_h2_link_full_pipeline() {
             "Link was lost! Got: {}",
             markdown
         );
+    }
+
+    #[test]
+    fn test_code_block_duplication() {
+        let html = r#"
+        <html>
+        <body>
+            <pre><code class="language-bash">
+            echo "test"
+            </code></pre>
+            
+            <pre><code class="language-rust">
+            fn main() {}
+            </code></pre>
+        </body>
+        </html>
+        "#;
+        
+        let markdown = convert_html_to_markdown_sync(html, &ConversionOptions::default()).unwrap();
+        
+        eprintln!("OUTPUT:\n{}", markdown);
+        
+        // Count code fence pairs
+        let fence_count = markdown.matches("```").count();
+        assert_eq!(fence_count, 4, "Should have exactly 4 fences (2 blocks × 2 fences), got {}", fence_count);
+        
+        // Ensure no nested fences
+        assert!(!markdown.contains("```bash\n```bash"), "Should not have nested fences");
+        
+        // Ensure code doesn't appear as plain text AND fenced
+        let code_text = "echo \"test\"";
+        let plain_occurrences = markdown.matches(code_text).count();
+        assert_eq!(plain_occurrences, 1, "Code should appear exactly once, not duplicated. Got: {}", plain_occurrences);
+    }
+
+    #[test]
+    fn test_code_block_duplication_complex_html() {
+        // Test with more complex HTML that might trigger the bug
+        let html = r#"
+        <html>
+        <body>
+            <article>
+                <p>Example code:</p>
+                <pre><code class="language-rust">
+fn get_layout() -> Rc&lt;[Rect]&gt; {
+    let percentage = 50;
+    Layout::default()
+        .split(area)
+}
+                </code></pre>
+                <p>More text</p>
+            </article>
+        </body>
+        </html>
+        "#;
+        
+        let markdown = convert_html_to_markdown_sync(html, &ConversionOptions::default()).unwrap();
+        
+        eprintln!("COMPLEX OUTPUT:\n{}", markdown);
+        
+        // The function name should appear exactly once
+        let fn_occurrences = markdown.matches("fn get_layout()").count();
+        assert_eq!(fn_occurrences, 1, "Function should appear exactly once, not duplicated. Got {} occurrences", fn_occurrences);
+        
+        // Should have exactly 2 fences (1 block)
+        let fence_count = markdown.matches("```").count();
+        assert_eq!(fence_count, 2, "Should have exactly 2 fences (1 block), got {}", fence_count);
     }

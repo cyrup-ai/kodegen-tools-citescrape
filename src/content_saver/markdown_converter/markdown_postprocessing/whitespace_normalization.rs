@@ -34,6 +34,15 @@ fn classify_line(line: &str) -> LineType {
     if trimmed.is_empty() {
         return LineType::Blank;
     }
+
+    // Check for shebang BEFORE heading detection
+    // Shebangs start with #! (no space) and should never be treated as headings
+    // This prevents corruption like "#!/bin/bash" → "# !/bin/bash"
+    if trimmed.starts_with("#!") {
+        // Even though shebangs only matter inside code blocks, we need to avoid
+        // misclassifying them as headings during whitespace normalization
+        return LineType::Paragraph; // Treat as regular paragraph to preserve exactly
+    }
     
     // Code fence (``` or ~~~)
     if detect_code_fence(trimmed).is_some() {
@@ -295,4 +304,47 @@ pub fn normalize_whitespace(markdown: &str) -> String {
     } else {
         String::new()
     }
+}
+
+
+/// Normalize spacing around inline formatting markers
+///
+/// Ensures proper spacing around `**bold**`, `*italic*`, and `` `code` `` 
+/// to prevent merging with adjacent words.
+///
+/// # Rules
+///
+/// 1. Add space before `**` if preceded by alphanumeric character
+/// 2. Add space after `**` if followed by alphanumeric character  
+/// 3. Preserve existing spacing (don't double-space)
+/// 4. Do NOT add spaces inside code blocks
+///
+/// # Examples
+///
+/// - `word**bold**` → `word **bold**`
+/// - `**bold**word` → `**bold** word`
+/// - `already **spaced** text` → `already **spaced** text` (unchanged)
+pub fn normalize_inline_formatting_spacing(markdown: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    
+    // Regex to match alphanumeric followed immediately by **
+    static WORD_BEFORE_BOLD: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(\w)\*\*").expect("WORD_BEFORE_BOLD regex is valid")
+    });
+    
+    // Regex to match ** followed immediately by alphanumeric
+    static BOLD_BEFORE_WORD: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\*\*(\w)").expect("BOLD_BEFORE_WORD regex is valid")
+    });
+    
+    let mut result = markdown.to_string();
+    
+    // Add space before ** if preceded by word character
+    result = WORD_BEFORE_BOLD.replace_all(&result, "$1 **").to_string();
+    
+    // Add space after ** if followed by word character
+    result = BOLD_BEFORE_WORD.replace_all(&result, "** $1").to_string();
+    
+    result
 }

@@ -433,6 +433,17 @@ pub static GO: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"function\s+\w+"#, Negative),
         WeightedPattern::new(r#"public\s+class\s"#, Negative),
         WeightedPattern::new(r##"#\["##, Negative),
+        // Shell command patterns - disqualify Go for shell content
+        WeightedPattern::new(r#"\bbrew\s+install"#, Negative),
+        WeightedPattern::new(r#"\bapt-get\s+"#, Negative),
+        WeightedPattern::new(r#"\bcurl\s+-"#, Negative),
+        WeightedPattern::new(r#"\bwget\s+"#, Negative),
+        WeightedPattern::new(r#"\bgit\s+(clone|pull|push)"#, Negative),
+        WeightedPattern::new(r#"\bnpm\s+(install|run)"#, Negative),
+        WeightedPattern::new(r#"\byarn\s+(install|add)"#, Negative),
+        WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
+        WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
+        WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
     ],
 };
 
@@ -681,6 +692,17 @@ pub static CPP: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"\bfunc\s+"#, Negative),
         WeightedPattern::new(r#"public\s+class\s"#, Negative),
         WeightedPattern::new(r#"package\s+[\w.]+"#, Negative),
+        // Shell command patterns - disqualify CPP for shell content
+        WeightedPattern::new(r#"\bbrew\s+install"#, Negative),
+        WeightedPattern::new(r#"\bapt-get\s+"#, Negative),
+        WeightedPattern::new(r#"\bcurl\s+-"#, Negative),
+        WeightedPattern::new(r#"\bwget\s+"#, Negative),
+        WeightedPattern::new(r#"\bgit\s+(clone|pull|push)"#, Negative),
+        WeightedPattern::new(r#"\bnpm\s+(install|run)"#, Negative),
+        WeightedPattern::new(r#"\byarn\s+(install|add)"#, Negative),
+        WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
+        WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
+        WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
     ],
 };
 
@@ -765,6 +787,28 @@ pub static RUBY: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"kind:\s+"#, Negative),       // Kubernetes YAML
         WeightedPattern::new(r#"metadata:\s*$"#, Negative),  // Kubernetes YAML
         WeightedPattern::new(r#"spec:\s*$"#, Negative),      // Kubernetes YAML
+        // GitHub Actions / GitLab CI YAML patterns (disqualify Ruby)
+        WeightedPattern::new(r#"on:\s*$"#, Negative),             // GitHub Actions trigger
+        WeightedPattern::new(r#"jobs:\s*$"#, Negative),           // GitHub Actions jobs
+        WeightedPattern::new(r#"steps:\s*$"#, Negative),          // Workflow steps
+        WeightedPattern::new(r#"runs-on:\s+"#, Negative),         // Runner specification
+        WeightedPattern::new(r#"uses:\s+[^@]+@"#, Negative),      // Action usage
+        WeightedPattern::new(r#"stages:\s*$"#, Negative),         // GitLab CI stages
+        WeightedPattern::new(r#"script:\s*$"#, Negative),         // GitLab CI script
+        WeightedPattern::new(r#"pull_request:\s*$"#, Negative),   // PR trigger
+        WeightedPattern::new(r#"issue_comment:\s*$"#, Negative),  // Issue comment trigger
+        WeightedPattern::new(r#"workflow_dispatch:\s*$"#, Negative), // Manual trigger
+        // Shell command patterns - disqualify Ruby for shell content
+        WeightedPattern::new(r#"\bbrew\s+install"#, Negative),
+        WeightedPattern::new(r#"\bapt-get\s+"#, Negative),
+        WeightedPattern::new(r#"\bcurl\s+-"#, Negative),
+        WeightedPattern::new(r#"\bwget\s+"#, Negative),
+        WeightedPattern::new(r#"\bgit\s+(clone|pull|push)"#, Negative),
+        WeightedPattern::new(r#"\bnpm\s+(install|run)"#, Negative),
+        WeightedPattern::new(r#"\byarn\s+(install|add)"#, Negative),
+        WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
+        WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
+        WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
     ],
 };
 
@@ -834,6 +878,17 @@ pub static PHP: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"\bdef\s+"#, Negative),
         WeightedPattern::new(r#"\bfunc\s+"#, Negative),
         WeightedPattern::new(r##"#\["##, Negative),
+        // Shell command patterns - disqualify PHP for shell content
+        WeightedPattern::new(r#"\bbrew\s+install"#, Negative),
+        WeightedPattern::new(r#"\bapt-get\s+"#, Negative),
+        WeightedPattern::new(r#"\bcurl\s+-"#, Negative),
+        WeightedPattern::new(r#"\bwget\s+"#, Negative),
+        WeightedPattern::new(r#"\bgit\s+(clone|pull|push)"#, Negative),
+        WeightedPattern::new(r#"\bnpm\s+(install|run)"#, Negative),
+        WeightedPattern::new(r#"\byarn\s+(install|add)"#, Negative),
+        WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
+        WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
+        WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
     ],
 };
 
@@ -898,6 +953,17 @@ pub static SHELL: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"find\s+"#, Unique),
         
         // Strong indicators (8 pts each)
+        WeightedPattern::new(r#"\bbrew\s*(install|update|upgrade|uninstall|search)"#, Strong),
+        WeightedPattern::new(r#"\bapt-get\s*(install|update|upgrade|remove)"#, Strong),
+        WeightedPattern::new(r#"\bapt\s*(install|update|upgrade|remove)"#, Strong),
+        WeightedPattern::new(r#"\byum\s*(install|update|remove)"#, Strong),
+        WeightedPattern::new(r#"\bcurl\s*-"#, Strong),
+        WeightedPattern::new(r#"\bwget\s*(http|ftp|--)"#, Strong),
+        WeightedPattern::new(r#"\bgit\s*(clone|pull|push|commit|add|status|checkout)"#, Strong),
+        WeightedPattern::new(r#"\bnpm\s*(install|run|start|build|test|init)"#, Strong),
+        WeightedPattern::new(r#"\byarn\s*(install|add|run|build)"#, Strong),
+        WeightedPattern::new(r#"\bpnpm\s*(install|add|run)"#, Strong),
+        WeightedPattern::new(r#"\bcargo\s*(build|run|test|install|new)"#, Strong),
         WeightedPattern::new(r#"\bif\s+"#, Strong),
         WeightedPattern::new(r#"\belif\s+"#, Strong),
         WeightedPattern::new(r#"\belse\b"#, Strong),
@@ -1004,6 +1070,17 @@ pub static SQL: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"\bfunc\s+"#, Negative),
         WeightedPattern::new(r#"function\s+"#, Negative),
         WeightedPattern::new(r##"#\["##, Negative),
+        // Shell command patterns - disqualify SQL for shell content
+        WeightedPattern::new(r#"\bbrew\s+install"#, Negative),
+        WeightedPattern::new(r#"\bapt-get\s+"#, Negative),
+        WeightedPattern::new(r#"\bcurl\s+-"#, Negative),
+        WeightedPattern::new(r#"\bwget\s+"#, Negative),
+        WeightedPattern::new(r#"\bgit\s+(clone|pull|push)"#, Negative),
+        WeightedPattern::new(r#"\bnpm\s+(install|run)"#, Negative),
+        WeightedPattern::new(r#"\byarn\s+(install|add)"#, Negative),
+        WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
+        WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
+        WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
     ],
 };
 
@@ -1051,6 +1128,17 @@ pub static TOML: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"\bfunc\s+"#, Negative),
         WeightedPattern::new(r#"function\s+"#, Negative),
         WeightedPattern::new(r#"public\s+class"#, Negative),
+        // Shell command patterns - disqualify TOML for shell content
+        WeightedPattern::new(r#"\bbrew\s+install"#, Negative),
+        WeightedPattern::new(r#"\bapt-get\s+"#, Negative),
+        WeightedPattern::new(r#"\bcurl\s+-"#, Negative),
+        WeightedPattern::new(r#"\bwget\s+"#, Negative),
+        WeightedPattern::new(r#"\bgit\s+(clone|pull|push)"#, Negative),
+        WeightedPattern::new(r#"\bnpm\s+(install|run)"#, Negative),
+        WeightedPattern::new(r#"\byarn\s+(install|add)"#, Negative),
+        WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
+        WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
+        WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
     ],
 };
 
@@ -1085,6 +1173,32 @@ pub static YAML: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"environment:\s*$"#, Unique),
         WeightedPattern::new(r#"ports:\s*$"#, Unique),
         
+        // GitHub Actions workflow patterns (10 pts each)
+        WeightedPattern::new(r#"on:\s*$"#, Unique),               // Workflow trigger
+        WeightedPattern::new(r#"jobs:\s*$"#, Unique),             // Jobs section
+        WeightedPattern::new(r#"steps:\s*$"#, Unique),            // Steps array
+        WeightedPattern::new(r#"runs-on:\s+"#, Unique),           // Runner specification
+        WeightedPattern::new(r#"uses:\s+[^@]+@"#, Unique),        // Action usage (e.g., uses: actions/checkout@v3)
+        WeightedPattern::new(r#"with:\s*$"#, Unique),             // Action inputs
+        WeightedPattern::new(r#"run:\s+\|"#, Unique),             // Multi-line run command
+        WeightedPattern::new(r#"env:\s*$"#, Unique),              // Environment variables section
+        
+        // GitLab CI patterns (10 pts each)
+        WeightedPattern::new(r#"stages:\s*$"#, Unique),           // Pipeline stages
+        WeightedPattern::new(r#"script:\s*$"#, Unique),           // Script section
+        WeightedPattern::new(r#"before_script:\s*$"#, Unique),    // Before script hook
+        WeightedPattern::new(r#"after_script:\s*$"#, Unique),     // After script hook
+        WeightedPattern::new(r#"variables:\s*$"#, Unique),        // Variables section
+        WeightedPattern::new(r#"only:\s*$"#, Unique),             // Conditional execution
+        WeightedPattern::new(r#"except:\s*$"#, Unique),           // Exclusion rules
+        
+        // Workflow trigger patterns (10 pts each)
+        WeightedPattern::new(r#"pull_request:\s*$"#, Unique),     // GitHub PR trigger
+        WeightedPattern::new(r#"issue_comment:\s*$"#, Unique),    // GitHub issue comment
+        WeightedPattern::new(r#"workflow_dispatch:\s*$"#, Unique), // Manual trigger
+        WeightedPattern::new(r#"schedule:\s*$"#, Unique),         // Scheduled workflow
+        WeightedPattern::new(r#"types:\s*\["#, Unique),           // Event types filter
+        
         // Strong indicators (8 pts each)
         WeightedPattern::new(r#"^\w+:"#, Strong),
         WeightedPattern::new(r#"^\s+-\s+"#, Strong),
@@ -1104,6 +1218,17 @@ pub static YAML: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"function\s+"#, Negative),
         WeightedPattern::new(r#"public\s+class"#, Negative),
         WeightedPattern::new(r#"\{[^}]+:"#, Negative),
+        // Shell command patterns - disqualify YAML for shell content
+        WeightedPattern::new(r#"\bbrew\s+install"#, Negative),
+        WeightedPattern::new(r#"\bapt-get\s+"#, Negative),
+        WeightedPattern::new(r#"\bcurl\s+-"#, Negative),
+        WeightedPattern::new(r#"\bwget\s+"#, Negative),
+        WeightedPattern::new(r#"\bgit\s+(clone|pull|push)"#, Negative),
+        WeightedPattern::new(r#"\bnpm\s+(install|run)"#, Negative),
+        WeightedPattern::new(r#"\byarn\s+(install|add)"#, Negative),
+        WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
+        WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
+        WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
     ],
 };
 
@@ -1221,6 +1346,17 @@ pub static CSS: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"function\s+"#, Negative),
         WeightedPattern::new(r#"public\s+class"#, Negative),
         WeightedPattern::new(r#"//[^\n]+$"#, Negative),
+        // Shell command patterns - disqualify CSS for shell content
+        WeightedPattern::new(r#"\bbrew\s+install"#, Negative),
+        WeightedPattern::new(r#"\bapt-get\s+"#, Negative),
+        WeightedPattern::new(r#"\bcurl\s+-"#, Negative),
+        WeightedPattern::new(r#"\bwget\s+"#, Negative),
+        WeightedPattern::new(r#"\bgit\s+(clone|pull|push)"#, Negative),
+        WeightedPattern::new(r#"\bnpm\s+(install|run)"#, Negative),
+        WeightedPattern::new(r#"\byarn\s+(install|add)"#, Negative),
+        WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
+        WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
+        WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
     ],
 };
 

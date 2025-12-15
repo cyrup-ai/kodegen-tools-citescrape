@@ -29,7 +29,7 @@ use crate::crawl_events::{
     CrawlEventBus,
     types::CrawlEvent,
 };
-use crate::page_extractor::link_rewriter::LinkRewriter;
+use crate::link_rewriter::LinkRewriter;
 
 /// Main crawl orchestration with event bus integration
 ///
@@ -180,7 +180,6 @@ pub async fn crawl_pages<P: ProgressReporter>(
             let circuit_breaker = circuit_breaker.clone();
             let total_pages = Arc::clone(&total_pages);
             let queue = Arc::clone(&queue);
-            let visited = Arc::clone(&visited);
             let indexing_sender = indexing_sender.clone();
 
             // Spawn concurrent task
@@ -189,6 +188,8 @@ pub async fn crawl_pages<P: ProgressReporter>(
                 let _domain_permit = domain_permit; // Hold until task completes
 
                 // Process single page with full error handling
+                // Note: visited deduplication happens at orchestrator level (line 153),
+                // not in page_processor - prevents double-insert bug
                 let ctx = PageProcessorContext {
                     config,
                     link_rewriter,
@@ -196,7 +197,6 @@ pub async fn crawl_pages<P: ProgressReporter>(
                     circuit_breaker,
                     total_pages,
                     queue,
-                    visited: Arc::clone(&visited),
                     indexing_sender,
                 };
 

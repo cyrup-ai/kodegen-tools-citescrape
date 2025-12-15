@@ -19,10 +19,11 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use crate::utils::string_utils::safe_truncate_chars;
+
 
 // Re-use the size limit from main_content_extraction
 use super::main_content_extraction::MAX_HTML_SIZE;
+
 
 // ============================================================================
 // Regex Patterns for HTML Cleaning
@@ -161,149 +162,27 @@ static HEADING_ANCHOR_MARKERS: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 // ============================================================================
-// DOM-Based Interactive Element Removal
+// CSS Selectors for Content Protection
 // ============================================================================
 
-/// Code block data structure for preservation during interactive element removal
-#[derive(Debug, Clone)]
-struct CodeBlock {
-    /// Programming language (extracted from class or data-language attribute)
-    language: Option<String>,
-    /// Raw code content (text content of the <pre><code> block)
-    content: String,
-}
+// Pre-compiled CSS selectors for content elements that should be preserved
+// during interactive element removal. These simple tag selectors never fail to parse.
 
-/// Extract language from class attribute value (e.g., "language-rust hljs" -> Some("rust"))
-fn extract_language_from_class(class_value: &str) -> Option<String> {
-    for token in class_value.split_whitespace() {
-        if let Some(lang) = token.strip_prefix("language-") {
-            return Some(lang.to_string());
-        }
-        if let Some(lang) = token.strip_prefix("lang-") {
-            return Some(lang.to_string());
-        }
-    }
-    None
-}
+static PRE_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("pre").expect("PRE_SELECTOR: 'pre' is a valid CSS selector")
+});
 
-/// Extract all <pre> code blocks from the DOM before interactive element removal.
-///
-/// This function preserves code blocks even if they're wrapped in containers that
-/// will be removed (e.g., `<div class="copy-to-clipboard">`).
-///
-/// # Arguments
-/// * `element` - Root element to search for code blocks
-///
-/// # Returns
-/// * Vector of CodeBlock structs containing language, content, and unique markers
-fn extract_code_blocks(element: &ElementRef) -> Vec<CodeBlock> {
-    let mut blocks = Vec::new();
-    
-    // Find all <pre> elements
-    let pre_selector = match Selector::parse("pre") {
-        Ok(s) => s,
-        Err(_) => return blocks,
-    };
-    
-    for pre_elem in element.select(&pre_selector) {
-        // Extract language from data-language attribute
-        let language = pre_elem.value().attr("data-language")
-            .map(String::from)
-            .or_else(|| {
-                // Fallback: check class attribute
-                pre_elem.value().attr("class")
-                    .and_then(extract_language_from_class)
-            })
-            .or_else(|| {
-                // Fallback: check child <code> element's class
-                let code_selector = match Selector::parse("code") {
-                    Ok(s) => s,
-                    Err(_) => return None,
-                };
-                
-                pre_elem.select(&code_selector)
-                    .next()
-                    .and_then(|code_elem| {
-                        code_elem.value().attr("class")
-                            .and_then(extract_language_from_class)
-                    })
-            });
-        
-        // Extract code text content (from all text nodes recursively)
-        let code_text: String = pre_elem.text().collect();
-        
-        if !code_text.trim().is_empty() {
-            blocks.push(CodeBlock {
-                language,
-                content: code_text,
-            });
-        }
-    }
-    
-    log::debug!("Extracted {} code blocks for preservation", blocks.len());
-    blocks
-}
+static UL_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("ul").expect("UL_SELECTOR: 'ul' is a valid CSS selector")
+});
 
-/// Restore code blocks that were removed during interactive element cleaning.
-///
-/// This function checks if code blocks are still present in the cleaned HTML.
-/// If any are missing, they're appended to the output.
-///
-/// # Arguments
-/// * `html` - Cleaned HTML string (after interactive element removal)
-/// * `code_blocks` - Original code blocks extracted before removal
-///
-/// # Returns
-/// * HTML string with missing code blocks restored
-fn restore_code_blocks(html: String, code_blocks: &[CodeBlock]) -> String {
-    if code_blocks.is_empty() {
-        return html;
-    }
-    
-    let mut result = html;
-    let mut restored_count = 0;
-    
-    for block in code_blocks {
-        // Check if this code block's content is still present in the HTML
-        // Use a conservative check: if the first 50 CHARACTERS of content are present, assume it's there
-        let check_content = safe_truncate_chars(&block.content, 50);
-        
-        if !result.contains(check_content) {
-            // Code block was removed - restore it
-            let code_html = if let Some(ref lang) = block.language {
-                format!(
-                    "\n<pre><code class=\"language-{}\">{}</code></pre>\n",
-                    lang,
-                    html_escape::encode_text(&block.content)
-                )
-            } else {
-                format!(
-                    "\n<pre><code>{}</code></pre>\n",
-                    html_escape::encode_text(&block.content)
-                )
-            };
-            
-            result.push_str(&code_html);
-            restored_count += 1;
-            
-            log::debug!(
-                "Restored code block {} ({} chars, language: {:?})",
-                restored_count,
-                block.content.len(),
-                block.language
-            );
-        }
-    }
-    
-    if restored_count > 0 {
-        log::info!(
-            "Restored {} code blocks that were removed with interactive elements",
-            restored_count
-        );
-    }
-    
-    result
-}
+static OL_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("ol").expect("OL_SELECTOR: 'ol' is a valid CSS selector")
+});
+
+// ============================================================================
+// DOM-Based Interactive Element Removal
+// ============================================================================
 
 /// Remove interactive elements from HTML using DOM parsing and CSS selectors.
 ///
@@ -318,15 +197,11 @@ fn restore_code_blocks(html: String, code_blocks: &[CodeBlock]) -> String {
 /// Uses the same pattern as `main_content_extraction.rs::remove_elements_from_html()`
 /// for efficient O(s + n) removal where s = selectors, n = elements.
 fn remove_interactive_elements_from_dom(html: &str) -> String {
-    // Parse HTML to DOM
+    // Parse the original HTML (code blocks are intact for detection)
     let document = Html::parse_fragment(html);
     
     // Get the root element (fragment wraps content in a root node)
     let root = document.root_element();
-    
-    // STEP 1: Extract all code blocks BEFORE removal
-    // This preserves them even if wrapped in interactive containers
-    let code_blocks = extract_code_blocks(&root);
     
     // Define all selectors for interactive elements to remove
     let interactive_selectors = &[
@@ -334,8 +209,8 @@ fn remove_interactive_elements_from_dom(html: &str) -> String {
         // EXISTING SELECTORS (keep as-is)
         // ========================================================================
         
-        // Citescrape tracking attributes (added during extraction)
-        "[data-citescrape-interactive]",
+        // NOTE: [data-citescrape-interactive] was REMOVED - it was deleting ALL links!
+        // That attribute is for discovery/extraction, not deletion.
         
         // Interactive form elements (not all are in <form> tags)
         "button",
@@ -409,17 +284,18 @@ fn remove_interactive_elements_from_dom(html: &str) -> String {
         ".theme-doc-footer",         // Docusaurus footer
     ];
     
-    // STEP 2: Remove matching elements from DOM
-    let cleaned = remove_elements_from_html(&root, interactive_selectors);
-    
-    // STEP 3: Re-inject code blocks if they were removed
-    restore_code_blocks(cleaned, &code_blocks)
+    // Remove interactive elements with unwrap support for code block containers
+    remove_elements_from_html(&root, interactive_selectors)
 }
 
 /// Efficiently remove elements matching selectors from a DOM element's subtree.
 ///
 /// This is adapted from `main_content_extraction.rs::remove_elements_from_html()`.
 /// Overall complexity: O(s + n) instead of O(s × n²) from naive string replacement.
+///
+/// **Code Block Protection**: When a matched element contains `<pre>` code blocks,
+/// the container is "unwrapped" (children serialized, container tags skipped) instead
+/// of being fully removed. Non-code-block children are still removed.
 ///
 /// # Arguments
 /// * `element` - Root element to process
@@ -440,29 +316,72 @@ fn remove_elements_from_html(element: &ElementRef, remove_selectors: &[&str]) ->
             }
         })
         .collect();
+    
+    // Use pre-compiled static selectors for content elements that should be protected
+    // These are parsed once at first use via LazyLock
+    let pre_selector = &*PRE_SELECTOR;
+    let ul_selector = &*UL_SELECTOR;
+    let ol_selector = &*OL_SELECTOR;
 
-    // Build HashSet of all elements to remove (using NodeId for O(1) lookup) - O(n)
+    // Build HashSet of all elements to remove
     let mut to_remove: HashSet<NodeId> = HashSet::new();
+    let mut to_unwrap: HashSet<NodeId> = HashSet::new();
+
     for sel in &parsed_selectors {
         for elem in element.select(sel) {
-            to_remove.insert(elem.id());
+            // ✅ FIX: Check for ALL content elements (pre, ul, ol)
+            let contains_pre = elem.select(pre_selector).next().is_some();
+            let contains_ul = elem.select(ul_selector).next().is_some();
+            let contains_ol = elem.select(ol_selector).next().is_some();
+            let contains_content = contains_pre || contains_ul || contains_ol;
+            
+            if contains_content {
+                // Don't remove the container - unwrap it instead
+                // This preserves the content (pre/ul/ol) while removing the wrapper
+                to_unwrap.insert(elem.id());
+                
+                // Remove non-content children (decorative elements, buttons, etc.)
+                for child in elem.children() {
+                    if let Some(child_elem) = ElementRef::wrap(child) {
+                        let child_name = child_elem.value().name();
+                        
+                        // Check if this child is a content element or contains one
+                        let is_content_element = matches!(child_name, "pre" | "ul" | "ol");
+                        let child_has_content = 
+                            child_elem.select(pre_selector).next().is_some() ||
+                            child_elem.select(ul_selector).next().is_some() ||
+                            child_elem.select(ol_selector).next().is_some();
+                        
+                        if !is_content_element && !child_has_content {
+                            // Not a content element → safe to remove
+                            to_remove.insert(child_elem.id());
+                        }
+                    }
+                }
+            } else {
+                // No content elements found → remove entire element
+                to_remove.insert(elem.id());
+            }
         }
     }
 
-    // Serialize HTML while skipping removed elements - O(n)
+    // Serialize HTML with both removal and unwrapping - O(n)
     let mut result = String::new();
-    serialize_html_excluding(element, &to_remove, &mut result);
+    serialize_html_with_unwrap(element, &to_remove, &to_unwrap, &mut result);
     result
 }
 
 /// Recursively serialize an element and its descendants to HTML,
-/// skipping elements in the removal set.
+/// skipping elements in the removal set and unwrapping elements in the unwrap set.
 ///
 /// This is adapted from `main_content_extraction.rs::serialize_html_excluding()`.
-/// Preserves HTML structure (tags, attributes, nesting) while excluding unwanted elements.
-fn serialize_html_excluding(
+/// Preserves HTML structure (tags, attributes, nesting) while:
+/// - Excluding elements in `to_remove` (skip entirely)
+/// - Unwrapping elements in `to_unwrap` (serialize children but not tags)
+fn serialize_html_with_unwrap(
     element: &ElementRef,
     to_remove: &HashSet<NodeId>,
+    to_unwrap: &HashSet<NodeId>,
     output: &mut String,
 ) {
     // Check if this element should be removed
@@ -495,29 +414,33 @@ fn serialize_html_excluding(
                         continue;
                     }
 
-                    // Serialize the element with its tags and attributes
                     let elem_name = child_elem.value().name();
-                    output.push('<');
-                    output.push_str(elem_name);
+                    let should_unwrap = to_unwrap.contains(&child_elem.id());
 
-                    // Serialize attributes
-                    for (name, value) in child_elem.value().attrs() {
-                        output.push(' ');
-                        output.push_str(name);
-                        output.push_str("=\"");
-                        // Escape attribute value
-                        for ch in value.chars() {
-                            match ch {
-                                '"' => output.push_str("&quot;"),
-                                '&' => output.push_str("&amp;"),
-                                '<' => output.push_str("&lt;"),
-                                '>' => output.push_str("&gt;"),
-                                c => output.push(c),
+                    // Emit opening tag (unless unwrapping)
+                    if !should_unwrap {
+                        output.push('<');
+                        output.push_str(elem_name);
+
+                        // Serialize attributes
+                        for (name, value) in child_elem.value().attrs() {
+                            output.push(' ');
+                            output.push_str(name);
+                            output.push_str("=\"");
+                            // Escape attribute value
+                            for ch in value.chars() {
+                                match ch {
+                                    '"' => output.push_str("&quot;"),
+                                    '&' => output.push_str("&amp;"),
+                                    '<' => output.push_str("&lt;"),
+                                    '>' => output.push_str("&gt;"),
+                                    c => output.push(c),
+                                }
                             }
+                            output.push('"');
                         }
-                        output.push('"');
+                        output.push('>');
                     }
-                    output.push('>');
 
                     // Check if this is a void element (self-closing)
                     const VOID_ELEMENTS: &[&str] = &[
@@ -525,18 +448,20 @@ fn serialize_html_excluding(
                         "param", "source", "track", "wbr",
                     ];
 
-                    if VOID_ELEMENTS.contains(&elem_name) {
+                    if !should_unwrap && VOID_ELEMENTS.contains(&elem_name) {
                         // Void element - no closing tag needed
                         continue;
                     }
 
                     // Recursively serialize children
-                    serialize_html_excluding(&child_elem, to_remove, output);
+                    serialize_html_with_unwrap(&child_elem, to_remove, to_unwrap, output);
 
-                    // Closing tag (only for non-void elements)
-                    output.push_str("</");
-                    output.push_str(elem_name);
-                    output.push('>');
+                    // Closing tag (only for non-void elements, and not when unwrapping)
+                    if !should_unwrap {
+                        output.push_str("</");
+                        output.push_str(elem_name);
+                        output.push('>');
+                    }
                 }
             }
             Node::Comment(comment) => {
@@ -1268,20 +1193,38 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     let html = escape_code_blocks(html);
 
     // ============================================================================
-    // STEP 1: Preprocess Expressive Code blocks (DOM-based, before regex cleaning)
+    // STEP 1: Preprocess Expressive Code blocks (uses kuchiki DOM parsing)
     // ============================================================================
-    let html = preprocess_expressive_code(&html)?;
+    // IMPORTANT: Skip if we have protected code blocks (indicated by placeholder prefix).
+    // The kuchiki DOM parser strips unknown elements like <citescrape-code-block>,
+    // which would destroy our protected placeholders.
+    // NOTE: Code block protection is now handled at a higher level in convert()
+    // to protect blocks BEFORE extract_main_content is called.
+    let html = if html.contains("<!--CITESCRAPE-PRE-") {
+        // Already protected at higher level - skip DOM parsing
+        html
+    } else {
+        preprocess_expressive_code(&html)?
+    };
 
     // ============================================================================
-    // STEP 1.5: Merge fragmented code blocks (NEW - fixes split code blocks)
+    // STEP 1.5: Merge fragmented code blocks (uses DOM parsing)
     // ============================================================================
-    let html = preprocess_code_blocks(&html)?;
+    // IMPORTANT: Skip if we have protected code blocks (indicated by placeholder prefix).
+    // The kuchiki DOM parser strips unknown elements like <citescrape-code-block>,
+    // which would destroy our protected placeholders.
+    let html = if html.contains("<!--CITESCRAPE-PRE-") {
+        // Already protected at higher level - skip DOM parsing
+        html
+    } else {
+        preprocess_code_blocks(&html)?
+    };
 
     // ============================================================================
     // STEP 2: Regex-based cleaning (existing code)
     // ============================================================================
     // Use Cow to avoid unnecessary allocations
-    let result = Cow::Borrowed(&html);
+    let result = Cow::Borrowed(html.as_str());
 
     // Remove script tags and their contents
     let result = SCRIPT_RE.replace_all(&result, "");
@@ -1376,6 +1319,9 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     // STAGE 3: Fix bold tags spanning code blocks
     // ========================================================================
     let result: Cow<str> = Cow::Owned(fix_bold_spanning_code_blocks(&result)?);
+
+    // NOTE: Code block restoration is handled at a higher level in convert()
+    // after clean_html_content returns.
 
     // ========================================================================
     // FINAL STEP: Decode HTML entities

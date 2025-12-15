@@ -13,19 +13,23 @@
 //! - Per-domain rate limiting with independent token buckets
 //! - Immediate Pass/Deny decisions with no blocking or sleep
 //! - Fixed-point arithmetic for sub-token precision
+//! - Instance-based API for test isolation
 
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 
 /// Scaling factor for fixed-point token arithmetic (1000x precision)
 const TOKEN_SCALE: u64 = 1000;
 
 /// Scaling factor for nanosecond rate calculations
 const RATE_SCALE: u64 = 1_000_000;
+
+/// Maximum number of domains to track simultaneously
+const MAX_DOMAIN_LIMITERS: usize = 1000;
 
 /// Rate limit decision for a crawl request
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +46,7 @@ pub enum RateLimitDecision {
 struct DomainRateLimiter {
     /// Current available tokens scaled by `TOKEN_SCALE` for sub-token precision
     tokens: AtomicU64,
-    /// Last token refill timestamp as nanoseconds since epoch
+    /// Last token refill timestamp as nanoseconds since base time
     last_refill_nanos: AtomicU64,
     /// Rate in tokens per nanosecond scaled by `TOKEN_SCALE` * `RATE_SCALE`
     rate_per_nano: u64,
@@ -53,12 +57,12 @@ struct DomainRateLimiter {
 impl DomainRateLimiter {
     /// Create a new domain rate limiter with the specified rate
     #[inline]
-    fn new(rate_rps: f64) -> Self {
+    fn new(rate_rps: f64, base_time: &Instant) -> Self {
         let max_tokens = (rate_rps.max(1.0) * TOKEN_SCALE as f64) as u64;
         let rate_per_nano =
             ((rate_rps * TOKEN_SCALE as f64 * RATE_SCALE as f64) / 1_000_000_000.0) as u64;
 
-        let now_nanos = Self::current_time_nanos();
+        let now_nanos = base_time.elapsed().as_nanos() as u64;
 
         Self {
             tokens: AtomicU64::new(max_tokens),
@@ -68,17 +72,10 @@ impl DomainRateLimiter {
         }
     }
 
-    /// Get current time as nanoseconds since base time
-    #[inline]
-    fn current_time_nanos() -> u64 {
-        // Use global base time for consistent time calculations across threads
-        get_base_time().elapsed().as_nanos() as u64
-    }
-
     /// Attempt to consume one token from the bucket
     #[inline]
-    fn try_consume_token(&self) -> RateLimitDecision {
-        let now_nanos = Self::current_time_nanos();
+    fn try_consume_token(&self, base_time: &Instant) -> RateLimitDecision {
+        let now_nanos = base_time.elapsed().as_nanos() as u64;
 
         // Refill tokens based on elapsed time
         self.refill_tokens(now_nanos);
@@ -120,14 +117,6 @@ impl DomainRateLimiter {
     /// `last_refill_nanos` by the time that actually produced tokens. This prevents
     /// the integer division bug where concurrent threads would starve when
     /// elapsed time is too small to produce tokens.
-    ///
-    /// **Before (buggy)**:
-    /// - Thread A: elapsed=40ms, tokens=0 (40ms * 0.02 / 1M = 0), updates last_refill to NOW
-    /// - Thread B: elapsed=0ms (sees updated last_refill), tokens=0, fails
-    ///
-    /// **After (fixed)**:
-    /// - Thread A: elapsed=40ms, tokens=0, time_credited=0ns, last_refill unchanged
-    /// - Thread B: elapsed=40ms (still accumulating), waits for 50ms, eventually succeeds
     #[inline]
     fn refill_tokens(&self, now_nanos: u64) {
         loop {
@@ -190,30 +179,125 @@ impl DomainRateLimiter {
     }
 }
 
-/// Maximum number of domains to track simultaneously
-const MAX_DOMAIN_LIMITERS: usize = 1000;
-
-// Global shared state for domain rate limiters (async-friendly)
-static DOMAIN_LIMITERS: OnceCell<Mutex<LruCache<String, Arc<DomainRateLimiter>>>> =
-    OnceCell::const_new();
-
-/// Get or initialize the domain limiters cache (async-friendly)
-async fn get_domain_limiters() -> &'static Mutex<LruCache<String, Arc<DomainRateLimiter>>> {
-    DOMAIN_LIMITERS
-        .get_or_init(|| async {
-            let capacity = unsafe { NonZeroUsize::new_unchecked(MAX_DOMAIN_LIMITERS) };
-            Mutex::new(LruCache::new(capacity))
-        })
-        .await
+/// Instance-based crawl rate limiter with isolated state
+///
+/// Each instance maintains its own domain cache and time reference,
+/// enabling test isolation when running tests in parallel.
+///
+/// # Example
+///
+/// ```rust
+/// use kodegen_tools_citescrape::crawl_rate_limiter::{CrawlRateLimiter, RateLimitDecision};
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let limiter = CrawlRateLimiter::new();
+///     
+///     // First request is allowed
+///     assert_eq!(
+///         limiter.check("https://example.com", 1.0).await,
+///         RateLimitDecision::Allow
+///     );
+///     
+///     // Immediate second request is denied
+///     assert!(matches!(
+///         limiter.check("https://example.com", 1.0).await,
+///         RateLimitDecision::Deny { .. }
+///     ));
+/// }
+/// ```
+pub struct CrawlRateLimiter {
+    /// Per-domain rate limiter cache
+    cache: Mutex<LruCache<String, Arc<DomainRateLimiter>>>,
+    /// Base time for all time calculations in this instance
+    base_time: Instant,
 }
 
-/// Base time for all rate limit calculations (shared across threads)
-static BASE_TIME: OnceLock<Instant> = OnceLock::new();
+impl Default for CrawlRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-/// Get or initialize the base time  
+impl CrawlRateLimiter {
+    /// Create a new rate limiter instance with isolated state
+    ///
+    /// Each instance has its own domain cache and time reference,
+    /// enabling test isolation when running tests in parallel.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(MAX_DOMAIN_LIMITERS).expect("MAX_DOMAIN_LIMITERS is non-zero"),
+            )),
+            base_time: Instant::now(),
+        }
+    }
+
+    /// Check if a crawl request to the given URL should be rate limited
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The URL being requested
+    /// * `rate_rps` - Maximum requests per second allowed for this domain
+    ///
+    /// # Returns
+    ///
+    /// * `RateLimitDecision::Allow` - Request can proceed
+    /// * `RateLimitDecision::Deny { retry_after }` - Request should wait
+    pub async fn check(&self, url: &str, rate_rps: f64) -> RateLimitDecision {
+        if rate_rps <= 0.0 {
+            return RateLimitDecision::Allow;
+        }
+
+        let domain = match extract_domain(url) {
+            Some(domain) if !domain.is_empty() => domain,
+            _ => return RateLimitDecision::Allow,
+        };
+
+        self.check_domain(&domain, rate_rps).await
+    }
+
+    /// Check rate limit for a specific domain
+    async fn check_domain(&self, domain: &str, rate_rps: f64) -> RateLimitDecision {
+        let mut cache = self.cache.lock().await;
+
+        if let Some(limiter) = cache.get(domain) {
+            let limiter = Arc::clone(limiter);
+            drop(cache);
+            return limiter.try_consume_token(&self.base_time);
+        }
+
+        let limiter = Arc::new(DomainRateLimiter::new(rate_rps, &self.base_time));
+        cache.put(domain.to_string(), Arc::clone(&limiter));
+        drop(cache);
+        limiter.try_consume_token(&self.base_time)
+    }
+
+    /// Clear all domain rate limiters in this instance
+    pub async fn clear(&self) {
+        let mut cache = self.cache.lock().await;
+        cache.clear();
+    }
+
+    /// Get the number of domains currently being tracked
+    pub async fn tracked_count(&self) -> usize {
+        let cache = self.cache.lock().await;
+        cache.len()
+    }
+}
+
+// =============================================================================
+// Global API (for production use - wraps a global CrawlRateLimiter instance)
+// =============================================================================
+
+/// Global rate limiter instance for production use
+static GLOBAL_LIMITER: OnceLock<CrawlRateLimiter> = OnceLock::new();
+
+/// Get or initialize the global rate limiter
 #[inline]
-fn get_base_time() -> &'static Instant {
-    BASE_TIME.get_or_init(Instant::now)
+fn get_global_limiter() -> &'static CrawlRateLimiter {
+    GLOBAL_LIMITER.get_or_init(CrawlRateLimiter::new)
 }
 
 /// Extract domain from URL
@@ -243,55 +327,32 @@ pub fn extract_domain(url: &str) -> Option<String> {
     }
 }
 
-/// Get or create a rate limiter for the specified domain (async)
-#[inline]
-async fn get_domain_limiter(domain: &str, rate_rps: f64) -> RateLimitDecision {
-    let cache_mutex = get_domain_limiters().await;
-    let mut cache = cache_mutex.lock().await;
-
-    if let Some(limiter) = cache.get(domain) {
-        let limiter = Arc::clone(limiter);
-        drop(cache);
-        return limiter.try_consume_token();
-    }
-
-    let limiter = Arc::new(DomainRateLimiter::new(rate_rps));
-    cache.put(domain.to_string(), Arc::clone(&limiter));
-    drop(cache);
-    limiter.try_consume_token()
-}
-
-/// Check if a crawl request to the given URL should be rate limited (async)
+/// Check if a crawl request to the given URL should be rate limited (global instance)
+///
+/// This is a convenience function that uses the global rate limiter instance.
+/// For test isolation, use `CrawlRateLimiter::new()` to create isolated instances.
 #[inline]
 pub async fn check_crawl_rate_limit(url: &str, rate_rps: f64) -> RateLimitDecision {
-    if rate_rps <= 0.0 {
-        return RateLimitDecision::Allow;
-    }
-
-    let domain = match extract_domain(url) {
-        Some(domain) if !domain.is_empty() => domain,
-        _ => return RateLimitDecision::Allow,
-    };
-
-    get_domain_limiter(&domain, rate_rps).await
+    get_global_limiter().check(url, rate_rps).await
 }
 
-/// Check if an HTTP request should be rate limited (async)
+/// Check if an HTTP request should be rate limited (global instance)
+///
+/// Alias for `check_crawl_rate_limit`.
 #[inline]
 pub async fn check_http_rate_limit(url: &str, rate_rps: f64) -> RateLimitDecision {
     check_crawl_rate_limit(url, rate_rps).await
 }
 
-/// Clear all domain rate limiters (async)
+/// Clear all domain rate limiters (global instance)
+///
+/// This clears the global rate limiter's domain cache.
+/// For test isolation, use `CrawlRateLimiter::new()` to create isolated instances.
 pub async fn clear_domain_limiters() {
-    let cache_mutex = get_domain_limiters().await;
-    let mut cache = cache_mutex.lock().await;
-    cache.clear();
+    get_global_limiter().clear().await
 }
 
-/// Get the number of domains currently being tracked for rate limiting (async)
+/// Get the number of domains currently being tracked for rate limiting (global instance)
 pub async fn get_tracked_domain_count() -> usize {
-    let cache_mutex = get_domain_limiters().await;
-    let cache = cache_mutex.lock().await;
-    cache.len()
+    get_global_limiter().tracked_count().await
 }

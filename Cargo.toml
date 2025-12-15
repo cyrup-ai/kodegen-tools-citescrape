@@ -31,10 +31,10 @@ macos = "public.app-category.developer-tools"
 
 [dependencies]
 
-kodegen_mcp_schema = { version = "0.10" }
-kodegen_server_http = { version = "0.10" }
-kodegen_config = { version = "0.10" }
-kodegen_config_manager = { version = "0.10" }
+kodegen_mcp_schema = { version = "0.10", path = "../kodegen-mcp-schema" }
+kodegen_server_http = { version = "0.10", path = "../kodegen-server-http" }
+kodegen_config = { version = "0.10", path = "../kodegen-config" }
+kodegen_config_manager = { version = "0.10", path = "../kodegen-config-manager" }
 
 log = "0.4"
 env_logger = "0.11"
@@ -83,6 +83,7 @@ tempfile = "3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 base64 = "0.22"
 pathdiff = "0.2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 crossbeam-channel = "0.5"
 crossbeam-deque = "0.8"
 crossbeam-queue = "0.3"
@@ -108,7 +109,7 @@ crossbeam-utils = "0.8"
 rayon = "1"
 
 [dev-dependencies]
-kodegen_mcp_client = { version = "0.10" }
+kodegen_mcp_client = { version = "0.10", path = "../kodegen-mcp-client" }
 const_format = "0.2"
 assert_fs = "1"
 mockito = "1"

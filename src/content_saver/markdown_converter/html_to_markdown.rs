@@ -23,11 +23,17 @@ use std::sync::LazyLock;
 use url::Url;
 
 use super::custom_handlers::create_converter;
+use super::html_preprocessing::{
+    transform_callouts_to_blockquotes, transform_card_grids_to_tables,
+    transform_link_cards_to_lists, transform_mcp_server_cards,
+    transform_tabs_to_sections,
+};
 
 // =============================================================================
 // REGEX PATTERNS - Reserved for genuine pattern matching within line content
 // =============================================================================
 
+#[allow(dead_code)]
 static TABLE_ALIGN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\|(\s*:?-+:?\s*\|)+").expect("TABLE_ALIGN: hardcoded regex is valid")
 });
@@ -381,6 +387,79 @@ pub(crate) fn process_markdown_links(markdown: &str, base_url: &str) -> String {
     result
 }
 
+/// Detect if a row is a markdown table separator row
+/// 
+/// Valid separators contain only pipes, dashes, colons, and whitespace.
+/// Examples: |---|---|---| or |:---|:---:| or | --- | --- |
+/// 
+/// This structural approach is more reliable than regex matching.
+fn is_separator_row(row: &str) -> bool {
+    let trimmed = row.trim();
+    
+    // Must start and end with pipe
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return false;
+    }
+    
+    // Extract cells between pipes
+    let cells: Vec<&str> = trimmed
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .collect();
+    
+    // Must have at least one cell
+    if cells.is_empty() {
+        return false;
+    }
+    
+    // ALL cells must be valid separator syntax: optional ':', dashes, optional ':'
+    cells.iter().all(|cell| {
+        let trimmed_cell = cell.trim();
+        if trimmed_cell.is_empty() {
+            return false;
+        }
+        
+        // Check if cell matches separator pattern
+        // Valid: ---, :---, ---:, :---:, with optional spaces
+        let mut chars = trimmed_cell.chars().peekable();
+        
+        // Optional leading colon
+        if chars.peek() == Some(&':') {
+            chars.next();
+        }
+        
+        // Must have at least one dash
+        let mut has_dash = false;
+        while let Some(&ch) = chars.peek() {
+            if ch == '-' {
+                has_dash = true;
+                chars.next();
+            } else if ch == ':' {
+                // Trailing colon - must be at end
+                chars.next();
+                break;
+            } else if ch.is_whitespace() {
+                chars.next();
+            } else {
+                // Invalid character
+                return false;
+            }
+        }
+        
+        // Consume any trailing whitespace
+        while let Some(&ch) = chars.peek() {
+            if ch.is_whitespace() {
+                chars.next();
+            } else {
+                return false;
+            }
+        }
+        
+        has_dash
+    })
+}
+
 /// HTML to Markdown converter with configurable options
 pub struct MarkdownConverter {
     preserve_tables: bool,
@@ -433,15 +512,23 @@ impl MarkdownConverter {
     /// Convert HTML to Markdown synchronously.
     ///
     /// Pipeline:
+    /// 0. Callout box, card grid, MCP server card, and tab component transformation (preprocessing)
     /// 1. htmd conversion with custom element handlers
     /// 2. Streaming normalization (single-pass line processor)
     /// 3. Table formatting (optional)
     /// 4. HTML img tag fallback conversion
     /// 5. Link/image removal (optional)
     pub fn convert_sync(&self, html: &str) -> Result<String> {
+        // Stage 0: Transform callout boxes, card grids, link cards, MCP server cards, and tab components (preprocessing)
+        let html = transform_callouts_to_blockquotes(html);
+        let html = transform_mcp_server_cards(&html);
+        let html = transform_card_grids_to_tables(&html);
+        let html = transform_link_cards_to_lists(&html);
+        let html = transform_tabs_to_sections(&html);
+        
         // Stage 1: htmd conversion with custom handlers
         let converter = create_converter();
-        let raw_markdown = converter.convert(html)?;
+        let raw_markdown = converter.convert(&html)?;
 
         // Stage 2: Streaming normalization (single pass)
         // Handles: blank line collapsing, heading spacing, code fence passthrough,
@@ -510,14 +597,25 @@ impl MarkdownConverter {
             let line = lines[i];
             
             // Detect table by looking for pipe-delimited content
-            if line.trim().starts_with('|') && line.trim().ends_with('|') {
+            // htmd may produce tables without leading | so check for multiple | characters
+            let trimmed = line.trim();
+            let is_table_row = (trimmed.starts_with('|') && trimmed.ends_with('|'))
+                || (trimmed.ends_with('|') && trimmed.matches('|').count() >= 2);
+
+            if is_table_row {
                 // Collect the entire table
                 let mut table_lines = vec![line];
                 
                 i += 1;
                 while i < lines.len() {
                     let next_line = lines[i];
-                    if next_line.trim().starts_with('|') && next_line.trim().ends_with('|') {
+                    let next_trimmed = next_line.trim();
+                    
+                    // Check if this is another table row (same flexible detection)
+                    let is_next_table_row = (next_trimmed.starts_with('|') && next_trimmed.ends_with('|'))
+                        || (next_trimmed.ends_with('|') && next_trimmed.matches('|').count() >= 2);
+                    
+                    if is_next_table_row {
                         table_lines.push(next_line);
                         i += 1;
                     } else {
@@ -558,14 +656,13 @@ impl MarkdownConverter {
         let mut formatted = Vec::new();
         let mut is_alignment_row_present = false;
         
-        // Check if second row is alignment row
+        // Check if second row is alignment row using structural detection
         if table_lines.len() > 1 {
-            let second = table_lines[1].trim();
-            is_alignment_row_present = TABLE_ALIGN.is_match(second);
+            is_alignment_row_present = is_separator_row(table_lines[1]);
         }
         
-        // Process first row (header)
-        formatted.push(table_lines[0].to_string());
+        // Process first row (header) with proper spacing
+        formatted.push(Self::clean_table_row(table_lines[0]));
         
         // Ensure alignment row exists
         if !is_alignment_row_present && table_lines.len() > 1 {
@@ -585,6 +682,11 @@ impl MarkdownConverter {
         // Process remaining rows (skip alignment row if present)
         let start_idx = if is_alignment_row_present { 2 } else { 1 };
         for &row in &table_lines[start_idx..] {
+            // CRITICAL: Skip any duplicate separator rows in data section
+            if is_separator_row(row) {
+                continue;
+            }
+            
             let cleaned = Self::clean_table_row(row);
             if !cleaned.trim().is_empty() {
                 formatted.push(cleaned);
@@ -629,7 +731,8 @@ impl MarkdownConverter {
             .filter(|s| !s.is_empty())
             .collect();
         
-        format!("|{}|", cells.join("|"))
+        // Add spacing around cell content: | content | not |content|
+        format!("| {} |", cells.join(" | "))
     }
 
     fn remove_links_static(markdown: &str) -> String {

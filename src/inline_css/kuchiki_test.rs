@@ -27,9 +27,12 @@ mod tests {
         println!("=== OUTPUT ===\n{result}\n");
 
         // Verify <a> tags are preserved
+        // Note: kuchiki may reorder attributes alphabetically (class before href)
         assert!(result.contains("<a href=\"https://example.com\">"), "Missing first anchor tag");
         assert!(result.contains("<a href=\"/local\">"), "Missing second anchor tag");
-        assert!(result.contains("<a href=\"https://another.com\""), "Missing third anchor tag");
+        // Third anchor has class attribute - kuchiki reorders to class before href
+        assert!(result.contains("href=\"https://another.com\""), "Missing third anchor tag href");
+        assert!(result.contains("Button Link</a>"), "Missing third anchor tag content");
         assert!(result.contains("</a>"), "Missing closing anchor tags");
     }
 

@@ -8,7 +8,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::config::CrawlConfig;
-use crate::page_extractor::link_rewriter::LinkRewriter;
+use crate::link_rewriter::LinkRewriter;
 
 use super::orchestrator::crawl_pages;
 use super::progress::NoOpProgress;

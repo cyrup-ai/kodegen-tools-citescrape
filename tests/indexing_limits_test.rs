@@ -32,6 +32,68 @@ fn create_test_file(dir: &TempDir, domain: &str, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Generate realistic large markdown content with reasonable compression ratio.
+///
+/// Unlike repetitive patterns like `"# Test\n\n".repeat(N)`, this creates varied
+/// content that compresses at typical markdown ratios (5:1 to 15:1), not
+/// pathological ratios (100:1+) that trigger zip bomb detection.
+///
+/// Key technique: Unique section numbers break LZ77 sliding window pattern matching.
+fn generate_realistic_markdown(target_size_bytes: usize) -> String {
+    use std::fmt::Write;
+
+    let mut content = String::with_capacity(target_size_bytes);
+    let mut section = 0;
+
+    // Sample paragraphs with varied content to prevent extreme compression
+    let paragraphs = [
+        "This section covers important implementation details that developers need to understand.",
+        "The architecture follows established patterns for maintainability and performance.",
+        "Error handling is implemented consistently across all modules in the system.",
+        "Configuration options allow customization without modifying source code directly.",
+        "Testing strategies include unit tests, integration tests, and end-to-end validation.",
+        "Performance optimizations target the most frequently executed code paths.",
+        "Security considerations are addressed at multiple layers of the application.",
+        "Documentation is maintained alongside code to ensure accuracy and completeness.",
+    ];
+
+    while content.len() < target_size_bytes {
+        section += 1;
+
+        // Varied headings with unique numbers break LZ77 pattern matching
+        writeln!(content, "# Section {}: Technical Documentation\n", section).unwrap();
+        writeln!(content, "## Overview {}.1\n", section).unwrap();
+
+        // Use different paragraphs in rotation with unique identifiers
+        for (i, para) in paragraphs.iter().enumerate() {
+            writeln!(
+                content,
+                "{} Reference: section-{}-item-{}\n",
+                para, section, i
+            )
+            .unwrap();
+        }
+
+        // Add code blocks (common in real markdown)
+        writeln!(
+            content,
+            "```rust\nfn example_{}() -> Result<(), Error> {{\n    // Implementation {}\n    Ok(())\n}}\n```\n",
+            section, section
+        )
+        .unwrap();
+
+        // Add a list with unique numbering
+        writeln!(content, "### Key Points {}.2\n", section).unwrap();
+        for i in 1..=5 {
+            writeln!(content, "{}. Item {} in section {}", i, i, section).unwrap();
+        }
+        writeln!(content).unwrap();
+    }
+
+    content.truncate(target_size_bytes);
+    content
+}
+
 #[tokio::test]
 async fn test_default_indexing_limits() -> Result<()> {
     let limits = IndexingLimits::default();
@@ -174,9 +236,13 @@ async fn test_compression_ratio_limit() -> Result<()> {
 async fn test_custom_limits_allow_larger_files() -> Result<()> {
     let temp_dir = TempDir::new()?;
 
-    // Create a moderately large file
-    let content = "# Test Document\n\n".repeat(500_000); // ~10MB
-    create_test_file(&temp_dir, "medium.com", &content)?;
+    // Generate ~10MB of realistic markdown content with reasonable compression ratio.
+    // Unlike "# Test\n\n".repeat(N), this has varied content that won't trigger
+    // zip bomb detection while still being large enough to test size limits.
+    //
+    // Expected compression ratio: 5:1 to 15:1 (well under the 50.0 limit)
+    let content = generate_realistic_markdown(10_000_000); // 10MB
+    create_test_file(&temp_dir, "largedoc.com", &content)?;
 
     let config = CrawlConfig::builder()
         .storage_dir(temp_dir.path().to_path_buf())
@@ -189,12 +255,12 @@ async fn test_custom_limits_allow_larger_files() -> Result<()> {
 
     let crawl_output = temp_dir.path().join("crawl_output");
 
-    // Use generous limits
+    // Use generous limits for large files - these test SIZE limits, not compression ratio
     let batch_config = BatchConfig {
         limits: IndexingLimits {
-            max_compressed_mb: 100,
-            max_decompressed_mb: 500,
-            max_compression_ratio: 50.0,
+            max_compressed_mb: 100,      // Allow large compressed files
+            max_decompressed_mb: 500,    // Allow large decompressed files
+            max_compression_ratio: 50.0, // Reasonable for real markdown content
         },
         ..Default::default()
     };

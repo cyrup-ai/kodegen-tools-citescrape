@@ -215,6 +215,74 @@ pub fn infer_language_from_content(code: &str) -> Option<String> {
     }
 }
 
+/// Check if content contains shell-specific patterns
+fn has_shell_patterns(content: &str) -> bool {
+    use regex::Regex;
+    use once_cell::sync::Lazy;
+    
+    // Regex patterns that match shell commands even without spaces
+    static SHELL_COMMAND_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"(?m)^\s*(?:brew|apt-get|apt|yum|dnf|pacman|npm|yarn|pnpm|cargo|pip|rustup|curl|wget|git|docker|kubectl|terraform|ansible|ssh|scp|rsync)\b"
+        ).expect("Invalid shell command regex")
+    });
+    
+    static SHELL_SUBCOMMAND_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"\b(?:brew|npm|yarn|pnpm|cargo|git|docker|kubectl)(?:install|update|upgrade|add|remove|build|run|test|clone|pull|push|commit)\b"
+        ).expect("Invalid shell subcommand regex")
+    });
+    
+    static SHELL_COMMAND_WITH_FLAGS: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\b(?:brew|curl|wget|git|npm|cargo)\s*(?:-{1,2}\w+|install|clone|build)").expect("Invalid command with flags regex")
+    });
+    
+    // Shell export statements: export VAR_NAME=value (NOT JS/TS export default/const/class)
+    // Matches uppercase variable names typical in shell scripts
+    static SHELL_EXPORT_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?m)^\s*export\s+[A-Z_][A-Z_0-9]*=").expect("Invalid shell export regex")
+    });
+
+    // Check for shell commands at line start (works with or without spaces)
+    if SHELL_COMMAND_REGEX.is_match(content) {
+        return true;
+    }
+    
+    // Check for common command+subcommand patterns (handles missing spaces)
+    if SHELL_SUBCOMMAND_REGEX.is_match(content) {
+        return true;
+    }
+    
+    // Check for commands with flags
+    if SHELL_COMMAND_WITH_FLAGS.is_match(content) {
+        return true;
+    }
+    
+    // Check for shell export statements (export VAR=value)
+    if SHELL_EXPORT_REGEX.is_match(content) {
+        return true;
+    }
+
+    // Check for shell-specific syntax patterns
+    // Detect operators WITHOUT spaces since HTML collapse is the bug we're fixing
+    if content.contains("#!/bin/bash")
+        || content.contains("#!/bin/sh")
+        || content.contains("#!/usr/bin/env bash")
+        || content.contains("#!/usr/bin/env sh")
+        || content.contains('|')        // DETECT PIPE WITHOUT SPACES
+        || content.contains("&&")       // DETECT AND WITHOUT SPACES
+        || content.contains(">>")       // DETECT APPEND WITHOUT SPACES
+        || content.contains("$HOME")
+        || content.contains("$PATH")
+        || content.contains("${")
+        || content.contains("2>&1")
+    {
+        return true;
+    }
+
+    false
+}
+
 /// Validate that HTML-provided language hint matches content
 ///
 /// Returns true if the hint seems correct, false if suspicious.
@@ -236,6 +304,22 @@ pub fn validate_html_language(html_lang: &str, code: &str) -> bool {
         ) {
             return false; // HTML hint is wrong
         }
+    }
+
+    // Shell patterns - if present, reject non-shell language hints
+    if has_shell_patterns(code)
+        && matches!(
+            html_lang_lower.as_str(),
+            "sql" | "mysql" | "postgres" | "postgresql"
+                | "ruby"
+                | "php"
+                | "cpp" | "c++"
+                | "toml"
+                | "css"
+                | "go"
+        )
+    {
+        return false; // HTML says sql/ruby/php/cpp/toml/css/go, but content is shell
     }
 
     // TOML indicators - if present, bash/shell hints are wrong
@@ -531,5 +615,60 @@ int main() {
         // Force lazy initialization - will panic if any regex is invalid
         let _ = COMPILED_LANGUAGES.len();
         assert!(!COMPILED_LANGUAGES.is_empty());
+    }
+
+    #[test]
+    fn test_validate_rejects_css_for_shell_export() {
+        // Issue #029: CSS wrongly tagged for bash export statements
+        let code = r#"# Enable Microsoft Foundry integration
+export CLAUDE_CODE_USE_FOUNDRY=1
+
+# Azure resource name
+export ANTHROPIC_FOUNDRY_RESOURCE={resource}"#;
+        assert!(!validate_html_language("css", code));
+    }
+
+    #[test]
+    fn test_validate_accepts_css_for_actual_css() {
+        let code = r#".container {
+    display: flex;
+    padding: 20px;
+    background-color: #fff;
+}"#;
+        assert!(validate_html_language("css", code));
+    }
+
+    #[test]
+    fn test_validate_rejects_go_for_shell_export() {
+        // Issue #039: Go wrongly tagged for bash export statements
+        let code = r#"# HTTPS proxy (recommended)
+export HTTPS_PROXY=https://proxy.example.com:8080
+
+# Azure resource name
+export ANTHROPIC_FOUNDRY_RESOURCE={resource}"#;
+        assert!(!validate_html_language("go", code));
+    }
+
+    #[test]
+    fn test_validate_accepts_go_for_actual_go() {
+        let code = r#"package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello, World!")
+}"#;
+        assert!(validate_html_language("go", code));
+    }
+
+    #[test]
+    fn test_infer_bash_export() {
+        // Issue #039: Bash export commands should detect as bash
+        let code = r#"# HTTPS proxy (recommended)
+export HTTPS_PROXY=https://proxy.example.com:8080
+
+# Azure resource name
+export ANTHROPIC_FOUNDRY_RESOURCE={resource}"#;
+        assert_eq!(infer_language_from_content(code), Some("bash".to_string()));
     }
 }

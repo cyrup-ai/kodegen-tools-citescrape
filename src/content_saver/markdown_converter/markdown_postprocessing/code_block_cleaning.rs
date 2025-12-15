@@ -5,6 +5,7 @@
 
 use super::code_fence_detection::{detect_code_fence, CodeFence};
 use regex::Regex;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 /// Matches "X collapsed lines" or "X collapsed line" text
@@ -37,6 +38,34 @@ static COLLAPSED_LINES_RE: LazyLock<Regex> = LazyLock::new(|| {
 static TRAILING_ASTERISKS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^```\s*\n\s*\*\*+\s*$")
         .expect("TRAILING_ASTERISKS_RE: hardcoded regex is statically valid")
+});
+
+/// Matches shebang lines at the start of code blocks
+///
+/// Pattern: `^#!/` followed by valid shebang path
+///
+/// Matches:
+/// - `#!/bin/bash`
+/// - `#!/usr/bin/env python3`
+/// - `#!/bin/sh`
+/// - `#!/usr/bin/env node`
+///
+/// Does NOT match:
+/// - `# !/bin/bash` (space after #, this is the corruption we're fixing)
+/// - `#! /bin/bash` (space after !)
+static SHEBANG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^#!/(?:usr/)?(?:bin/)?(?:env\s+)?[\w\-]+")
+        .expect("SHEBANG_RE: hardcoded regex is statically valid")
+});
+
+/// Matches corrupted shebang lines with space after #
+///
+/// Pattern: `^# !/` (space between # and !)
+///
+/// This catches the exact corruption pattern we're fixing
+static CORRUPTED_SHEBANG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^#\s+!")
+        .expect("CORRUPTED_SHEBANG_RE: hardcoded regex is statically valid")
 });
 
 /// Filter out "X collapsed lines" text from code blocks
@@ -239,6 +268,176 @@ pub fn strip_trailing_asterisks_after_code_fences(markdown: &str) -> String {
     TRAILING_ASTERISKS_RE.replace_all(markdown, "```\n").to_string()
 }
 
+/// Remove duplicate code blocks that appear both unfenced and fenced
+///
+/// This fixes a bug where code blocks appear twice in generated markdown:
+/// 1. First as plain text (inline, without fences)
+/// 2. Then again at the end with proper code fences
+///
+/// The function:
+/// 1. Extracts all fenced code blocks and their content
+/// 2. Identifies plain text sections that duplicate fenced code
+/// 3. Removes the duplicate plain text occurrences
+///
+/// # Arguments
+///
+/// * `markdown` - Markdown content potentially containing duplicate code blocks
+///
+/// # Returns
+///
+/// * Cleaned markdown with duplicate plain-text code removed
+///
+/// # Examples
+///
+/// ```rust
+/// let markdown = r#"
+/// Example:
+/// cargo add ratatui
+/// 
+/// ```shell
+/// cargo add ratatui
+/// ```
+/// "#;
+/// 
+/// let cleaned = remove_duplicate_code_blocks(markdown);
+/// // Result: Only the fenced version remains
+/// ```
+pub fn remove_duplicate_code_blocks(markdown: &str) -> String {
+    let lines: Vec<&str> = markdown.lines().collect();
+    
+    // Step 1: Extract all fenced code blocks and their content
+    let mut fenced_code_contents = HashSet::new();
+    let mut i = 0;
+    
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let fence_marker = if trimmed.starts_with("```") { "```" } else { "~~~" };
+            i += 1;
+            let mut code_lines = Vec::new();
+            
+            // Collect lines until closing fence
+            while i < lines.len() {
+                let line_trimmed = lines[i].trim_start();
+                if line_trimmed.starts_with(fence_marker) {
+                    break;
+                }
+                code_lines.push(lines[i]);
+                i += 1;
+            }
+            
+            // Store normalized code content
+            if !code_lines.is_empty() {
+                let code_text = code_lines.join("\n");
+                let normalized = normalize_code_content(&code_text);
+                if !normalized.is_empty() {
+                    fenced_code_contents.insert(normalized);
+                }
+            }
+        }
+        i += 1;
+    }
+    
+    // Step 2: Process lines, identifying sections that match fenced code
+    let mut sections_to_skip = Vec::new(); // (start_idx, end_idx) pairs
+    let mut i = 0;
+    
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        
+        // Skip over fenced blocks
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let fence_marker = if trimmed.starts_with("```") { "```" } else { "~~~" };
+            i += 1;
+            while i < lines.len() {
+                let line_trimmed = lines[i].trim_start();
+                if line_trimmed.starts_with(fence_marker) {
+                    break;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        
+        // Check if this starts a plain text block that matches fenced code
+        let mut j = i;
+        let mut candidate_lines = Vec::new();
+        
+        // Collect lines for potential match
+        while j < lines.len() {
+            let line = lines[j];
+            let line_trimmed = line.trim_start();
+            
+            // Stop at fences or blank lines
+            if line_trimmed.starts_with("```") || line_trimmed.starts_with("~~~") {
+                break;
+            }
+            if line.trim().is_empty() {
+                break;
+            }
+            
+            candidate_lines.push(line);
+            j += 1;
+        }
+        
+        // Check if candidate matches any fenced code
+        if !candidate_lines.is_empty() {
+            let candidate_text = candidate_lines.join("\n");
+            let normalized = normalize_code_content(&candidate_text);
+            
+            if fenced_code_contents.contains(&normalized) {
+                // Mark this section for removal
+                sections_to_skip.push((i, j));
+                tracing::debug!(
+                    "Found duplicate plain text at lines {}-{} ({} lines)",
+                    i + 1,
+                    j,
+                    candidate_lines.len()
+                );
+                i = j;
+                continue;
+            }
+        }
+        
+        i += 1;
+    }
+    
+    // Step 3: Rebuild markdown, skipping marked sections
+    let mut result = String::with_capacity(markdown.len());
+    let mut i = 0;
+    
+    while i < lines.len() {
+        // Check if this line is in a skip section
+        let should_skip = sections_to_skip.iter().any(|(start, end)| i >= *start && i < *end);
+        
+        if should_skip {
+            i += 1;
+            continue;
+        }
+        
+        result.push_str(lines[i]);
+        result.push('\n');
+        i += 1;
+    }
+    
+    result.trim_end().to_string()
+}
+
+/// Normalize code content for comparison
+///
+/// Removes leading/trailing whitespace and normalizes internal whitespace
+/// to detect duplicates that might have minor formatting differences.
+fn normalize_code_content(code: &str) -> String {
+    code.trim()
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Strip residual HTML tags that leaked through conversion
 ///
 /// This is a defensive measure to catch any HTML that htmd's handlers
@@ -362,6 +561,131 @@ fn strip_html_tags_state_machine(line: &str) -> String {
     result
 }
 
+/// Fix corrupted shebang lines and preserve valid ones
+///
+/// This function operates ONLY within code blocks and:
+/// 1. Detects corrupted shebangs: `# !/bin/bash` → `#!/bin/bash`
+/// 2. Preserves valid shebangs exactly as-is
+/// 3. Ensures newline immediately after shebang
+///
+/// Shebangs are critical for script execution:
+/// - Must start with exactly `#!` (no space)
+/// - Must be on the first line of the script
+/// - Must have newline immediately after
+/// - Common patterns: `#!/bin/bash`, `#!/usr/bin/env python3`
+///
+/// This fixes corruption from whitespace normalization and heading processing
+/// that incorrectly treats shebangs as malformed headings.
+///
+/// # Arguments
+///
+/// * `markdown` - Markdown content potentially containing shebangs in code blocks
+///
+/// # Returns
+///
+/// * Cleaned markdown with shebangs fixed and preserved
+///
+/// # Examples
+///
+/// ```rust
+/// let markdown = r#"
+/// ```bash
+/// # !/bin/bash
+/// echo "hello"
+/// ```
+/// "#;
+/// 
+/// let cleaned = fix_shebang_lines(markdown);
+/// // Result: shebang fixed to #!/bin/bash
+/// ```
+pub fn fix_shebang_lines(markdown: &str) -> String {
+    let mut result = String::with_capacity(markdown.len());
+    let mut fence_stack: Option<CodeFence> = None;
+    let mut is_first_line_in_code_block = false;
+
+    for (line_num, line) in markdown.lines().enumerate() {
+        let trimmed = line.trim_start();
+
+        // Track code fence state
+        if let Some((fence_char, fence_count)) = detect_code_fence(trimmed) {
+            if let Some(ref current_fence) = fence_stack {
+                // Check if this closes the current fence
+                if fence_char == current_fence.char && fence_count >= current_fence.count {
+                    fence_stack = None;
+                    is_first_line_in_code_block = false;
+                }
+            } else {
+                // Open a new code fence
+                fence_stack = Some(CodeFence {
+                    char: fence_char,
+                    count: fence_count,
+                    line_number: line_num,
+                });
+                // Next line will be first line inside code block
+                is_first_line_in_code_block = true;
+            }
+            // Always preserve fence lines
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Only process lines inside code blocks
+        if fence_stack.is_some() {
+            // Check if this is a corrupted shebang on first line (has space after #)
+            if is_first_line_in_code_block && CORRUPTED_SHEBANG_RE.is_match(trimmed) {
+                // Fix: Remove the space after #
+                let fixed = trimmed.replacen("# !", "#!", 1);
+                
+                // Preserve original indentation
+                let indent = &line[..line.len() - trimmed.len()];
+                result.push_str(indent);
+                result.push_str(&fixed);
+                result.push('\n');
+                
+                tracing::debug!(
+                    "Fixed corrupted shebang at line {}: '{}' → '{}'",
+                    line_num + 1,
+                    line,
+                    fixed
+                );
+                
+                is_first_line_in_code_block = false;
+                continue;
+            }
+            
+            // Check if this is a valid shebang on first line of code block
+            if is_first_line_in_code_block && SHEBANG_RE.is_match(trimmed) {
+                // Preserve shebang exactly as-is
+                result.push_str(line);
+                result.push('\n');
+                
+                tracing::debug!(
+                    "Preserved valid shebang at line {}: '{}'",
+                    line_num + 1,
+                    trimmed
+                );
+                
+                is_first_line_in_code_block = false;
+                continue;
+            }
+            
+            // Not a shebang line anymore
+            is_first_line_in_code_block = false;
+        }
+
+        // Preserve all other lines
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    // Remove trailing newline to match join() behavior
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +804,150 @@ More text
         let markdown = "```rust\nfn main() {}\n```\n\n**Some bold text**";
         let result = strip_bold_from_code_fences(markdown);
         assert_eq!(result, markdown, "Should not modify clean markdown");
+    }
+
+    #[test]
+    fn test_remove_duplicate_code_blocks_basic() {
+        let markdown = r#"Example:
+cargo add ratatui
+
+```shell
+cargo add ratatui
+```"#;
+        
+        let result = remove_duplicate_code_blocks(markdown);
+        eprintln!("INPUT:\n{}\n\nOUTPUT:\n{}", markdown, result);
+        
+        // Should remove the plain text duplicate
+        assert!(!result.contains("Example:\ncargo add ratatui\n\n```"), 
+            "Should remove plain text before fenced version");
+        // Should keep the fenced version
+        assert!(result.contains("```shell\ncargo add ratatui\n```"), 
+            "Should keep fenced version");
+    }
+
+    #[test]
+    fn test_remove_duplicate_preserves_different_content() {
+        let markdown = r#"First command:
+cargo build
+
+```shell
+cargo test
+```"#;
+        
+        let result = remove_duplicate_code_blocks(markdown);
+        
+        // Should keep both because they're different
+        assert!(result.contains("cargo build"));
+        assert!(result.contains("cargo test"));
+    }
+
+    #[test]
+    fn test_remove_duplicate_multiple_blocks() {
+        let markdown = r#"cargo add ratatui
+
+[dependencies]
+ratatui = "0.28.0"
+
+```shell
+cargo add ratatui
+```
+
+```toml
+[dependencies]
+ratatui = "0.28.0"
+```"#;
+        
+        let result = remove_duplicate_code_blocks(markdown);
+        
+        eprintln!("MULTIPLE BLOCKS OUTPUT:\n{}", result);
+        
+        // Count occurrences - duplicates should be removed
+        let shell_cmd_count = result.matches("cargo add ratatui").count();
+        assert_eq!(shell_cmd_count, 1, "cargo add ratatui should appear only once (in fenced block)");
+        
+        let toml_count = result.matches("[dependencies]").count();
+        assert_eq!(toml_count, 1, "[dependencies] should appear only once (in fenced block)");
+        
+        // Fenced versions should remain
+        assert!(result.contains("```shell\ncargo add ratatui"));
+        assert!(result.contains("```toml"));
+    }
+
+    #[test]
+    fn test_fix_corrupted_shebang() {
+        let markdown = r#"```bash
+# !/bin/bash
+echo "hello"
+```"#;
+
+        let result = fix_shebang_lines(markdown);
+        assert!(result.contains("#!/bin/bash"));
+        assert!(!result.contains("# !/bin/bash"));
+    }
+
+    #[test]
+    fn test_preserve_valid_shebang() {
+        let markdown = r#"```bash
+#!/bin/bash
+echo "hello"
+```"#;
+
+        let result = fix_shebang_lines(markdown);
+        assert!(result.contains("#!/bin/bash"));
+        assert_eq!(result.matches("#!/bin/bash").count(), 1);
+    }
+
+    #[test]
+    fn test_fix_shebang_env_style() {
+        let markdown = r#"```python
+# !/usr/bin/env python3
+print("hello")
+```"#;
+
+        let result = fix_shebang_lines(markdown);
+        assert!(result.contains("#!/usr/bin/env python3"));
+        assert!(!result.contains("# !"));
+    }
+
+    #[test]
+    fn test_shebang_with_newline() {
+        let markdown = r#"```bash
+#!/bin/bash
+
+echo "hello"
+```"#;
+
+        let result = fix_shebang_lines(markdown);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[1], "#!/bin/bash");
+        assert_eq!(lines[2], "");
+        assert_eq!(lines[3], "echo \"hello\"");
+    }
+
+    #[test]
+    fn test_shebang_no_change_outside_code_blocks() {
+        let markdown = r#"
+Regular text
+# !/bin/bash this is just text
+More text
+"#;
+
+        let result = fix_shebang_lines(markdown);
+        // Should NOT fix outside code blocks
+        assert!(result.contains("# !/bin/bash this is just text"));
+    }
+
+    #[test]
+    fn test_shebang_only_on_first_line() {
+        let markdown = r#"```bash
+echo "first"
+# !/bin/bash
+echo "second"
+```"#;
+
+        let result = fix_shebang_lines(markdown);
+        // Should NOT fix shebang if not on first line
+        assert!(result.contains("# !/bin/bash"));
     }
 }
