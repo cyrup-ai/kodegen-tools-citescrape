@@ -376,7 +376,12 @@ pub async fn extract_links(page: Page) -> Result<Vec<super::schema::CrawlLink>> 
 }
 
 /// Take a screenshot of the page
-pub async fn capture_screenshot(page: Page, url: &str, output_dir: &std::path::Path) -> Result<()> {
+pub async fn capture_screenshot(
+    page: Page,
+    url: &str,
+    output_dir: &std::path::Path,
+    compression_threshold: usize,
+) -> Result<()> {
     let url_str = url.to_string();
     let output_dir = output_dir.to_path_buf();
 
@@ -454,9 +459,14 @@ pub async fn capture_screenshot(page: Page, url: &str, output_dir: &std::path::P
     // ===========================================================
 
     // Save compressed file directly with async/await
-    let (_saved_path, _metadata) =
-        crate::content_saver::save_compressed_file(screenshot_data, &path, "image/png", false)
-            .await?;
+    let (_saved_path, _metadata) = crate::content_saver::save_compressed_file(
+        screenshot_data,
+        &path,
+        "image/png",
+        false,
+        compression_threshold,
+    )
+    .await?;
 
     log::debug!("Screenshot captured and saved successfully for URL: {url_str}");
     Ok(())

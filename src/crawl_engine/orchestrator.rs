@@ -77,11 +77,11 @@ pub async fn crawl_pages<P: ProgressReporter>(
 
     // Thread-safe circuit breaker for domain-level failure detection
     let circuit_breaker = if config.circuit_breaker_enabled() {
-        Some(Arc::new(tokio::sync::Mutex::new(CircuitBreaker::new(
+        Some(Arc::new(CircuitBreaker::new(
             config.circuit_breaker_failure_threshold(),
             2, // success_threshold: close circuit after 2 consecutive successes
             Duration::from_secs(config.circuit_breaker_retry_delay_secs()),
-        ))))
+        )))
     } else {
         None
     };
@@ -181,6 +181,7 @@ pub async fn crawl_pages<P: ProgressReporter>(
             let total_pages = Arc::clone(&total_pages);
             let queue = Arc::clone(&queue);
             let indexing_sender = indexing_sender.clone();
+            let visited = Arc::clone(&visited);
 
             // Spawn concurrent task
             let task = tokio::spawn(async move {
@@ -198,6 +199,7 @@ pub async fn crawl_pages<P: ProgressReporter>(
                     total_pages,
                     queue,
                     indexing_sender,
+                    visited,
                 };
 
                 match process_single_page(browser, item, ctx).await {

@@ -12,7 +12,6 @@ pub mod crawl_types;
 pub mod crawler;
 pub mod domain_limiter;
 pub mod execution;
-pub mod link_processor;
 pub mod orchestrator;
 pub mod page_enhancer;
 pub mod page_processor;

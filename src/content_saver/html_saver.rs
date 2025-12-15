@@ -12,6 +12,7 @@ pub async fn save_html_content(
     output_dir: std::path::PathBuf,
     max_inline_image_size_bytes: Option<usize>,
     rate_rps: Option<f64>,
+    compression_threshold: usize,
 ) -> Result<()> {
     let config = crate::inline_css::InlineConfig::default();
 
@@ -54,8 +55,14 @@ pub async fn save_html_content(
     .await?;
 
     // save_compressed_file is now async
-    let (_saved_path, _metadata) =
-        save_compressed_file(inlined_html.into_bytes(), &path, "text/html", false).await?;
+    let (_saved_path, _metadata) = save_compressed_file(
+        inlined_html.into_bytes(),
+        &path,
+        "text/html",
+        false,
+        compression_threshold,
+    )
+    .await?;
 
     Ok(())
 }
@@ -68,6 +75,7 @@ pub async fn save_html_content_with_resources(
     resources: &ResourceInfo,
     max_inline_image_size_bytes: Option<usize>,
     rate_rps: Option<f64>,
+    compression_threshold: usize,
 ) -> Result<()> {
     let html_content = html_content.to_string();
     let resources = resources.clone();
@@ -113,8 +121,14 @@ pub async fn save_html_content_with_resources(
     .await?;
 
     // save_compressed_file is now async
-    let (_saved_path, _metadata) =
-        save_compressed_file(inlined_html.into_bytes(), &path, "text/html", false).await?;
+    let (_saved_path, _metadata) = save_compressed_file(
+        inlined_html.into_bytes(),
+        &path,
+        "text/html",
+        false,
+        compression_threshold,
+    )
+    .await?;
 
     Ok(())
 }

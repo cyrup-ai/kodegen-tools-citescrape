@@ -1,3 +1,5 @@
+#![feature(integer_atomics)]
+
 pub mod browser_setup;
 pub mod config;
 pub mod content_saver;

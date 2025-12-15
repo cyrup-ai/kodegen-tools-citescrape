@@ -8,8 +8,8 @@
 //! - Open: Too many failures, requests are blocked
 //! - `HalfOpen`: Testing after cooldown period
 
+use dashmap::DashMap;
 use log::{debug, info, warn};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// Circuit breaker states
@@ -60,7 +60,7 @@ impl DomainHealth {
 /// Circuit breaker for tracking domain health and preventing wasted attempts
 pub struct CircuitBreaker {
     /// Health tracking for each domain
-    domains: HashMap<String, DomainHealth>,
+    domains: DashMap<String, DomainHealth>,
     /// Number of consecutive failures before opening circuit
     failure_threshold: u32,
     /// Number of consecutive successes needed to close circuit from half-open
@@ -83,7 +83,7 @@ impl CircuitBreaker {
         half_open_timeout: Duration,
     ) -> Self {
         Self {
-            domains: HashMap::new(),
+            domains: DashMap::new(),
             failure_threshold,
             success_threshold,
             half_open_timeout,
@@ -96,8 +96,8 @@ impl CircuitBreaker {
     ///
     /// # Arguments
     /// * `domain` - The domain to check
-    pub fn should_attempt(&mut self, domain: &str) -> bool {
-        let health = self
+    pub fn should_attempt(&self, domain: &str) -> bool {
+        let mut health = self
             .domains
             .entry(domain.to_string())
             .or_insert_with(DomainHealth::new);
@@ -134,8 +134,8 @@ impl CircuitBreaker {
     ///
     /// # Arguments
     /// * `domain` - The domain that succeeded
-    pub fn record_success(&mut self, domain: &str) {
-        if let Some(health) = self.domains.get_mut(domain) {
+    pub fn record_success(&self, domain: &str) {
+        if let Some(mut health) = self.domains.get_mut(domain) {
             health.consecutive_failures = 0;
             health.total_successes += 1;
             health.total_attempts += 1;
@@ -165,8 +165,8 @@ impl CircuitBreaker {
     /// # Arguments
     /// * `domain` - The domain that failed
     /// * `error` - Description of the error for logging
-    pub fn record_failure(&mut self, domain: &str, error: &str) {
-        let health = self
+    pub fn record_failure(&self, domain: &str, error: &str) {
+        let mut health = self
             .domains
             .entry(domain.to_string())
             .or_insert_with(DomainHealth::new);
@@ -199,14 +199,17 @@ impl CircuitBreaker {
     /// # Arguments
     /// * `domain` - The domain to query
     #[must_use]
-    pub fn get_health(&self, domain: &str) -> Option<&DomainHealth> {
-        self.domains.get(domain)
+    pub fn get_health(&self, domain: &str) -> Option<DomainHealth> {
+        self.domains.get(domain).map(|r| r.value().clone())
     }
 
     /// Get health statistics for all tracked domains
     #[must_use]
-    pub fn get_all_health(&self) -> &HashMap<String, DomainHealth> {
-        &self.domains
+    pub fn get_all_health(&self) -> std::collections::HashMap<String, DomainHealth> {
+        self.domains
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
     }
 }
 
@@ -235,14 +238,12 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_closed_state() {
-        let mut cb = CircuitBreaker::new(3, 2, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(3, 2, Duration::from_secs(60));
 
         assert!(cb.should_attempt("example.com"));
         cb.record_success("example.com");
 
-        let health = cb.get_health("example.com");
-        assert!(health.is_some());
-        let health = health.expect("Health should exist for example.com after recording success");
+        let health = cb.get_health("example.com").expect("Health should exist for example.com after recording success");
         assert_eq!(health.state, CircuitState::Closed);
         assert_eq!(health.consecutive_failures, 0);
         assert_eq!(health.total_successes, 1);
@@ -250,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_opens_after_failures() {
-        let mut cb = CircuitBreaker::new(3, 2, Duration::from_secs(60));
+        let cb = CircuitBreaker::new(3, 2, Duration::from_secs(60));
 
         // First failure
         assert!(cb.should_attempt("example.com"));
@@ -264,9 +265,7 @@ mod tests {
         // Third failure - should open circuit
         cb.record_failure("example.com", "test error");
 
-        let health = cb.get_health("example.com");
-        assert!(health.is_some());
-        let health = health.expect("Health should exist for example.com after recording failures");
+        let health = cb.get_health("example.com").expect("Health should exist for example.com after recording failures");
         assert_eq!(health.state, CircuitState::Open);
         assert_eq!(health.consecutive_failures, 3);
 
@@ -276,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_half_open_after_timeout() {
-        let mut cb = CircuitBreaker::new(2, 1, Duration::from_millis(100));
+        let cb = CircuitBreaker::new(2, 1, Duration::from_millis(100));
 
         // Cause failures to open circuit
         cb.record_failure("example.com", "test error");

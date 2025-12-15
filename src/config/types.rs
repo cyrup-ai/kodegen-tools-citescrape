@@ -146,6 +146,31 @@ pub struct CrawlConfig {
     /// When false (default), files are saved uncompressed for easier inspection
     /// Default: false
     pub(crate) compress_output: bool,
+
+    /// Threshold in bytes for offloading compression to blocking thread pool
+    ///
+    /// Content larger than this will use `tokio::task::spawn_blocking()` to avoid
+    /// blocking the async runtime. Smaller content is compressed directly on the
+    /// async runtime for lower overhead.
+    ///
+    /// **Performance Tradeoffs**:
+    /// - **spawn_blocking overhead**: ~10-50µs task creation + thread pool scheduling
+    /// - **Runtime blocking cost**: Blocks one async worker thread during compression
+    ///
+    /// **Recommended Values**:
+    /// - **High-performance servers** (NVMe, 64GB RAM, 16+ cores): 5-10 MB
+    ///   - Fast compression makes spawn_blocking overhead dominant
+    ///   - Abundant resources support larger in-memory operations
+    /// - **Standard deployments** (SSD, 16-32GB RAM, 8 cores): 1-2 MB (default)
+    ///   - Balanced approach for typical server hardware
+    /// - **Low-resource environments** (HDD, 8GB RAM, 4 cores): 256-512 KB
+    ///   - Memory pressure requires earlier offloading
+    ///   - Slow storage benefits from spawn_blocking sooner
+    /// - **Network storage/NAS**: 256 KB
+    ///   - High I/O latency makes spawn_blocking beneficial for all but tiny files
+    ///
+    /// **Default**: 1 MB (1_048_576 bytes) - balanced for typical deployments
+    pub(crate) compression_threshold_bytes: Option<usize>,
 }
 
 impl Default for CrawlConfig {
@@ -195,6 +220,7 @@ impl Default for CrawlConfig {
             max_concurrent_per_domain: Some(2),
             chrome_data_dir: None,
             compress_output: false, // Default to uncompressed for easier inspection
+            compression_threshold_bytes: Some(1_048_576), // 1MB default
         }
     }
 }
@@ -278,5 +304,13 @@ impl CrawlConfig {
     #[must_use]
     pub fn excluded_patterns_compiled(&self) -> &[regex::Regex] {
         &self.excluded_patterns_compiled
+    }
+
+    /// Get compression threshold for spawn_blocking decision
+    ///
+    /// Returns the configured threshold, or 1MB default if not set.
+    #[must_use]
+    pub fn compression_threshold_bytes(&self) -> usize {
+        self.compression_threshold_bytes.unwrap_or(1_048_576)
     }
 }

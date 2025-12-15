@@ -309,42 +309,64 @@ pub fn normalize_whitespace(markdown: &str) -> String {
 
 /// Normalize spacing around inline formatting markers
 ///
-/// Ensures proper spacing around `**bold**`, `*italic*`, and `` `code` `` 
-/// to prevent merging with adjacent words.
+/// Ensures proper spacing around complete `**bold**` spans to prevent
+/// merging with adjacent words, WITHOUT corrupting the bold text itself.
 ///
 /// # Rules
 ///
-/// 1. Add space before `**` if preceded by alphanumeric character
-/// 2. Add space after `**` if followed by alphanumeric character  
-/// 3. Preserve existing spacing (don't double-space)
-/// 4. Do NOT add spaces inside code blocks
+/// 1. Add space before `**content**` if preceded by alphanumeric character
+/// 2. Add space after `**content**` if followed by alphanumeric character
+/// 3. NEVER modify the internal structure of bold spans
+/// 4. Preserve existing spacing (don't double-space)
 ///
 /// # Examples
 ///
-/// - `word**bold**` → `word **bold**`
-/// - `**bold**word` → `**bold** word`
-/// - `already **spaced** text` → `already **spaced** text` (unchanged)
+/// - `word**bold**` -> `word **bold**`
+/// - `**bold**word` -> `**bold** word`
+/// - `**test**` -> `**test**` (unchanged - already valid)
+/// - `word **spaced** text` -> `word **spaced** text` (unchanged)
 pub fn normalize_inline_formatting_spacing(markdown: &str) -> String {
-    use regex::Regex;
+    use fancy_regex::Regex;
     use std::sync::LazyLock;
-    
-    // Regex to match alphanumeric followed immediately by **
-    static WORD_BEFORE_BOLD: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(\w)\*\*").expect("WORD_BEFORE_BOLD regex is valid")
+
+    // Pattern for complete bold span content: matches any char that's not *,
+    // OR a single * not followed by another * (allows bold text with single asterisks)
+    // Requires at least 1 character of content between ** markers
+    //
+    // Examples matched by (?:[^*]|\*(?!\*))+:
+    //   - "test"           (simple text)
+    //   - "a * b"          (text with single asterisk)
+    //   - "code-block"     (text with punctuation)
+    //
+    // Examples NOT matched:
+    //   - ""               (empty - needs 1+ chars)
+    //   - "**"             (would be closing marker)
+
+    // Match: word character immediately before a complete **content** span
+    // This catches: word**bold** -> word **bold**
+    // Does NOT match inside **test** because there's no word char before the opening **
+    static WORD_BEFORE_BOLD_SPAN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(\w)(\*\*(?:[^*]|\*(?!\*))+\*\*)")
+            .expect("WORD_BEFORE_BOLD_SPAN regex is valid")
     });
-    
-    // Regex to match ** followed immediately by alphanumeric
-    static BOLD_BEFORE_WORD: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\*\*(\w)").expect("BOLD_BEFORE_WORD regex is valid")
+
+    // Match: complete **content** span immediately before a word character
+    // This catches: **bold**word -> **bold** word
+    // Does NOT match **test** followed by space because space is not \w
+    static BOLD_SPAN_BEFORE_WORD: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(\*\*(?:[^*]|\*(?!\*))+\*\*)(\w)")
+            .expect("BOLD_SPAN_BEFORE_WORD regex is valid")
     });
-    
+
     let mut result = markdown.to_string();
-    
-    // Add space before ** if preceded by word character
-    result = WORD_BEFORE_BOLD.replace_all(&result, "$1 **").to_string();
-    
-    // Add space after ** if followed by word character
-    result = BOLD_BEFORE_WORD.replace_all(&result, "** $1").to_string();
-    
+
+    // Add space before bold span if preceded by word character (no space between)
+    // $1 = the word char, $2 = the complete bold span
+    result = WORD_BEFORE_BOLD_SPAN.replace_all(&result, "$1 $2").to_string();
+
+    // Add space after bold span if followed by word character (no space between)
+    // $1 = the complete bold span, $2 = the word char
+    result = BOLD_SPAN_BEFORE_WORD.replace_all(&result, "$1 $2").to_string();
+
     result
 }

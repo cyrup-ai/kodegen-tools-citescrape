@@ -32,30 +32,34 @@ pub const METADATA_SCRIPT: &str = r#"
 /// JavaScript script to extract page resources
 pub const RESOURCES_SCRIPT: &str = r#"
     (() => {
-        const scripts = Array.from(document.getElementsByTagName('script')).map(script => ({
-            url: script.src || null,
-            inline: !script.src,
-            async_load: script.async,
-            defer: script.defer,
-            content_hash: null
-        }));
+        const scripts = Array.from(document.getElementsByTagName('script'))
+            .filter(script => script.src)
+            .map(script => ({
+                url: script.src,
+                inline: false,
+                async_load: script.async,
+                defer: script.defer,
+                content_hash: null
+            }));
 
         const stylesheets = Array.from(document.getElementsByTagName('link'))
-            .filter(link => link.rel === 'stylesheet')
+            .filter(link => link.rel === 'stylesheet' && link.href)
             .map(style => ({
-                url: style.href || null,
-                inline: !style.href,
+                url: style.href,
+                inline: false,
                 media: style.media || null,
                 content_hash: null
             }));
 
-        const images = Array.from(document.getElementsByTagName('img')).map(img => ({
-            url: img.src,
-            alt: img.alt || null,
-            dimensions: img.width && img.height ? [img.width, img.height] : null,
-            size_bytes: null,
-            format: img.src.split('.').pop()?.split('?')[0] || null
-        }));
+        const images = Array.from(document.getElementsByTagName('img'))
+            .filter(img => img.src)
+            .map(img => ({
+                url: img.src,
+                alt: img.alt || null,
+                dimensions: img.width && img.height ? [img.width, img.height] : null,
+                size_bytes: null,
+                format: img.src.split('.').pop()?.split('?')[0] || null
+            }));
 
         const media = Array.from(document.querySelectorAll('video, audio'))
             .map(media => {
@@ -71,13 +75,15 @@ pub const RESOURCES_SCRIPT: &str = r#"
             })
             .filter(media => media !== null);
 
-        const fonts = Array.from(document.querySelectorAll('link[rel="preload"][as="font"], link[rel="font"]')).map(font => ({
-            url: font.href || null,
-            format: font.getAttribute('type') || null,
-            family: font.getAttribute('font-family') || 'unknown',
-            weight: font.getAttribute('font-weight') ? parseInt(font.getAttribute('font-weight')) : null,
-            style: font.getAttribute('font-style') || null
-        }));
+        const fonts = Array.from(document.querySelectorAll('link[rel="preload"][as="font"], link[rel="font"]'))
+            .filter(font => font.href)
+            .map(font => ({
+                url: font.href,
+                format: font.getAttribute('type') || null,
+                family: font.getAttribute('font-family') || 'unknown',
+                weight: font.getAttribute('font-weight') ? parseInt(font.getAttribute('font-weight')) : null,
+                style: font.getAttribute('font-style') || null
+            }));
 
         return {
             scripts,

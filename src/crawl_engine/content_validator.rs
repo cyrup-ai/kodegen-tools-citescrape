@@ -4,6 +4,8 @@
 //! placeholder content, or incompletely loaded pages during web crawling.
 
 use log::{debug, warn};
+use regex::Regex;
+use std::sync::LazyLock;
 
 /// Result of content validation
 #[derive(Debug, Clone)]
@@ -187,20 +189,52 @@ fn strip_html_tags(html: &str) -> String {
     result
 }
 
-/// Strip markdown formatting to get raw text length
+/// Matches fenced code blocks (```...```) to remove them entirely from content measurement
+/// Code blocks shouldn't count toward readable content length
+static CODE_BLOCK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"```[\s\S]*?```")
+        .expect("CODE_BLOCK_REGEX: hardcoded regex is valid")
+});
+
+/// Matches markdown images ![alt text](url) and extracts only the alt text
+/// Images contribute alt text to content, but not the URL
+static IMAGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"!\[([^\]]*)\]\([^)]*\)")
+        .expect("IMAGE_REGEX: hardcoded regex is valid")
+});
+
+/// Matches markdown links [text](url) and extracts only the link text
+/// Links contribute link text to content, but not the URL
+static LINK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[([^\]]*)\]\([^)]*\)")
+        .expect("LINK_REGEX: hardcoded regex is valid")
+});
+
+/// Strip markdown formatting to get raw text length for content validation
+/// 
+/// Removes all markdown syntax elements to measure actual readable content:
+/// - Code blocks (```code```) - removed entirely
+/// - Images (![alt](url)) - alt text only
+/// - Links ([text](url)) - link text only (URL completely removed)
+/// - Headers (#), bold (*), italic (_), inline code (`)
+///
+/// Order matters: code blocks removed first to avoid processing markdown-like syntax inside code
 fn strip_markdown_formatting(markdown: &str) -> String {
-    markdown
-        .lines()
+    // Step 1: Remove code blocks entirely (they shouldn't count as readable content)
+    let text = CODE_BLOCK_REGEX.replace_all(markdown, "");
+    
+    // Step 2: Replace images with alt text only (remove URL portion)
+    let text = IMAGE_REGEX.replace_all(&text, "$1");
+    
+    // Step 3: Replace links with link text only (remove URL portion)
+    let text = LINK_REGEX.replace_all(&text, "$1");
+    
+    // Step 4: Remove remaining markdown formatting symbols line by line
+    text.lines()
         .map(|line| {
-            // Remove markdown headers
-            let line = line.trim_start_matches('#').trim();
-            // Remove markdown links [text](url) -> text
-            let line = line.replace(']', "");
-            let line = line.replace('[', "");
-            // Remove bold/italic markers
-            let line = line.replace('*', "");
-            let line = line.replace('_', "");
-            line.to_string()
+            line.trim_start_matches('#')  // Remove heading markers
+                .trim()
+                .replace(['*', '_', '`'], "")  // Remove bold/italic/code markers
         })
         .collect::<Vec<_>>()
         .join(" ")

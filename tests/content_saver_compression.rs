@@ -139,6 +139,7 @@ async fn test_memory_efficiency_no_double_clone() {
         &temp_path,
         "application/octet-stream",
         true, // Enable compression to test the compression code path
+        1_048_576, // 1MB compression threshold
     )
     .await;
 
@@ -161,6 +162,7 @@ async fn test_no_clone_in_signature() {
         &temp_path,
         "application/octet-stream",
         true, // Enable compression to test the compression code path
+        1_048_576, // 1MB compression threshold
     )
     .await;
 

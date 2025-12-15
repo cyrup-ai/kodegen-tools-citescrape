@@ -11,6 +11,7 @@
 use anyhow::Result;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::Page;
+use dashmap::DashSet;
 use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams,
     EventResponseReceived,
@@ -27,10 +28,10 @@ use std::time::{Duration, Instant};
 use super::content_validator::validate_page_content;
 use super::crawl_types::CrawlQueue;
 use super::{CircuitBreaker, extract_domain};
-use super::link_processor::{CrawlState, process_page_links};
 use super::page_timeout::with_page_timeout;
 use crate::config::CrawlConfig;
 use crate::content_saver;
+use crate::content_saver::{read_cached_etag, check_etag_from_events};
 use crate::content_saver::markdown_converter::{ConversionOptions, convert_html_to_markdown};
 use crate::crawl_events::{CrawlEventBus, types::{CrawlEvent, PageCrawlMetadata}};
 use crate::link_rewriter::LinkRewriter;
@@ -49,10 +50,18 @@ use crate::page_extractor;
 /// Without cleanup, pages leak memory and connection handles, eventually
 /// exhausting browser limits under concurrent load.
 ///
+/// # Runtime Handle Storage
+///
+/// The guard captures a tokio::runtime::Handle at construction time to
+/// ensure cleanup can always occur in Drop, even during panic unwinding
+/// or runtime shutdown. This follows the RAII principle of "capture
+/// dependencies at construction time" and eliminates panic risk from
+/// missing runtime contexts.
+///
 /// # Usage
 ///
 /// ```rust
-/// let guard = PageGuard::new(browser.new_page("about:blank").await?);
+/// let guard = PageGuard::new(browser.new_page("about:blank").await?, url);
 /// 
 /// // Use page via Deref
 /// guard.goto("https://example.com").await?;
@@ -65,7 +74,8 @@ use crate::page_extractor;
 /// ```
 pub struct PageGuard {
     page: Option<chromiumoxide::Page>,
-    url: String, // For logging
+    url: String,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 impl PageGuard {
@@ -74,6 +84,7 @@ impl PageGuard {
         Self {
             page: Some(page),
             url,
+            runtime_handle: tokio::runtime::Handle::current(),
         }
     }
 
@@ -119,12 +130,12 @@ impl Deref for PageGuard {
 impl Drop for PageGuard {
     fn drop(&mut self) {
         if let Some(page) = self.page.take() {
-            let url = self.url.clone();
+            let url = std::mem::take(&mut self.url);
             
             // Spawn fire-and-forget cleanup task
             // This ensures cleanup happens even on error paths, though we can't
             // await it from synchronous Drop. The tokio runtime will execute it.
-            tokio::spawn(async move {
+            self.runtime_handle.spawn(async move {
                 if let Err(e) = page.close().await {
                     // Just log - nothing we can do from Drop
                     log::warn!("PageGuard drop cleanup failed for {}: {}", url, e);
@@ -141,10 +152,11 @@ pub struct PageProcessorContext {
     pub config: CrawlConfig,
     pub link_rewriter: LinkRewriter,
     pub event_bus: Option<Arc<CrawlEventBus>>,
-    pub circuit_breaker: Option<Arc<tokio::sync::Mutex<CircuitBreaker>>>,
+    pub circuit_breaker: Option<Arc<CircuitBreaker>>,
     pub total_pages: Arc<AtomicUsize>,
     pub queue: Arc<tokio::sync::Mutex<VecDeque<CrawlQueue>>>,
     pub indexing_sender: Option<Arc<crate::search::IndexingSender>>,
+    pub visited: Arc<DashSet<String>>,
 }
 
 /// Navigate to a URL with timeout and circuit breaker error handling
@@ -184,7 +196,7 @@ async fn navigate_to_page(
     page: &Page,
     url: &str,
     timeout_secs: u64,
-    circuit_breaker: &Option<Arc<tokio::sync::Mutex<CircuitBreaker>>>,
+    circuit_breaker: &Option<Arc<CircuitBreaker>>,
 ) -> Result<()> {
     if let Err(e) = with_page_timeout(
         async {
@@ -201,8 +213,7 @@ async fn navigate_to_page(
         if let Some(cb) = circuit_breaker
             && let Ok(domain) = extract_domain(url)
         {
-            let mut cb_guard = cb.lock().await;
-            cb_guard.record_failure(&domain, &e.to_string());
+            cb.record_failure(&domain, &e.to_string());
         }
         return Err(e);
     }
@@ -252,12 +263,30 @@ pub async fn process_single_page(
     // Check circuit breaker
     if let Some(ref cb) = ctx.circuit_breaker {
         let domain = extract_domain(&item.url).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut cb_guard = cb.lock().await;
-        if !cb_guard.should_attempt(&domain) {
+        if !cb.should_attempt(&domain) {
             debug!("Circuit breaker OPEN, skipping: {}", item.url);
             return Err(anyhow::anyhow!("Circuit breaker open for domain"));
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CACHE CHECK: Read cached ETag (if exists) for later comparison
+    // ═══════════════════════════════════════════════════════════════
+    let cached_etag: Option<String> = match read_cached_etag(&item.url, &ctx.config.storage_dir).await {
+        Ok(Some(etag)) => {
+            debug!("Found cached ETag for {}: {}", item.url, etag);
+            Some(etag)
+        }
+        Ok(None) => {
+            debug!("No cached content for {}", item.url);
+            None
+        }
+        Err(e) => {
+            // Non-fatal: proceed without cache check
+            warn!("Failed to read cached ETag for {}: {}", item.url, e);
+            None
+        }
+    };
 
     debug!("Crawling [depth {}]: {}", item.depth, item.url);
 
@@ -269,8 +298,7 @@ pub async fn process_single_page(
             if let Some(ref cb) = ctx.circuit_breaker
                 && let Ok(domain) = extract_domain(&item.url)
             {
-                let mut cb_guard = cb.lock().await;
-                cb_guard.record_failure(&domain, &e.to_string());
+                cb.record_failure(&domain, &e.to_string());
             }
             return Err(e.into());
         }
@@ -290,124 +318,218 @@ pub async fn process_single_page(
         warn!("Failed to enable Network domain for {}: {}", item.url, e);
     }
 
-    // Subscribe to ResponseReceived events to capture HTTP status
-    // Subscribe to ResponseReceived events to capture HTTP status
-    let http_status = match page.event_listener::<EventResponseReceived>().await {
-        Ok(mut response_events) => {
-            // Create channel to capture HTTP status from background task
-            let (status_tx, status_rx) = tokio::sync::oneshot::channel::<u16>();
+    // ═══════════════════════════════════════════════════════════════
+    // NETWORK EVENT HANDLING: HTTP status capture + ETag cache check
+    // ═══════════════════════════════════════════════════════════════
+    let (http_status, cache_hit) = if let Some(ref expected_etag) = cached_etag {
+        // ─────────────────────────────────────────────────────────────
+        // CACHE CHECK PATH: Use check_etag_from_events for cache validation
+        // ─────────────────────────────────────────────────────────────
+        match page.event_listener::<EventResponseReceived>().await {
+            Ok(mut response_events) => {
+                // Navigate to page first (cache check happens during navigation)
+                let page_load_timeout = ctx.config.page_load_timeout_secs();
+                navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await?;
 
-            // Spawn background task and STORE the JoinHandle for cleanup
-            let target_url = item.url.clone();
-            let status_task_handle = tokio::spawn(async move {
-                // Track if we've seen ANY response yet (for logging purposes)
-                let mut response_count = 0;
-                
-                while let Some(event) = response_events.next().await {
-                    response_count += 1;
-                    
-                    // STRATEGY: Capture the FIRST main document response
-                    // This handles redirects because we don't match exact URL
-                    //
-                    // Chrome CDP guarantees the first Document-type response
-                    // is the navigation response (even after redirects)
-                    let is_main_document = {
-                        // Check 1: Response has Document mime type (text/html, application/xhtml+xml)
-                        let mime = event.response.mime_type.to_lowercase();
-                        let is_html = mime.starts_with("text/html") || 
-                                      mime.starts_with("application/xhtml+xml");
-                        
-                        // Check 2: This is the first document response we've seen
-                        // (first matching response is always the navigation)
-                        let is_first = response_count == 1 || 
-                                       (is_html && response_count <= 3); // Allow up to 3 redirects
-                        
-                        is_html && is_first
-                    };
-                    
-                    if is_main_document {
-                        let status = event.response.status as u16;
-                        debug!(
-                            "Captured HTTP status {} for navigation (url: {}, mime: {})",
-                            status,
-                            event.response.url,
-                            event.response.mime_type
-                        );
-                        let _ = status_tx.send(status);
-                        break; // Stop after capturing main document response
-                    }
-                    
-                    // Log if we're skipping subresources (for debugging redirect issues)
-                    if response_count <= 5 {
-                        debug!(
-                            "Skipped response #{}: url={}, mime={}, status={}",
-                            response_count,
-                            event.response.url,
-                            event.response.mime_type,
-                            event.response.status
-                        );
-                    }
+                // Use check_etag_from_events which handles multiple Document resources
+                // by matching normalized URLs (not just "first Document")
+                let etag_match = check_etag_from_events(
+                    &mut response_events,
+                    &item.url,
+                    expected_etag,
+                    Duration::from_secs(ctx.config.page_load_timeout_secs()),
+                ).await;
+
+                if etag_match {
+                    debug!("Cache HIT: ETag matches for {}", item.url);
+                    (None, true)
+                } else {
+                    debug!("Cache MISS: ETag mismatch for {}", item.url);
+                    (None, false)
                 }
-                
-                // If we exit the loop without sending, the channel will be closed
-                debug!(
-                    "HTTP status capture task exiting after {} responses for {}",
-                    response_count,
-                    target_url
-                );
-            });
-
-            // Navigate to page with timeout and circuit breaker error handling
-            let page_load_timeout = ctx.config.page_load_timeout_secs();
-            if let Err(e) = navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await {
-                // CRITICAL: Abort the status capture task
-                status_task_handle.abort();
-                return Err(e);
             }
+            Err(e) => {
+                warn!("Failed to subscribe to ResponseReceived events for {}: {}", item.url, e);
+                
+                // Navigate to page anyway (fallback without cache check)
+                let page_load_timeout = ctx.config.page_load_timeout_secs();
+                navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await?;
+                
+                (None, false) // No cache check possible, proceed with full processing
+            }
+        }
+    } else {
+        // ─────────────────────────────────────────────────────────────
+        // STANDARD PATH: HTTP status capture (no cached ETag to compare)
+        // ─────────────────────────────────────────────────────────────
+        let status = match page.event_listener::<EventResponseReceived>().await {
+            Ok(mut response_events) => {
+                // Create channel to capture HTTP status from background task
+                let (status_tx, status_rx) = tokio::sync::oneshot::channel::<u16>();
 
-            // Wait for HTTP status (with timeout to avoid blocking)
-            // The timeout is for waiting on the channel, not for the task itself
-            let status_result = tokio::time::timeout(
-                Duration::from_secs(5), 
-                status_rx
-            ).await;
-            
-            match status_result {
-                Ok(Ok(status)) => {
-                    debug!("HTTP status captured: {} for {}", status, item.url);
-                    // Task completed successfully, it will exit on its own
-                    Some(status)
-                }
-                Ok(Err(_)) => {
-                    warn!(
-                        "HTTP status channel closed for {} (no matching document response received)",
-                        item.url
+                // Spawn background task and STORE the JoinHandle for cleanup
+                let target_url = item.url.clone();
+                let status_task_handle = tokio::spawn(async move {
+                    let mut response_count = 0;
+                    
+                    // Internal timeout - guarantees task exits within 10 seconds
+                    let timeout = tokio::time::sleep(Duration::from_secs(10));
+                    tokio::pin!(timeout);
+                    
+                    loop {
+                        tokio::select! {
+                            // Branch 1: Process next CDP event
+                            Some(event) = response_events.next() => {
+                                response_count += 1;
+                                
+                                // STRATEGY: Capture the FIRST main document response
+                                // This handles redirects because we don't match exact URL
+                                //
+                                // Chrome CDP guarantees the first Document-type response
+                                // is the navigation response (even after redirects)
+                                let is_main_document = {
+                                    // Check 1: Response has Document mime type (text/html, application/xhtml+xml)
+                                    let mime = event.response.mime_type.to_lowercase();
+                                    let is_html = mime.starts_with("text/html") || 
+                                                  mime.starts_with("application/xhtml+xml");
+                                    
+                                    // Check 2: This is the first document response we've seen
+                                    // (first matching response is always the navigation)
+                                    let is_first = response_count == 1 || 
+                                                   (is_html && response_count <= 3); // Allow up to 3 redirects
+                                    
+                                    is_html && is_first
+                                };
+                                
+                                if is_main_document {
+                                    let status = event.response.status as u16;
+                                    debug!(
+                                        "Captured HTTP status {} for navigation (url: {}, mime: {})",
+                                        status,
+                                        event.response.url,
+                                        event.response.mime_type
+                                    );
+                                    let _ = status_tx.send(status);
+                                    break; // Exit: Found main document response
+                                }
+                                
+                                // Log skipped subresources (for debugging redirect issues)
+                                if response_count <= 5 {
+                                    debug!(
+                                        "Skipped response #{}: url={}, mime={}, status={}",
+                                        response_count,
+                                        event.response.url,
+                                        event.response.mime_type,
+                                        event.response.status
+                                    );
+                                }
+                            }
+                            
+                            // Branch 2: Internal timeout expires
+                            _ = &mut timeout => {
+                                debug!(
+                                    "HTTP status capture internal timeout after {} responses for {}",
+                                    response_count,
+                                    target_url
+                                );
+                                break; // Exit: Timeout - no valid response within 10 seconds
+                            }
+                        }
+                    }
+                    
+                    // Task guaranteed to exit via one of three paths:
+                    // 1. Found main document response → break in select! branch 1
+                    // 2. Stream closed (None) → select! branch 1 pattern doesn't match, loop exits
+                    // 3. 10-second timeout → break in select! branch 2
+                    debug!(
+                        "HTTP status capture task exiting after {} responses for {}",
+                        response_count,
+                        target_url
                     );
-                    // Channel closed without sending = task found no matching response
-                    // Task should have exited, but abort anyway to be safe
+                });
+
+                // Navigate to page with timeout and circuit breaker error handling
+                let page_load_timeout = ctx.config.page_load_timeout_secs();
+                if let Err(e) = navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await {
+                    // CRITICAL: Abort the status capture task
                     status_task_handle.abort();
-                    None
+                    return Err(e);
                 }
-                Err(_timeout_elapsed) => {
-                    warn!("HTTP status capture timeout for {} - aborting task", item.url);
-                    
-                    // CRITICAL: Abort the task to prevent leak
-                    status_task_handle.abort();
-                    
-                    None
+
+                // Wait for HTTP status (with timeout to avoid blocking)
+                // The timeout is for waiting on the channel, not for the task itself
+                let status_result = tokio::time::timeout(
+                    Duration::from_secs(5), 
+                    status_rx
+                ).await;
+                
+                match status_result {
+                    Ok(Ok(status)) => {
+                        debug!("HTTP status captured: {} for {}", status, item.url);
+                        Some(status)
+                    }
+                    Ok(Err(_)) => {
+                        debug!(
+                            "HTTP status channel closed for {} (task exited without finding response)",
+                            item.url
+                        );
+                        // Task should have already exited, but abort for safety
+                        status_task_handle.abort();
+                        None
+                    }
+                    Err(_timeout_elapsed) => {
+                        debug!(
+                            "HTTP status capture timeout for {} (task should exit via internal timeout)",
+                            item.url
+                        );
+                        // Task has internal 10s timeout and should exit on its own,
+                        // but abort as defensive programming
+                        status_task_handle.abort();
+                        None
+                    }
                 }
             }
-        }
-        Err(e) => {
-            warn!("Failed to subscribe to ResponseReceived events for {}: {}", item.url, e);
-            
-            // Navigate to page anyway (fallback without HTTP status capture)
-            let page_load_timeout = ctx.config.page_load_timeout_secs();
-            navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await?;
-            
-            None // No HTTP status available in fallback path
-        }
+            Err(e) => {
+                warn!("Failed to subscribe to ResponseReceived events for {}: {}", item.url, e);
+                
+                // Navigate to page anyway (fallback without HTTP status capture)
+                let page_load_timeout = ctx.config.page_load_timeout_secs();
+                navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await?;
+                
+                None // No HTTP status available in fallback path
+            }
+        };
+        (status, false) // No cache hit in standard path
     };
+
+    // ═══════════════════════════════════════════════════════════════
+    // EARLY RETURN ON CACHE HIT
+    // ═══════════════════════════════════════════════════════════════
+    if cache_hit {
+        debug!("Skipping page processing due to cache hit: {}", item.url);
+        
+        // Still increment counter and record success
+        ctx.total_pages.fetch_add(1, Ordering::Relaxed);
+        if let Some(ref cb) = ctx.circuit_breaker
+            && let Ok(domain) = extract_domain(&item.url)
+        {
+            cb.record_success(&domain);
+        }
+        
+        // Publish cache hit event for monitoring
+        if let Some(bus) = &ctx.event_bus {
+            let event = CrawlEvent::cache_hit(item.url.clone());
+            if let Err(e) = bus.publish(event).await {
+                warn!("Failed to publish CacheHit event for {}: {}", item.url, e);
+            }
+        }
+        
+        // Close page and return success
+        if let Err(e) = page_guard.close().await {
+            warn!("Failed to close page for {}: {} (non-fatal)", item.url, e);
+        }
+        return Ok(item.url);
+    }
 
     // Wait for page load
     let navigation_timeout = ctx.config.navigation_timeout_secs();
@@ -426,8 +548,7 @@ pub async fn process_single_page(
         if let Some(ref cb) = ctx.circuit_breaker
             && let Ok(domain) = extract_domain(&item.url)
         {
-            let mut cb_guard = cb.lock().await;
-            cb_guard.record_failure(&domain, &e.to_string());
+            cb.record_failure(&domain, &e.to_string());
         }
         return Err(e);
     }
@@ -458,6 +579,7 @@ pub async fn process_single_page(
         max_inline_image_size_bytes: ctx.config.max_inline_image_size_bytes,
         crawl_rate_rps: ctx.config.crawl_rate_rps,
         save_html: ctx.config.save_raw_html(),
+        compression_threshold_bytes: ctx.config.compression_threshold_bytes(),
     };
 
     for attempt in 0..MAX_RETRIES {
@@ -496,8 +618,7 @@ pub async fn process_single_page(
                     if let Some(ref cb) = ctx.circuit_breaker
                         && let Ok(domain) = extract_domain(&item.url)
                     {
-                        let mut cb_guard = cb.lock().await;
-                        cb_guard.record_failure(&domain, &e.to_string());
+                        cb.record_failure(&domain, &e.to_string());
                     }
                     return Err(e);
                 }
@@ -572,8 +693,7 @@ pub async fn process_single_page(
                 if let Some(ref cb) = ctx.circuit_breaker
                     && let Ok(domain) = extract_domain(&item.url)
                 {
-                    let mut cb_guard = cb.lock().await;
-                    cb_guard.record_failure(
+                    cb.record_failure(
                         &domain,
                         &format!(
                             "Content validation failed after {} retries: {}",
@@ -593,7 +713,7 @@ pub async fn process_single_page(
     }
 
     // Unwrap validated data (guaranteed to be Some if we reach here)
-    let page_data = page_data.ok_or_else(|| {
+    let mut page_data = page_data.ok_or_else(|| {
         anyhow::anyhow!("Failed to extract valid page data after {} retries", MAX_RETRIES)
     })?;
     let processed_markdown = processed_markdown.ok_or_else(|| {
@@ -637,6 +757,7 @@ pub async fn process_single_page(
             crate::search::MessagePriority::Normal,
             ctx.indexing_sender.clone(),
             ctx.config.compress_output,
+            ctx.config.compression_threshold_bytes(),
         )
         .await
         {
@@ -645,12 +766,18 @@ pub async fn process_single_page(
         }
     }
 
+    // Extract links before page_data is potentially moved to save_page_data()
+    let extracted_links = std::mem::take(&mut page_data.links);
+    
     // Save JSON if requested (only executed if validation passed)
     if ctx.config.save_json() {
+        // Restore links for JSON serialization, then move page_data
+        page_data.links = extracted_links.clone();
         match content_saver::save_page_data(
             page_data,
             item.url.clone(),
             ctx.config.storage_dir.clone(),
+            ctx.config.compression_threshold_bytes(),
         )
         .await
         {
@@ -662,8 +789,13 @@ pub async fn process_single_page(
     // Capture screenshot if requested
     let mut screenshot_captured = false;
     if ctx.config.save_screenshots() {
-        match page_extractor::capture_screenshot(page_guard.page().clone(), &item.url, ctx.config.storage_dir())
-            .await
+        match page_extractor::capture_screenshot(
+            page_guard.page().clone(),
+            &item.url,
+            ctx.config.storage_dir(),
+            ctx.config.compression_threshold_bytes(),
+        )
+        .await
         {
             Ok(()) => {
                 debug!("Screenshot saved for {}", item.url);
@@ -674,51 +806,67 @@ pub async fn process_single_page(
     }
 
     // Process page links and add discovered URLs to the crawl queue
-    // Deduplication occurs at two levels:
-    // 1. Queue-level: Manual comparison against existing queue items (below)
-    // 2. Orchestrator-level: DashSet prevents spawning tasks for visited URLs
+    // Uses already-extracted links from page_data instead of re-extracting from browser
     let links_found = {
-        let q_snapshot = ctx.queue.lock().await.clone();
-        let crawl_state = CrawlState {
-            queue: q_snapshot,
-            max_depth: ctx.config.max_depth,
-        };
-
-        match process_page_links(page_guard.page().clone(), item.clone(), crawl_state, &ctx.config).await {
-            Ok(new_queue) => {
-                // Add new discovered links to queue
-                // Deduplication is handled by orchestrator's visited DashSet when popping
-                let mut added = 0;
-
-                for new_item in new_queue {
-                    // Normalize URL by removing fragment for deduplication
-                    let normalized_new = match url::Url::parse(&new_item.url) {
-                        Ok(mut url) => {
-                            url.set_fragment(None);
-                            url.to_string()
-                        }
-                        Err(_) => {
-                            warn!("Failed to parse new queue URL for normalization: {}", new_item.url);
-                            continue;
-                        }
-                    };
-                    
-                    // Add to queue - orchestrator handles visited check when popping
-                    let mut q = ctx.queue.lock().await;
-                    q.push_back(CrawlQueue {
-                        url: normalized_new,
-                        depth: new_item.depth,
-                    });
-                    added += 1;
+        use std::collections::HashSet;
+        
+        let new_links: Vec<CrawlQueue> = if item.depth < ctx.config.max_depth {
+            let filtered_urls = super::crawler::extract_valid_urls(&extracted_links, &ctx.config);
+            
+            debug!(
+                target: "citescrape::links",
+                "Found {} links on {}, {} after filtering",
+                extracted_links.len(),
+                item.url,
+                filtered_urls.len()
+            );
+            
+            // Batch deduplication within this page's links
+            let mut seen_in_batch: HashSet<String> = HashSet::new();
+            let mut results = Vec::new();
+            
+            for link_url in filtered_urls {
+                let normalized_url = crate::link_index::normalize_url(&link_url);
+                
+                // Skip duplicates within this batch
+                if !seen_in_batch.insert(normalized_url.clone()) {
+                    continue;
                 }
-
-                added
+                
+                if url::Url::parse(&normalized_url).is_ok() {
+                    results.push(CrawlQueue {
+                        url: normalized_url,
+                        depth: item.depth + 1,
+                    });
+                }
             }
-            Err(e) => {
-                warn!("Failed to process links for {}: {}", item.url, e);
-                0
+            results
+        } else {
+            Vec::new()
+        };
+        
+        let added = new_links.len();
+        let mut actually_queued = 0;
+        
+        if !new_links.is_empty() {
+            let mut q = ctx.queue.lock().await;
+            for new_link in new_links {
+                // Skip if URL already visited (orchestrator handles insert at dequeue time)
+                if !ctx.visited.contains(&new_link.url) {
+                    q.push_back(new_link);
+                    actually_queued += 1;
+                }
             }
+            debug!(
+                target: "citescrape::links",
+                "Queued {} new URLs (out of {} filtered), queue size now: {}",
+                actually_queued,
+                added,
+                q.len()
+            );
         }
+        
+        added
     };
 
     // Increment total pages counter
@@ -728,8 +876,7 @@ pub async fn process_single_page(
     if let Some(ref cb) = ctx.circuit_breaker
         && let Ok(domain) = extract_domain(&item.url)
     {
-        let mut cb_guard = cb.lock().await;
-        cb_guard.record_success(&domain);
+        cb.record_success(&domain);
     }
 
     // Publish PageCrawled event

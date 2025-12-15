@@ -41,6 +41,7 @@
 //! ```
 
 use anyhow::Result;
+use std::sync::Arc;
 
 // Declare sub-modules
 mod html_preprocessing;
@@ -402,8 +403,8 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
 /// let markdown = convert_html_to_markdown(html, &options).await?;
 /// ```
 pub async fn convert_html_to_markdown(html: &str, options: &ConversionOptions) -> Result<String> {
-    // Clone inputs for spawn_blocking (ConversionOptions is Clone, html → String)
-    let html = html.to_string();
+    // Arc for zero-copy sharing across thread boundary (follows existing pattern in search/engine.rs)
+    let html = Arc::<str>::from(html);
     let options = options.clone();
     
     tokio::task::spawn_blocking(move || {

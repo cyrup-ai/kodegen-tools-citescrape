@@ -23,6 +23,8 @@ pub use content_saver::CacheMetadata;
 
 pub struct ChromiumoxideCrawler {
     config: CrawlConfig,
+    /// Chrome data directory path. Cleanup is handled by orchestrator::crawl_pages()
+    /// via cleanup::cleanup_browser_and_data(), not by Drop.
     chrome_data_dir: Option<PathBuf>,
 }
 
@@ -96,13 +98,7 @@ impl Crawler for ChromiumoxideCrawler {
         CrawlRequest::new(rx)
     }
 }
-impl Drop for ChromiumoxideCrawler {
-    fn drop(&mut self) {
-        if let Some(chrome_data_dir) = &self.chrome_data_dir {
-            let _ = std::fs::remove_dir_all(chrome_data_dir);
-        }
-    }
-}
+
 
 // The process_page function is now incorporated directly in crawl_impl
 // and has been replaced by a more complete data extraction approach

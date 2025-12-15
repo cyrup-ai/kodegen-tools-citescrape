@@ -148,20 +148,25 @@ impl Tool for FetchTool {
             .await
             .map_err(|e| McpError::Other(anyhow::anyhow!("Failed to calculate markdown path: {}", e)))?;
 
-        // Verify file exists
-        if !tokio::fs::try_exists(&md_path).await.unwrap_or(false) {
-            return Err(McpError::Other(anyhow::anyhow!(
-                "Markdown file not found at expected path: {}",
-                md_path.display()
-            )));
-        }
-
         let md_path_str = md_path.to_string_lossy().to_string();
 
         // Read the markdown content
-        let markdown_content = tokio::fs::read_to_string(&md_path)
-            .await
-            .map_err(|e| McpError::Other(anyhow::anyhow!("Failed to read markdown: {}", e)))?;
+        let markdown_content = match tokio::fs::read_to_string(&md_path).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(McpError::Other(anyhow::anyhow!(
+                    "Markdown file not found at expected path: {}",
+                    md_path.display()
+                )));
+            }
+            Err(e) => {
+                return Err(McpError::Other(anyhow::anyhow!(
+                    "Failed to read markdown from {}: {}",
+                    md_path.display(),
+                    e
+                )));
+            }
+        };
 
         // Extract title from first # heading
         let title = markdown_content

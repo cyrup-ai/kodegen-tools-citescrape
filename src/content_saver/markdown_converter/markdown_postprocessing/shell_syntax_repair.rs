@@ -24,10 +24,10 @@ static SPACE_BEFORE_CLOSING_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 // Pattern 3: Space after opening bracket (general case)
-// Matches: ["text or [$VAR or [word
-// Replaces with: [ "text or [ $VAR or [ word
+// Matches: ["text or [$VAR or [word or [-flag
+// Replaces with: [ "text or [ $VAR or [ word or [ -flag
 static SPACE_AFTER_OPENING_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\[(["\$\w])"#)
+    Regex::new(r#"\[([-"\$\w])"#)
         .expect("SPACE_AFTER_OPENING_BRACKET: hardcoded regex is valid")
 });
 
@@ -53,6 +53,23 @@ static SPACE_AFTER_BRACKET_SEMICOLON: LazyLock<Regex> = LazyLock::new(|| {
 static SPACE_AROUND_TEST_OPERATORS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$(\w+)(-eq|-ne|-lt|-le|-gt|-ge)(\d+|\$\w+)")
         .expect("SPACE_AROUND_TEST_OPERATORS: hardcoded regex is valid")
+});
+
+// Pattern 6.5: Space after single-letter test flags before quotes/variables
+// Matches: -f"file" or -d$VAR or -n"string"
+// Replaces with: -f "file" or -d $VAR or -n "string"
+static SPACE_AFTER_TEST_FLAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"-([a-z])(["\$])"#)
+        .expect("SPACE_AFTER_TEST_FLAG: hardcoded regex is valid")
+});
+
+// Pattern 6.6: Space before quoted arguments after commands
+// Matches: grep"pattern" or echo"hello" (letter immediately followed by opening quote)
+// Replaces with: grep "pattern" or echo "hello"
+// Note: Requires word char after quote to ensure it's an opening quote, not closing
+static SPACE_BEFORE_QUOTED_ARG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"([a-zA-Z])(["\'])(\w)"#)
+        .expect("SPACE_BEFORE_QUOTED_ARG: hardcoded regex is valid")
 });
 
 // Pattern 7: Space around pipe operator (|)
@@ -217,8 +234,14 @@ fn repair_shell_code_block(code: &str) -> String {
     // 1. Fix keyword+bracket spacing first (if[, while[)
     repaired = SPACE_AFTER_BRACKET_KEYWORD.replace_all(&repaired, "$1 [").to_string();
     
-    // 2. Fix general opening bracket spacing ([")
+    // 2. Fix general opening bracket spacing ([-)
     repaired = SPACE_AFTER_OPENING_BRACKET.replace_all(&repaired, "[ $1").to_string();
+    
+    // 2.5 Fix test flag spacing (-f"file")
+    repaired = SPACE_AFTER_TEST_FLAG.replace_all(&repaired, "-$1 $2").to_string();
+    
+    // 2.6 Fix command-quote spacing (grep"pattern")
+    repaired = SPACE_BEFORE_QUOTED_ARG.replace_all(&repaired, "$1 $2$3").to_string();
     
     // 3. Fix closing bracket spacing ("])
     repaired = SPACE_BEFORE_CLOSING_BRACKET.replace_all(&repaired, "$1 ]").to_string();

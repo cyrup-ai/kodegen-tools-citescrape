@@ -1235,8 +1235,16 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     // Remove inline event handlers
     let result = EVENT_RE.replace_all(&result, "");
 
-    // Remove comments
-    let result = COMMENT_RE.replace_all(&result, "");
+    // Remove comments (but preserve CITESCRAPE-PRE placeholders for code block protection)
+    let result = COMMENT_RE.replace_all(&result, |caps: &regex::Captures| {
+        let comment = &caps[0];
+        // Preserve CITESCRAPE-PRE placeholder comments - they protect code blocks from DOM parsing
+        if comment.starts_with("<!--CITESCRAPE-PRE-") {
+            comment.to_string()
+        } else {
+            String::new()
+        }
+    });
 
     // Remove forms
     let result = FORM_RE.replace_all(&result, "");

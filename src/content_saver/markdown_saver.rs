@@ -27,6 +27,7 @@ pub async fn save_markdown_content(
     priority: MessagePriority,
     indexing_sender: Option<Arc<IndexingSender>>,
     compress: bool,
+    compression_threshold: usize,
 ) -> Result<()> {
     let path = get_mirror_path(&url, &output_dir, "index.md").await?;
 
@@ -46,6 +47,7 @@ pub async fn save_markdown_content(
         &path,
         "text/markdown",
         compress,
+        compression_threshold,
     )
     .await?;
 

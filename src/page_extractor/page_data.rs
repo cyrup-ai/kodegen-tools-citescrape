@@ -19,6 +19,7 @@ pub struct ExtractPageDataConfig {
     pub max_inline_image_size_bytes: Option<usize>,
     pub crawl_rate_rps: Option<f64>,
     pub save_html: bool,
+    pub compression_threshold_bytes: usize,
 }
 
 /// Extract event handler attribute names from element attributes
@@ -299,6 +300,7 @@ pub async fn extract_page_data(
             &resources,
             config.max_inline_image_size_bytes,
             config.crawl_rate_rps,
+            config.compression_threshold_bytes,
         )
         .await
         {

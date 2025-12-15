@@ -76,6 +76,7 @@ pub struct CrawlConfigBuilder<State = ()> {
     pub(crate) circuit_breaker_retry_delay_secs: u64,
     pub(crate) max_concurrent_pages: Option<usize>,
     pub(crate) max_concurrent_per_domain: Option<usize>,
+    pub(crate) compression_threshold_bytes: Option<usize>,
     pub(crate) _phantom: PhantomData<State>,
 }
 
@@ -121,6 +122,7 @@ impl Default for CrawlConfigBuilder<()> {
             circuit_breaker_retry_delay_secs: 300,
             max_concurrent_pages: Some(10),
             max_concurrent_per_domain: Some(2),
+            compression_threshold_bytes: Some(1_048_576), // 1MB default
             _phantom: PhantomData,
         }
     }
@@ -176,6 +178,7 @@ impl CrawlConfigBuilder<()> {
             circuit_breaker_retry_delay_secs: self.circuit_breaker_retry_delay_secs,
             max_concurrent_pages: self.max_concurrent_pages,
             max_concurrent_per_domain: self.max_concurrent_per_domain,
+            compression_threshold_bytes: self.compression_threshold_bytes,
             _phantom: PhantomData,
         }
     }
@@ -233,6 +236,7 @@ impl CrawlConfigBuilder<WithStorageDir> {
             circuit_breaker_retry_delay_secs: self.circuit_breaker_retry_delay_secs,
             max_concurrent_pages: self.max_concurrent_pages,
             max_concurrent_per_domain: self.max_concurrent_per_domain,
+            compression_threshold_bytes: self.compression_threshold_bytes,
             _phantom: PhantomData,
         }
     }
@@ -312,6 +316,32 @@ impl CrawlConfigBuilder<WithStartUrl> {
             max_concurrent_per_domain: self.max_concurrent_per_domain,
             chrome_data_dir: None,
             compress_output: false, // Default to uncompressed
+            compression_threshold_bytes: self.compression_threshold_bytes,
         })
+    }
+}
+
+// Builder methods available at any state (since compression_threshold is optional)
+impl<State> CrawlConfigBuilder<State> {
+    /// Set compression threshold for spawn_blocking decision
+    ///
+    /// Content larger than this threshold will use `tokio::task::spawn_blocking()`
+    /// to avoid blocking the async runtime. Smaller content is compressed directly.
+    ///
+    /// # Arguments
+    /// * `bytes` - Threshold in bytes (recommended: 256KB to 10MB depending on hardware)
+    ///
+    /// # Example
+    /// ```rust
+    /// let config = CrawlConfig::builder()
+    ///     .storage_dir("./output")
+    ///     .start_url("https://example.com")
+    ///     .compression_threshold_bytes(5 * 1024 * 1024) // 5MB for high-perf server
+    ///     .build()?;
+    /// ```
+    #[must_use]
+    pub fn compression_threshold_bytes(mut self, bytes: usize) -> Self {
+        self.compression_threshold_bytes = Some(bytes);
+        self
     }
 }
