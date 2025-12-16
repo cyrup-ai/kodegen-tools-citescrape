@@ -43,11 +43,11 @@ impl FetchTool {
             .find_syntax_by_extension("md")
             .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-        // Default themes always include "base16-ocean.dark" and others
+        // Default themes always include "base16-eighties.dark" and others
         // Using or_else with values().next() ensures we always have a valid theme
         let theme = THEME_SET
             .themes
-            .get("base16-ocean.dark")
+            .get("base16-eighties.dark")
             .or_else(|| THEME_SET.themes.values().next())
             .expect("syntect default themes must have at least one theme");
 
