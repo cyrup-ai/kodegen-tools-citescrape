@@ -1,16 +1,17 @@
 use anyhow::Result;
-use chromiumoxide::{Browser, BrowserConfig};
+use kodegen_tools_citescrape::browser_setup::launch_browser;
 use kodegen_tools_citescrape::kromekover::inject;
+use tempfile::TempDir;
 
 #[tokio::test]
 async fn test_evasions() -> Result<()> {
-    let (browser, mut _handler) = Browser::launch(
-        BrowserConfig::builder()
-            .no_sandbox()
-            .build()
-            .map_err(|e| anyhow::anyhow!(e))?,
-    )
-    .await?;
+    // Create unique temp directory for this test's Chrome profile
+    // TempDir implements Drop, so it will be automatically cleaned up when test completes
+    let _temp_dir = TempDir::new()?;
+
+    // Use production browser infrastructure - handler already managed
+    let (browser, _handler_task, _user_data_dir) =
+        launch_browser(true, Some(_temp_dir.path().to_path_buf())).await?;
 
     let page = browser.new_page("about:blank").await?;
 

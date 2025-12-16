@@ -79,8 +79,25 @@ static HIDDEN_DISPLAY: LazyLock<Regex> = LazyLock::new(|| {
 
 // Matches elements with boolean hidden attribute
 static HIDDEN_ATTR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<[^>]+\bhidden(?:\s|>|/|=)[^>]*>.*?</[^>]+>")
+    Regex::new(r"(?s)<[^>]+\shidden(?:\s|>)[^>]*>.*?</[^>]+>")
         .expect("HIDDEN_ATTR: hardcoded regex is valid")
+});
+
+// Remove empty <code> and <pre> elements (whitespace-only content)
+// These are often styling placeholders that break markdown conversion
+static EMPTY_CODE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<code[^>]*>\s*</code>")
+        .expect("EMPTY_CODE: hardcoded regex is valid")
+});
+
+static EMPTY_PRE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<pre[^>]*>\s*</pre>")
+        .expect("EMPTY_PRE: hardcoded regex is valid")
+});
+
+static EMPTY_PRE_CODE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<pre[^>]*>\s*<code[^>]*>\s*</code>\s*</pre>")
+        .expect("EMPTY_PRE_CODE: hardcoded regex is valid")
 });
 
 // Matches elements with visibility:hidden in style attribute
@@ -1265,6 +1282,12 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     let result = HIDDEN_DISPLAY.replace_all(&result, "");
     let result = HIDDEN_ATTR.replace_all(&result, "");
     let result = HIDDEN_VISIBILITY.replace_all(&result, "");
+
+    // Remove empty code/pre elements (prevents orphaned fence markers in markdown)
+    // These are often styling placeholders with no semantic content
+    let result = EMPTY_PRE_CODE.replace_all(&result, "");
+    let result = EMPTY_PRE.replace_all(&result, "");
+    let result = EMPTY_CODE.replace_all(&result, "");
 
     // Remove permalink anchor markers from headings (GitHub, Docusaurus, Jekyll, Eleventy)
     // These are visual indicators for deep linking, not content

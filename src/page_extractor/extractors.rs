@@ -4,10 +4,10 @@
 //! with pre-allocated buffers and lock-free operations.
 
 use super::js_scripts::{
-    INTERACTIVE_ELEMENTS_SCRIPT, METADATA_SCRIPT, RESOURCES_SCRIPT, SECURITY_SCRIPT, TIMING_SCRIPT,
+    HEADINGS_SCRIPT, INTERACTIVE_ELEMENTS_SCRIPT, METADATA_SCRIPT, RESOURCES_SCRIPT, SECURITY_SCRIPT, TIMING_SCRIPT,
 };
 use super::schema::InteractiveElement;
-use super::schema::{PageMetadata, ResourceInfo, SecurityInfo, TimingInfo};
+use super::schema::{HeadingElement, PageMetadata, ResourceInfo, SecurityInfo, TimingInfo};
 use anyhow::{Context, Result};
 use chromiumoxide::Page;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -470,4 +470,44 @@ pub async fn capture_screenshot(
 
     log::debug!("Screenshot captured and saved successfully for URL: {url_str}");
     Ok(())
+}
+
+/// Extract document headings (H1-H6) with ordinal hierarchy
+///
+/// Executes JavaScript to query all heading elements and track their
+/// hierarchical positions in the document. Returns structured data
+/// with level, text, id, and ordinal position for each heading.
+///
+/// # Returns
+///
+/// * `Ok(Vec<HeadingElement>)` - Array of heading elements in document order
+/// * `Err(anyhow::Error)` - If JavaScript evaluation or deserialization fails
+///
+/// # Example Output
+///
+/// ```json
+/// [
+///   {"level": 1, "text": "Introduction", "id": "intro", "ordinal": [1]},
+///   {"level": 2, "text": "Overview", "id": null, "ordinal": [1, 1]},
+///   {"level": 2, "text": "Details", "id": "details", "ordinal": [1, 2]}
+/// ]
+/// ```
+#[inline]
+pub async fn extract_headings(page: Page) -> Result<Vec<HeadingElement>> {
+    let js_result = page
+        .evaluate(HEADINGS_SCRIPT)
+        .await
+        .context("Failed to execute headings extraction script")?;
+
+    let headings: Vec<HeadingElement> = match js_result.into_value() {
+        Ok(value) => {
+            serde_json::from_value(value).context("Failed to parse headings from JS result")?
+        }
+        Err(e) => return Err(anyhow::anyhow!("Failed to get headings value: {e}")),
+    };
+
+    // Log heading count for debugging
+    log::debug!("Extracted {} document headings", headings.len());
+
+    Ok(headings)
 }

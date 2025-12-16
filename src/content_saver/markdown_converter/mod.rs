@@ -47,13 +47,13 @@ use std::sync::Arc;
 mod html_preprocessing;
 mod html_to_markdown;
 mod markdown_postprocessing;
-mod custom_handlers;
+pub mod custom_handlers;
 
 // Re-export sub-modules for advanced usage
 pub use html_preprocessing::{clean_html_content, extract_main_content};
 pub use html_to_markdown::MarkdownConverter;
 pub use markdown_postprocessing::{
-    extract_heading_level, normalize_heading_level, normalize_inline_formatting_spacing, 
+    ensure_h1_at_start, extract_heading_level, normalize_heading_level, normalize_inline_formatting_spacing, 
     normalize_whitespace, process_markdown_headings,
 };
 
@@ -338,6 +338,15 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Fixes corrupted fences like **```rust that should be ```rust
     let markdown = markdown_postprocessing::strip_bold_from_code_fences(&markdown);
     
+    // Stage 3.7.5: Normalize malformed code fences (comprehensive fix)
+    // Fixes ALL code fence corruption patterns from HTML conversion:
+    // 1. Single backtick closings → triple backticks
+    // 2. Five+ backtick fences → exactly 3 backticks  
+    // 3. Text merged with closing fence → separate lines with proper spacing
+    // 4. Orphaned fence markers → removed
+    // This is the comprehensive solution that handles millions of website variations
+    let markdown = markdown_postprocessing::normalize_code_fences(&markdown);
+    
     // Stage 3.8: Strip trailing asterisks after code fences (safety net)
     // Removes any `**` or `****` that appear after closing code fences
     let markdown = markdown_postprocessing::strip_trailing_asterisks_after_code_fences(&markdown);
@@ -361,7 +370,13 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Stage 4.5: Strip residual HTML tags (DEFENSIVE - Layer 2 defense against HTML leakage)
     let markdown = markdown_postprocessing::strip_residual_html_tags(&processed_markdown);
 
-    // Stage 4.6: Normalize inline formatting spacing (safety net)
+    // Stage 4.6: Fix internal bold spacing (BEFORE external spacing)
+    // Removes spaces inside ** markers: `** text **` → `**text**`
+    // Also removes space before punctuation: `**text** :` → `**text**:`
+    let markdown = markdown_postprocessing::fix_bold_internal_spacing(&markdown);
+
+    // Stage 4.7: Normalize external inline formatting spacing (safety net)
+    // Adds spaces around bold spans: `word**bold**` → `word **bold**`
     let markdown = markdown_postprocessing::normalize_inline_formatting_spacing(&markdown);
 
     // Stage 5: Normalize whitespace (with passthrough if disabled)
@@ -446,6 +461,7 @@ mod tests {
 
         let markdown = result.expect("Test operation should succeed");
         // With minimal options, headings might not be normalized
+        eprintln!("ACTUAL MARKDOWN OUTPUT:\n{}", markdown);
         assert!(markdown.contains("Heading"));
         assert!(markdown.contains("Content"));
     }

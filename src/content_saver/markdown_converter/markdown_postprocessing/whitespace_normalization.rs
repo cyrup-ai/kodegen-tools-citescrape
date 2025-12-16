@@ -370,3 +370,71 @@ pub fn normalize_inline_formatting_spacing(markdown: &str) -> String {
 
     result
 }
+
+/// Fix internal spacing in bold markers
+///
+/// Removes leading/trailing spaces INSIDE `** ... **` markers while preserving
+/// the content. Also removes spaces before common punctuation marks.
+///
+/// # Rules
+///
+/// 1. `** text **` → `**text**` (strip internal leading/trailing spaces)
+/// 2. `**text **` → `**text**` (strip internal trailing space)
+/// 3. `** text**` → `**text**` (strip internal leading space)
+/// 4. `**text** :` → `**text**:` (remove space before punctuation)
+///
+/// # Examples
+///
+/// - `** Works in your terminal ** :` → `**Works in your terminal**:`
+/// - `** Build features **` → `**Build features**`
+/// - `** Enterprise-ready**` → `**Enterprise-ready**`
+///
+/// # Implementation Notes
+///
+/// Uses two-pass regex approach:
+/// 1. First pass: Strip internal spaces from bold markers
+/// 2. Second pass: Remove spaces before punctuation
+///
+pub fn fix_bold_internal_spacing(markdown: &str) -> String {
+    use fancy_regex::Regex;
+    use std::sync::LazyLock;
+
+    // Pattern: ** followed by optional whitespace, then content (non-greedy),
+    // then optional whitespace, then **
+    // 
+    // Breakdown:
+    // - `\*\*` - literal **
+    // - `\s*` - zero or more whitespace chars (leading space inside markers)
+    // - `(.+?)` - one or more chars (non-greedy) - captures the content
+    // - `\s*` - zero or more whitespace chars (trailing space inside markers)
+    // - `\*\*` - literal **
+    //
+    // Replacement: `**$1**`
+    // - Wraps the content ($1) in ** without any internal spaces
+    static BOLD_INTERNAL_SPACING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\*\*\s*(.+?)\s*\*\*")
+            .expect("BOLD_INTERNAL_SPACING regex is valid")
+    });
+
+    // Pattern: ** ... ** followed by space and punctuation
+    // 
+    // This catches: `**text** :` → `**text**:`
+    // Common punctuation: : , . ! ? ;
+    static SPACE_BEFORE_PUNCTUATION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(\*\*[^*]+\*\*)\s+([,:;.!?])")
+            .expect("SPACE_BEFORE_PUNCTUATION regex is valid")
+    });
+
+    let mut result = markdown.to_string();
+
+    // First pass: Remove internal spaces from bold markers
+    result = BOLD_INTERNAL_SPACING.replace_all(&result, |caps: &fancy_regex::Captures| {
+        let content = caps.get(1).unwrap().as_str().trim();
+        format!("**{}**", content)
+    }).to_string();
+
+    // Second pass: Remove spaces before punctuation after bold text
+    result = SPACE_BEFORE_PUNCTUATION.replace_all(&result, "$1$2").to_string();
+
+    result
+}

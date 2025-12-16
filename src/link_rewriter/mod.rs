@@ -137,7 +137,7 @@ impl LinkRewriter {
             }
         }
 
-        log::info!(
+        log::debug!(
             "Link rewrite complete for {}: {} outbound, {} inbound updated",
             page_url,
             result.outbound_rewritten,

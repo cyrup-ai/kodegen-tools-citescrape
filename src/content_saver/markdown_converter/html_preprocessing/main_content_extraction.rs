@@ -418,22 +418,31 @@ pub fn extract_main_content(html: &str) -> Result<String> {
 // TAB COMPONENT TRANSFORMATION
 // ============================================================================
 
-/// Regex to find tab container divs
+/// Regex to find tab containers across millions of websites
+/// Matches: ARIA role="tablist" OR class containing "tab" (framework-agnostic)
 static TAB_CONTAINER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<div[^>]*class="[^"]*tabs[^"]*"[^>]*>(.*?)</div>"#)
-        .expect("BUG: hardcoded regex TAB_CONTAINER_RE is invalid")
+    Regex::new(
+        r#"(?s)<(?:div|section|ul|nav)[^>]*(?:role="tablist"|class="[^"]*tab[^"]*")[^>]*>(.*?)</(?:div|section|ul|nav)>"#
+    )
+    .expect("BUG: hardcoded regex TAB_CONTAINER_RE is invalid")
 });
 
-/// Regex to extract tab button labels
+/// Regex to extract tab labels across millions of websites
+/// Matches: role="tab" OR common clickable elements with "tab" in class
 static TAB_LABEL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<button[^>]*>(.*?)</button>"#)
-        .expect("BUG: hardcoded regex TAB_LABEL_RE is invalid")
+    Regex::new(
+        r#"<(?:button|a|li)[^>]*(?:role="tab"|class="[^"]*tab[^"]*")[^>]*>(.*?)</(?:button|a|li)>"#
+    )
+    .expect("BUG: hardcoded regex TAB_LABEL_RE is invalid")
 });
 
-/// Regex to extract tab panel content
+/// Regex to extract tab panels across millions of websites
+/// Matches: role="tabpanel" OR class containing "panel"/"content" (framework-agnostic)
 static TAB_PANEL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<div[^>]*class="[^"]*tab-panel[^"]*"[^>]*>(.*?)</div>"#)
-        .expect("BUG: hardcoded regex TAB_PANEL_RE is invalid")
+    Regex::new(
+        r#"(?s)<(?:div|section)[^>]*(?:role="tabpanel"|class="[^"]*(?:panel|content)[^"]*")[^>]*>(.*?)</(?:div|section)>"#
+    )
+    .expect("BUG: hardcoded regex TAB_PANEL_RE is invalid")
 });
 
 /// Transform tab components into sequential sections before markdown conversion.

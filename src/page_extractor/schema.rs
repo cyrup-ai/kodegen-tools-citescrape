@@ -136,6 +136,43 @@ pub struct PageData {
     pub crawled_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Document heading element with hierarchical position tracking
+///
+/// Represents a heading (H1-H6) with its ordinal position in the document's
+/// heading hierarchy. The ordinal array tracks the hierarchical path, where
+/// each number represents the count at that heading level.
+///
+/// # Ordinal Hierarchy Examples
+///
+/// - `[1]` - First H1
+/// - `[1, 1]` - First H2 under first H1
+/// - `[1, 2]` - Second H2 under first H1
+/// - `[1, 2, 1]` - First H3 under second H2 under first H1
+/// - `[2]` - Second H1 (resets all deeper counters)
+/// - `[2, 1]` - First H2 under second H1
+///
+/// # Fields
+///
+/// * `level` - Heading level (1-6 for h1-h6)
+/// * `text` - Heading text content (trimmed)
+/// * `id` - HTML id attribute if present (for anchor linking)
+/// * `ordinal` - Hierarchical position as array (e.g., [1, 2, 1])
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeadingElement {
+    /// Heading level: 1 for h1, 2 for h2, ..., 6 for h6
+    pub level: u8,
+    
+    /// Heading text content (trimmed of whitespace)
+    pub text: String,
+    
+    /// HTML id attribute if present (for anchor links)
+    pub id: Option<String>,
+    
+    /// Hierarchical position array
+    /// Example: [1, 2, 1] means "1st H1 → 2nd H2 → 1st H3"
+    pub ordinal: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PageMetadata {
     pub description: Option<String>,
@@ -148,6 +185,11 @@ pub struct PageMetadata {
     pub robots: Option<String>,
     pub viewport: Option<String>,
     pub headers: HashMap<String, String>,
+    
+    /// Document headings (H1-H6) with hierarchical ordinal tracking
+    /// Extracted from DOM in document order with position metadata
+    #[serde(default)]
+    pub headings: Vec<HeadingElement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

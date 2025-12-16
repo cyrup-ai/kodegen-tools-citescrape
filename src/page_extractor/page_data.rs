@@ -9,8 +9,8 @@ use chromiumoxide::Page;
 use crate::content_saver;
 
 use super::extractors::{
-    extract_interactive_elements, extract_links, extract_metadata, extract_resources,
-    extract_security_info, extract_timing_info,
+    extract_headings, extract_interactive_elements, extract_links, extract_metadata,
+    extract_resources, extract_security_info, extract_timing_info,
 };
 
 /// Configuration for page data extraction
@@ -180,14 +180,6 @@ fn convert_interactive_elements(
                         event_handlers: get_event_handlers(&element.attributes),
                         attributes: element.attributes.clone(),
                     });
-                } else {
-                    // Log dropped elements for debugging and monitoring
-                    log::warn!(
-                        "Dropping non-interactive element: type='{}', selector='{}', attributes={:?}",
-                        element.element_type,
-                        element.selector,
-                        element.attributes.keys().collect::<Vec<_>>()
-                    );
                 }
             }
         }
@@ -230,7 +222,7 @@ pub async fn extract_page_data(
     log::debug!("Starting to extract page data for URL: {url}");
 
     // Launch all extractions in parallel with tokio::try_join!
-    let (metadata, resources, timing, security, title, interactive_elements_vec, links) = tokio::try_join!(
+    let (metadata, resources, timing, security, title, interactive_elements_vec, links, headings) = tokio::try_join!(
         extract_metadata(page.clone()),
         extract_resources(page.clone()),
         extract_timing_info(page.clone()),
@@ -255,6 +247,7 @@ pub async fn extract_page_data(
         },
         extract_interactive_elements(page.clone()),
         extract_links(page.clone()),
+        extract_headings(page.clone()),
     )?;
 
     // ============ OPTIONAL: Scroll to trigger lazy-loaded content ============
@@ -314,11 +307,16 @@ pub async fn extract_page_data(
     }
 
     log::debug!("Successfully extracted page data for URL: {url}");
+    
+    // Populate metadata with extracted headings
+    let mut metadata_with_headings = metadata;
+    metadata_with_headings.headings = headings;
+    
     Ok(super::schema::PageData {
         url: url.clone(),
         title,
         content,
-        metadata,
+        metadata: metadata_with_headings,
         interactive_elements,
         links,
         resources,

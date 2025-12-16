@@ -101,13 +101,15 @@ fn heading_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerR
             "h4" => 4,
             "h5" => 5,
             "h6" => 6,
-            _ => return None, // Should never happen
+            _ => return None,
         }
     } else {
         return None;
     };
     
-    // Extract heading text (handles nested inline elements like <strong>, <a>, etc.)
+    // Extract heading content (handles nested inline elements)
+    // Use SAME approach as p_handler - call walk_children on the element node
+    // This allows htmd to properly combine adjacent text nodes
     let result = handlers.walk_children(element.node);
     let content = result.content.trim();
     
@@ -185,8 +187,8 @@ fn pre_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResul
         let language = get_language_from_element(&element)
             .or_else(|| infer_language_from_content(raw_content));
         
-        // Pass language to normalize function for conditional shell fixing
-        let content = normalize_code_whitespace(raw_content, &language);
+        // Use raw content directly - no whitespace manipulation
+        let content = raw_content;
         
         if content.is_empty() {
             return None;
@@ -220,12 +222,17 @@ fn code_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerRes
         let language = get_language_from_element(&element)
             .or_else(|| infer_language_from_content(raw_content));
         
-        // Pass language to normalize function for conditional shell fixing
-        let content = normalize_code_whitespace(raw_content, &language);
+        // Use raw content directly - no whitespace manipulation
+        let content = raw_content;
+        
+        // Skip empty code blocks - prevents orphaned fence markers
+        if content.is_empty() {
+            return None;
+        }
         
         // Re-validate HTML language hint against content (keep existing logic)
-        let language = language.filter(|lang| validate_html_language(lang, &content))
-            .or_else(|| infer_language_from_content(&content));
+        let language = language.filter(|lang| validate_html_language(lang, content))
+            .or_else(|| infer_language_from_content(content));
 
         let fence = match &language {
             Some(lang) => format!("```{}", lang),
@@ -239,8 +246,13 @@ fn code_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerRes
         let raw_content = extract_raw_text(element.node);
         let raw_content = raw_content.trim();
         
-        // Inline code usually doesn't have language info, pass None
-        let content = normalize_code_whitespace(raw_content, &None);
+        // Use raw content directly - no whitespace manipulation
+        let content = raw_content;
+        
+        // Skip empty inline code - prevents empty backtick pairs
+        if content.is_empty() {
+            return None;
+        }
 
         // Handle backticks in content (keep existing logic)
         if content.contains('`') {
@@ -586,7 +598,6 @@ fn is_punctuation_pair(prev: char, next: char) -> bool {
         // Path separators
         ('/', _) | (_, '/') => true,
         // (':', _) | (_, ':') => true,  // ❌ REMOVED - Breaks YAML/JSON/TOML spacing
-        // Use restore_yaml_spaces() and similar functions to fix specific cases instead
         // Brackets and parens
         ('(', _) | (_, ')') => true,
         ('[', _) | (_, ']') => true,
@@ -604,206 +615,6 @@ fn is_punctuation_pair(prev: char, next: char) -> bool {
         ('-', c) | (c, '-') if c.is_alphanumeric() || c == '-' => true,
         _ => false,
     }
-}
-
-/// Normalize excessive blank lines in code content
-///
-/// Collapses sequences of 3+ consecutive newlines into exactly 2 newlines,
-/// preserving intentional single blank lines while removing excessive spacing
-/// from HTML-sourced code blocks.
-///
-/// # Newline Semantics
-///
-/// - **1 newline** (`\n`) = no blank line (consecutive statements)
-/// - **2 newlines** (`\n\n`) = 1 blank line (intentional spacing, **preserve**)
-/// - **3+ newlines** (`\n\n\n+`) = excessive spacing (**collapse to 2**)
-///
-/// # Rationale
-///
-/// Standard code style guides (Rust, Python, JavaScript) allow at most
-/// 1 blank line between logical sections. Multiple blank lines are never
-/// idiomatic and indicate HTML formatting artifacts.
-///
-/// # Performance
-///
-/// - Regex compiled once via `LazyLock` (zero overhead on subsequent calls)
-/// - Single-pass replacement (O(n) time complexity)
-/// - Only applied to `<code>` element content (typically < 1KB strings)
-///
-/// # Examples
-///
-/// ```rust
-/// let input = "fn main() {\n\n\n    println!(\"Hello\");\n}";
-/// let output = normalize_code_whitespace(input);
-/// assert_eq!(output, "fn main() {\n\n    println!(\"Hello\");\n}");
-/// ```
-fn normalize_code_whitespace(content: &str, language: &Option<String>) -> String {
-    use std::sync::LazyLock;
-    use regex::Regex;
-    
-    // Match 3 or more consecutive newlines
-    static EXCESSIVE_NEWLINES: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\n{3,}").expect("EXCESSIVE_NEWLINES: hardcoded regex is valid")
-    });
-    
-    // Replace with exactly 2 newlines (= 1 blank line)
-    let content = EXCESSIVE_NEWLINES.replace_all(content, "\n\n").to_string();
-    
-    // Only apply shell-specific fixes to shell/bash code
-    let content = if let Some(lang) = language {
-        let lang_lower = lang.to_lowercase();
-        if matches!(lang_lower.as_str(), "bash" | "sh" | "shell" | "zsh") {
-            restore_shell_command_spaces(&content)
-        } else {
-            content
-        }
-    } else {
-        content
-    };
-    
-    // Fix YAML key-value spacing (required by YAML specification)
-    restore_yaml_spaces(&content)
-}
-
-/// Restore spaces in common shell command patterns
-///
-/// Detects patterns where whitespace collapse breaks shell syntax:
-/// - Command followed by flags: `curl-fsSL` → `curl -fsSL`
-/// - Flags followed by URL: `-fsSLhttps://` → `-fsSL https://`
-/// - Pipe operators: `command|bash` → `command | bash`
-/// - Option-value pairs: `-ofile` → `-o file`
-///
-/// # Pattern Detection Rules
-///
-/// 1. **Command + Flags**: Lowercase word followed immediately by dash-flag
-///    - Pattern: `\b([a-z]+)(-[a-zA-Z]+)\b`
-///    - Fix: Insert space between command and flags
-///    - Example: `curl-fsSL` → `curl -fsSL`
-///
-/// 2. **Flags + URL**: Dash-flags followed immediately by URL protocol
-///    - Pattern: `(-[a-zA-Z]+)(https?://)`
-///    - Fix: Insert space between flags and URL
-///    - Example: `-fsSLhttps://` → `-fsSL https://`
-///
-/// 3. **Pipe Operator**: Text immediately adjacent to pipe
-///    - Pattern: `(\S)\|(\S)`
-///    - Fix: Insert space before and after pipe
-///    - Example: `curl|bash` → `curl | bash`
-///
-/// 4. **Short Options**: Single-letter option followed by non-space value
-///    - Pattern: `\s(-[a-zA-Z])(file|output|[A-Z])`
-///    - Fix: Insert space between option and value
-///    - Example: `-ofile` → `-o file`
-///
-/// # Examples
-///
-/// ```rust
-/// let broken = "curl-fsSLhttps://example.com/install.sh|bash";
-/// let fixed = restore_shell_command_spaces(broken);
-/// assert_eq!(fixed, "curl -fsSL https://example.com/install.sh | bash");
-/// ```
-fn restore_shell_command_spaces(content: &str) -> String {
-    use std::sync::LazyLock;
-    use regex::Regex;
-    
-    // Pattern 1: Command + Flags (e.g., curl-fsSL → curl -fsSL)
-    static CMD_FLAGS: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\b([a-z]{3,})(-[a-zA-Z]+)\b")
-            .expect("CMD_FLAGS: hardcoded regex is valid")
-    });
-    
-    // Pattern 2: Flags + URL (e.g., -fsSLhttps:// → -fsSL https://)
-    static FLAGS_URL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(-[a-zA-Z-]+)(https?://)")
-            .expect("FLAGS_URL: hardcoded regex is valid")
-    });
-    
-    // Pattern 3: Pipe operator (e.g., command|bash → command | bash)
-    static PIPE_OP: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(\S)\|(\S)")
-            .expect("PIPE_OP: hardcoded regex is valid")
-    });
-    
-    // Pattern 4: Short option + value (e.g., -ofile → -o file)
-    // BUT: Don't match compound flags like -fsSL (mixed case indicates flags, not a value)
-    static SHORT_OPT: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(\s-[a-z])([a-z][a-z0-9_./]+)")
-            .expect("SHORT_OPT: hardcoded regex is valid")
-    });
-    
-    // Apply fixes in sequence
-    let content = CMD_FLAGS.replace_all(content, "$1 $2");
-    let content = FLAGS_URL.replace_all(&content, "$1 $2");
-    let content = PIPE_OP.replace_all(&content, "$1 | $2");
-    let content = SHORT_OPT.replace_all(&content, "$1 $2");
-    
-    content.to_string()
-}
-
-/// Restore spaces in YAML key-value pairs
-///
-/// Detects patterns where whitespace collapse breaks YAML syntax:
-/// - Key-value pairs: `name:value` → `name: value`
-/// - Nested keys: `config:true` → `config: true`
-/// - Numeric values: `port:8080` → `port: 8080`
-///
-/// # Pattern Detection Rules
-///
-/// **YAML Key-Value**: Word characters followed by colon directly touching non-whitespace
-/// - Pattern: `(?m)^(\s*)([a-zA-Z_][\w-]*):([^\s:])`
-/// - Fix: Insert space after colon
-/// - Example: `name:myapp` → `name: myapp`
-///
-/// # YAML Specification Compliance
-///
-/// YAML 1.2 Specification Section 7.2.2 mandates:
-/// > A key-value pair is denoted by a colon and space (`: `) separator.
-///
-/// The space after the colon is **not optional** — it's required by the spec.
-/// Parsers will reject `key:value` as syntactically invalid.
-///
-/// # Why This Pattern Works
-///
-/// - `(?m)` enables multiline mode (^ matches start of line)
-/// - `^(\s*)` captures leading whitespace (preserves indentation)
-/// - `([a-zA-Z_][\w-]*)` matches valid YAML keys (letters, digits, underscores, hyphens)
-/// - `:([^\s:])` matches colon followed by non-whitespace, non-colon character
-/// - Replacement `$1$2: $3` preserves indentation, key, and adds mandatory space
-///
-/// # Examples
-///
-/// ```rust
-/// let broken = "name:myapp\nversion:1.0\nconfig:\n  port:8080";
-/// let fixed = restore_yaml_spaces(broken);
-/// assert_eq!(fixed, "name: myapp\nversion: 1.0\nconfig:\n  port: 8080");
-/// ```
-///
-/// # Edge Cases Handled
-///
-/// - **URLs**: `https://example.com` → NOT matched (no word chars before `:`)
-/// - **Already spaced**: `key: value` → NOT matched (has space after `:`)
-/// - **Inline colons**: `text: some:value` → Only matches at line start
-/// - **Comments**: `key: value  # comment` → Preserved (no match)
-///
-/// # Performance
-///
-/// - Regex compiled once via `LazyLock` (zero overhead on subsequent calls)
-/// - Single-pass replacement (O(n) time complexity)
-/// - Only applied to `<code>` element content (typically < 1KB strings)
-fn restore_yaml_spaces(content: &str) -> String {
-    use std::sync::LazyLock;
-    use regex::Regex;
-    
-    // Pattern: YAML key-value pairs with missing space after colon
-    // Matches: word characters followed by colon directly touching non-whitespace
-    // Example: "name:value" → "name: value"
-    static YAML_COLON: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?m)^(\s*)([a-zA-Z_][\w-]*):([^\s:])")
-            .expect("YAML_COLON: hardcoded regex is valid")
-    });
-    
-    // Insert space after colon, preserving indentation
-    YAML_COLON.replace_all(content, "$1$2: $3").to_string()
 }
 
 /// Check if a node is inside a <pre> element
@@ -1559,50 +1370,6 @@ fn test_github_trending_exact_html() {
         "Link href must be preserved! Got: '{}'",
         md
     );
-}
-
-#[test]
-fn test_curl_command_spacing_fix() {
-    let converter = create_converter();
-    
-    // Test the exact broken pattern from task #034
-    let html = r#"<pre><code>curl-fsSLhttps://claude.ai/install.sh|bash</code></pre>"#;
-    let md = converter.convert(html).unwrap();
-    
-    // Should fix all spacing issues
-    assert!(md.contains("curl -fsSL"), "Should have space between curl and flags. Got: {}", md);
-    assert!(md.contains("-fsSL https://"), "Should have space between flags and URL. Got: {}", md);
-    assert!(md.contains("| bash"), "Should have space around pipe operator. Got: {}", md);
-    
-    // Full pattern check
-    assert!(
-        md.contains("curl -fsSL https://claude.ai/install.sh | bash"),
-        "Should have fully fixed command. Got: {}",
-        md
-    );
-}
-
-#[test]
-fn test_curl_patterns_from_task() {
-    let converter = create_converter();
-    
-    // Pattern 1: Silent download with follow redirects
-    let html = r#"<pre><code>curl-fsSLhttps://example.com/script.sh</code></pre>"#;
-    let md = converter.convert(html).unwrap();
-    assert!(md.contains("curl -fsSL https://example.com/script.sh"), 
-        "Pattern 1 failed. Got: {}", md);
-    
-    // Pattern 2: Download and pipe to bash
-    let html = r#"<pre><code>curl-fsSLhttps://example.com/install.sh|bash</code></pre>"#;
-    let md = converter.convert(html).unwrap();
-    assert!(md.contains("curl -fsSL https://example.com/install.sh | bash"),
-        "Pattern 2 failed. Got: {}", md);
-    
-    // Pattern 3: wget alternative
-    let html = r#"<pre><code>wget-qO-https://example.com/script.sh|bash</code></pre>"#;
-    let md = converter.convert(html).unwrap();
-    assert!(md.contains("wget -qO- https://example.com/script.sh | bash"),
-        "Pattern 3 (wget) failed. Got: {}", md);
 }
 
 #[test]

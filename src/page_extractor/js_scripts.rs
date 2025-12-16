@@ -241,3 +241,64 @@ pub const LINKS_SCRIPT: &str = r"
         return uniqueLinks;
     })()
 ";
+
+/// JavaScript script to extract document headings with ordinal hierarchy
+///
+/// This script:
+/// 1. Queries all H1-H6 elements in document order
+/// 2. Tracks ordinal counters [h1_count, h2_count, h3_count, h4_count, h5_count, h6_count]
+/// 3. For each heading:
+///    - Increments counter at its level
+///    - Resets all deeper level counters (e.g., new H2 resets H3-H6 counters)
+///    - Builds ordinal array from non-zero counters up to current level
+/// 4. Returns array of heading objects with level, text, id, and ordinal
+///
+/// # Ordinal Algorithm
+///
+/// The ordinal tracking algorithm maintains document hierarchy:
+/// - Each heading level (1-6) has a counter
+/// - When a heading is encountered:
+///   1. Increment its level counter
+///   2. Reset all deeper counters (levels > current)
+///   3. Build ordinal from counters[0..level] excluding zeros
+///
+/// Example progression:
+/// ```
+/// H1 "Introduction"     → counters = [1,0,0,0,0,0] → ordinal = [1]
+/// H2 "Overview"         → counters = [1,1,0,0,0,0] → ordinal = [1,1]
+/// H2 "Details"          → counters = [1,2,0,0,0,0] → ordinal = [1,2]
+/// H3 "Subsection"       → counters = [1,2,1,0,0,0] → ordinal = [1,2,1]
+/// H1 "Next Chapter"     → counters = [2,0,0,0,0,0] → ordinal = [2]
+/// ```
+pub const HEADINGS_SCRIPT: &str = r#"
+    (() => {
+        const headings = [];
+        const ordinalCounters = [0, 0, 0, 0, 0, 0]; // counters for h1-h6
+        
+        document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
+            const level = parseInt(heading.tagName.substring(1));
+            
+            // Increment counter for this level
+            ordinalCounters[level - 1]++;
+            
+            // Reset counters for deeper levels
+            // Example: When we hit H2, reset H3, H4, H5, H6 counters
+            for (let i = level; i < 6; i++) {
+                ordinalCounters[i] = 0;
+            }
+            
+            // Build ordinal path from non-zero counters up to current level
+            // Example: [1, 2, 1, 0, 0, 0] → [1, 2, 1]
+            const ordinal = ordinalCounters.slice(0, level).filter(n => n > 0);
+            
+            headings.push({
+                level: level,
+                text: heading.textContent.trim(),
+                id: heading.id || null,
+                ordinal: ordinal
+            });
+        });
+        
+        return headings;
+    })()
+"#;
