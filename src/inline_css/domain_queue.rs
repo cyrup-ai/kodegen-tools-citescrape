@@ -6,7 +6,6 @@
 
 use dashmap::DashMap;
 use reqwest::Client;
-use reqwest::StatusCode;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -24,6 +23,9 @@ pub enum DownloadError {
     
     #[error("Resource not found (404): {0}")]
     NotFound(String),
+    
+    #[error("HTTP error {status}: {url}")]
+    HttpError { url: String, status: u16 },
 }
 
 /// Request to download a resource
@@ -46,12 +48,12 @@ impl DomainDownloadQueue {
         client: Client,
         rate_rps: Option<f64>,
         user_agent: String,
-        not_found_cache: Arc<DashMap<String, ()>>,
+        http_error_cache: Arc<DashMap<String, u16>>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         
         let worker_handle = tokio::spawn(async move {
-            Self::worker_loop(domain, client, rate_rps, user_agent, not_found_cache, rx).await
+            Self::worker_loop(domain, client, rate_rps, user_agent, http_error_cache, rx).await
         });
         
         Self { tx, worker_handle }
@@ -80,7 +82,7 @@ impl DomainDownloadQueue {
         client: Client,
         rate_rps: Option<f64>,
         user_agent: String,
-        not_found_cache: Arc<DashMap<String, ()>>,
+        http_error_cache: Arc<DashMap<String, u16>>,
         mut rx: mpsc::UnboundedReceiver<DownloadRequest>,
     ) {
         log::debug!("Started download worker for domain: {domain}");
@@ -106,7 +108,7 @@ impl DomainDownloadQueue {
             
             // Download the resource
             log::debug!("Downloading: {url} (domain: {domain})");
-            let result = Self::download_bytes(&client, &url, &user_agent, &not_found_cache).await;
+            let result = Self::download_bytes(&client, &url, &user_agent, &http_error_cache).await;
             
             // Send result back to caller (ignore send errors - caller may have dropped)
             let _ = request.response_tx.send(result);
@@ -120,7 +122,7 @@ impl DomainDownloadQueue {
         client: &Client,
         url: &str,
         user_agent: &str,
-        not_found_cache: &DashMap<String, ()>,
+        http_error_cache: &DashMap<String, u16>,
     ) -> Result<Vec<u8>, DownloadError> {
         let response = client
             .get(url)
@@ -129,18 +131,24 @@ impl DomainDownloadQueue {
             .await
             .map_err(|e| DownloadError::RequestFailed(anyhow::anyhow!("Request failed: {e}")))?;
         
-        // Check for 404 specifically and cache it
-        if response.status() == StatusCode::NOT_FOUND {
-            log::info!("Caching 404 for URL: {}", url);
-            not_found_cache.insert(url.to_string(), ());
-            return Err(DownloadError::NotFound(url.to_string()));
+        let status = response.status();
+        
+        // Cache all 4XX and 5XX errors
+        if status.is_client_error() || status.is_server_error() {
+            log::info!("Caching HTTP {} error for URL: {}", status.as_u16(), url);
+            http_error_cache.insert(url.to_string(), status.as_u16());
+            
+            return Err(DownloadError::HttpError {
+                url: url.to_string(),
+                status: status.as_u16(),
+            });
         }
         
-        // Check for other non-success statuses
-        if !response.status().is_success() {
+        // Check for other non-success statuses (3XX redirects, etc.)
+        if !status.is_success() {
             return Err(DownloadError::RequestFailed(anyhow::anyhow!(
                 "HTTP error {}: {}",
-                response.status(),
+                status,
                 url
             )));
         }
@@ -160,7 +168,7 @@ pub struct DomainQueueManager {
     client: Client,
     rate_rps: Option<f64>,
     user_agent: String,
-    not_found_cache: Arc<DashMap<String, ()>>,
+    http_error_cache: Arc<DashMap<String, u16>>,
 }
 
 impl DomainQueueManager {
@@ -171,16 +179,19 @@ impl DomainQueueManager {
             client,
             rate_rps,
             user_agent,
-            not_found_cache: Arc::new(DashMap::new()),
+            http_error_cache: Arc::new(DashMap::new()),
         }
     }
     
     /// Submit a download request (will route to appropriate domain queue)
     pub async fn submit_download(&self, url: String) -> Result<Vec<u8>, DownloadError> {
-        // Check 404 cache first (before any expensive operations)
-        if self.not_found_cache.contains_key(&url) {
-            log::debug!("Skipping previously 404'd URL: {}", url);
-            return Err(DownloadError::NotFound(url));
+        // Check HTTP error cache first (before any expensive operations)
+        if let Some(status_code) = self.http_error_cache.get(&url) {
+            log::debug!("Skipping previously failed URL (HTTP {}): {}", status_code.value(), url);
+            return Err(DownloadError::HttpError {
+                url: url.clone(),
+                status: *status_code.value(),
+            });
         }
         
         // Extract domain from URL
@@ -197,7 +208,7 @@ impl DomainQueueManager {
                     self.client.clone(),
                     self.rate_rps,
                     self.user_agent.clone(),
-                    Arc::clone(&self.not_found_cache),
+                    Arc::clone(&self.http_error_cache),
                 ))
             })
             .clone();
@@ -214,7 +225,7 @@ impl Clone for DomainQueueManager {
             client: self.client.clone(),
             rate_rps: self.rate_rps,
             user_agent: self.user_agent.clone(),
-            not_found_cache: Arc::clone(&self.not_found_cache),
+            http_error_cache: Arc::clone(&self.http_error_cache),
         }
     }
 }

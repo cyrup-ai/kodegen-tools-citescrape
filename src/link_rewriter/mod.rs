@@ -95,7 +95,7 @@ impl LinkRewriter {
         // 3. Rewrite outbound links in the NEW page's HTML (if any exist locally)
         if !existing_destinations.is_empty() {
             let count = self
-                .rewrite_outbound_links(local_path, &existing_destinations)
+                .rewrite_outbound_links(page_url, local_path, &existing_destinations)
                 .await
                 .context("Failed to rewrite outbound links")?;
             result.outbound_rewritten = count;
@@ -111,7 +111,7 @@ impl LinkRewriter {
 
             let update_futures: Vec<_> = inbound
                 .into_iter()
-                .map(|(_source_url, source_path)| {
+                .map(|(source_url, source_path)| {
                     let sem = self.rewrite_semaphore.clone();
                     let page_url = page_url.clone();
                     let local_path = local_path.clone();
@@ -119,7 +119,7 @@ impl LinkRewriter {
 
                     async move {
                         let _permit = sem.acquire().await.map_err(|e| anyhow!("Semaphore error: {}", e))?;
-                        rewrite_single_link(&source_path, &page_url, &local_path, &index).await
+                        rewrite_single_link(&source_url, &source_path, &page_url, &local_path, &index).await
                     }
                 })
                 .collect();
@@ -150,6 +150,7 @@ impl LinkRewriter {
     /// Rewrite all links in a file that point to known local destinations.
     ///
     /// # Arguments
+    /// * `page_url` - The URL of the page being rewritten (for resolving relative links)
     /// * `file_path` - Path to the HTML file to rewrite
     /// * `destinations` - Set of normalized URLs that have local copies
     ///
@@ -157,6 +158,7 @@ impl LinkRewriter {
     /// Number of links rewritten
     async fn rewrite_outbound_links(
         &self,
+        page_url: &str,
         file_path: &Path,
         destinations: &HashSet<String>,
     ) -> Result<usize> {
@@ -180,7 +182,7 @@ impl LinkRewriter {
             .await
             .context("Failed to read HTML file")?;
 
-        let (rewritten, count) = rewrite_links_in_html(&html, &url_to_relative)?;
+        let (rewritten, count) = rewrite_links_in_html(&html, page_url, &url_to_relative)?;
 
         if count > 0 {
             tokio::fs::write(file_path, rewritten)
@@ -201,6 +203,7 @@ impl LinkRewriter {
 ///
 /// This is used for retroactive inbound link updates.
 async fn rewrite_single_link(
+    source_url: &str,
     source_path: &Path,
     target_url: &str,
     target_local: &Path,
@@ -216,7 +219,7 @@ async fn rewrite_single_link(
     let mut url_map = HashMap::new();
     url_map.insert(normalize_url(target_url), relative);
 
-    let (rewritten, count) = rewrite_links_in_html(&html, &url_map)?;
+    let (rewritten, count) = rewrite_links_in_html(&html, source_url, &url_map)?;
 
     if count > 0 {
         tokio::fs::write(source_path, rewritten)
@@ -241,15 +244,18 @@ fn compute_relative_path(from_file: &Path, to_file: &Path) -> Option<String> {
 /// Core HTML rewriting using lol_html (streaming, efficient).
 ///
 /// Rewrites href attributes on <a> tags when they match URLs in the map.
+/// Resolves relative URLs against base_url before matching.
 ///
 /// # Arguments
 /// * `html` - The HTML content to rewrite
+/// * `base_url` - The URL of the page being rewritten (for resolving relative links)
 /// * `url_to_relative` - Map of normalized URL → relative local path
 ///
 /// # Returns
 /// Tuple of (rewritten HTML, number of links rewritten)
 fn rewrite_links_in_html(
     html: &str,
+    base_url: &str,
     url_to_relative: &HashMap<String, String>,
 ) -> Result<(String, usize)> {
     let mut output = Vec::with_capacity(html.len());
@@ -261,7 +267,18 @@ fn rewrite_links_in_html(
                 // Rewrite <a href="...">
                 element!("a[href]", |el| {
                     if let Some(href) = el.get_attribute("href") {
-                        let normalized = normalize_url(&href);
+                        // Resolve relative URLs against base before normalizing
+                        let absolute_url = if let Ok(base) = url::Url::parse(base_url) {
+                            // Try to resolve href against base (handles both absolute and relative)
+                            match base.join(&href) {
+                                Ok(resolved) => resolved.to_string(),
+                                Err(_) => href.clone(),  // If join fails, use href as-is
+                            }
+                        } else {
+                            href.clone()  // If base URL invalid, use href as-is
+                        };
+                        
+                        let normalized = normalize_url(&absolute_url);
                         if let Some(relative) = url_to_relative.get(&normalized) {
                             el.set_attribute("href", relative)?;
                             rewrite_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -386,7 +403,8 @@ mod tests {
         url_map.insert(normalize_url("https://example.com/page1"), "page1.html".to_string());
         url_map.insert(normalize_url("https://example.com/page2"), "../docs/page2.html".to_string());
 
-        let (rewritten, count) = rewrite_links_in_html(html, &url_map).unwrap();
+        let base_url = "https://example.com/index.html";
+        let (rewritten, count) = rewrite_links_in_html(html, base_url, &url_map).unwrap();
 
         assert_eq!(count, 2);
         assert!(rewritten.contains(r#"href="page1.html""#));
@@ -402,7 +420,8 @@ mod tests {
         let mut url_map = HashMap::new();
         url_map.insert(normalize_url("https://example.com/page"), "local.html".to_string());
 
-        let (rewritten, count) = rewrite_links_in_html(html, &url_map).unwrap();
+        let base_url = "https://example.com/index.html";
+        let (rewritten, count) = rewrite_links_in_html(html, base_url, &url_map).unwrap();
 
         assert_eq!(count, 1);
         assert!(rewritten.contains(r#"href="local.html""#));
@@ -456,7 +475,8 @@ mod tests {
         // Normalized form
         url_map.insert("https://example.com/Page".to_string(), "page.html".to_string());
 
-        let (rewritten, count) = rewrite_links_in_html(html, &url_map).unwrap();
+        let base_url = "https://example.com/index.html";
+        let (rewritten, count) = rewrite_links_in_html(html, base_url, &url_map).unwrap();
 
         assert_eq!(count, 1);
         assert!(rewritten.contains(r#"href="page.html""#));
