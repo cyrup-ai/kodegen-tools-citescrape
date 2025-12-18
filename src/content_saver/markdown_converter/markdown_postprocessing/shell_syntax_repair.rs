@@ -113,6 +113,17 @@ static SPACE_AROUND_REDIRECT_OUT: LazyLock<Regex> = LazyLock::new(|| {
         .expect("SPACE_AROUND_REDIRECT_OUT: hardcoded regex is valid")
 });
 
+// Pattern 11.5: Space around heredoc operator (<<)
+// Matches: cat<<EOF, cat< <EOF, cat < <EOF, cat<< EOF (all variants)
+// Replaces with: cat << EOF (normalized)
+// Note: Applied BEFORE single < to protect heredoc from being split
+static SPACE_AROUND_HEREDOC: LazyLock<Regex> = LazyLock::new(|| {
+    // Match: non-WS, optional spaces, <, optional spaces, <, optional spaces, non-WS
+    // This catches both condensed (<<) and already-split (< <) variants
+    Regex::new(r"(\S)\s*<\s*<\s*(\S)")
+        .expect("SPACE_AROUND_HEREDOC: hardcoded regex is valid")
+});
+
 // Pattern 12: Space around redirect in (<)
 // Matches: word<file
 // Replaces with: word < file
@@ -269,6 +280,9 @@ fn repair_shell_code_block(code: &str) -> String {
     
     // 11. Fix redirect out spacing (>)
     repaired = SPACE_AROUND_REDIRECT_OUT.replace_all(&repaired, "$1 > $2").to_string();
+    
+    // 11.5. Fix heredoc spacing BEFORE single redirect in (<<)
+    repaired = SPACE_AROUND_HEREDOC.replace_all(&repaired, "$1 << $2").to_string();
     
     // 12. Fix redirect in spacing (<)
     repaired = SPACE_AROUND_REDIRECT_IN.replace_all(&repaired, "$1 < $2").to_string();

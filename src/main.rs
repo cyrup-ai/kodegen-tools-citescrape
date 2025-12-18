@@ -23,6 +23,18 @@ impl ShutdownHook for BrowserManagerWrapper {
     }
 }
 
+// Wrapper to impl ShutdownHook for Arc<BrowserPool>
+struct BrowserPoolWrapper(Arc<kodegen_tools_citescrape::BrowserPool>);
+
+impl ShutdownHook for BrowserPoolWrapper {
+    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+        let pool = self.0.clone();
+        Box::pin(async move {
+            pool.shutdown().await
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     ServerBuilder::new()
@@ -36,11 +48,25 @@ async fn main() -> Result<()> {
             let engine_cache = Arc::new(kodegen_tools_citescrape::SearchEngineCache::new());
             let browser_manager = Arc::new(kodegen_tools_citescrape::BrowserManager::new());
 
+            // Create browser pool for pre-warmed Chrome instances
+            let pool_config = kodegen_tools_citescrape::BrowserPoolConfig::default();
+            let browser_pool = kodegen_tools_citescrape::BrowserPool::new(pool_config);
+            if let Err(e) = browser_pool.start().await {
+                log::error!("Failed to start browser pool: {}", e);
+                return Err(anyhow::anyhow!("Failed to start browser pool: {}", e));
+            }
+
             // Create crawl registry (NEW - replaces CrawlSessionManager)
-            let crawl_registry = Arc::new(kodegen_tools_citescrape::CrawlRegistry::new(engine_cache.clone()));
+            let crawl_registry = Arc::new(kodegen_tools_citescrape::CrawlRegistry::new(
+                engine_cache.clone(),
+                browser_pool.clone(),
+            ));
 
             // Register browser manager for shutdown (closes Chrome)
             managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
+
+            // Register browser pool for graceful shutdown
+            managers.register(BrowserPoolWrapper(browser_pool.clone())).await;
 
             // Register tools
             use kodegen_tools_citescrape::*;

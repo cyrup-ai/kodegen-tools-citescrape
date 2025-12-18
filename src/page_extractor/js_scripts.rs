@@ -177,14 +177,9 @@ pub const INTERACTIVE_ELEMENTS_SCRIPT: &str = r#"
         
         const elements = document.querySelectorAll(selector);
         
-        return Array.from(elements).map((el, index) => {
-            // Generate unique data attribute for guaranteed valid selector
-            const uniqueId = `interactive-${index}`;
-            el.setAttribute('data-citescrape-interactive', uniqueId);
-            
+        return Array.from(elements).map((el) => {
             return {
                 element_type: el.tagName.toLowerCase(),
-                selector: `[data-citescrape-interactive="${uniqueId}"]`,
                 text: el.textContent?.trim() || null,
                 url: el.href || null,
                 attributes: Object.fromEntries(

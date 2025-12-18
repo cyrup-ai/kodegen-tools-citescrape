@@ -64,9 +64,13 @@ impl ImUrl {
     /// # Examples
     ///
     /// ```
+    /// # use kodegen_tools_citescrape::imurl::ImUrl;
+    /// # fn main() -> anyhow::Result<()> {
     /// let url = ImUrl::parse("https://example.com/page#section1")?;
     /// let normalized = url.without_fragment()?;
     /// assert_eq!(normalized.as_str(), "https://example.com/page");
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn without_fragment(&self) -> Result<Self> {
         let mut url = (*self.url).clone();

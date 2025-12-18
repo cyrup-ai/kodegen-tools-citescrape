@@ -115,7 +115,7 @@ pub async fn inline_resources_from_info(
     let client = Client::new();
     
     // Create domain queue manager for coordinated downloads
-    let queue_manager = DomainQueueManager::new(client.clone(), rate_rps);
+    let queue_manager = DomainQueueManager::new(client.clone(), rate_rps, config.user_agent.clone());
     
     let html = html_content;
 

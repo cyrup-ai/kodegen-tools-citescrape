@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Main configuration struct for web crawling operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +142,11 @@ pub struct CrawlConfig {
     #[serde(skip)]
     pub(crate) chrome_data_dir: Option<PathBuf>,
 
+    /// Optional browser pool for pre-warmed browser instances
+    /// When set, orchestrator acquires from pool instead of launching fresh browser
+    #[serde(skip)]
+    pub(crate) browser_pool: Option<Arc<crate::browser_pool::BrowserPool>>,
+
     /// Enable gzip compression for saved files (markdown, html, json, screenshots)
     /// When true, files are saved with .gz extension and compressed
     /// When false (default), files are saved uncompressed for easier inspection
@@ -171,6 +177,16 @@ pub struct CrawlConfig {
     ///
     /// **Default**: 1 MB (1_048_576 bytes) - balanced for typical deployments
     pub(crate) compression_threshold_bytes: Option<usize>,
+
+    /// Maximum page retry attempts for transient failures
+    ///
+    /// When a page fails due to timeout, network error, or browser crash,
+    /// it will be retried up to this many times with exponential backoff.
+    ///
+    /// Set to 0 to disable page-level retries (errors become permanent).
+    ///
+    /// Default: 3
+    pub(crate) max_page_retries: Option<u8>,
 }
 
 impl Default for CrawlConfig {
@@ -219,8 +235,10 @@ impl Default for CrawlConfig {
             max_concurrent_pages: Some(10),
             max_concurrent_per_domain: Some(2),
             chrome_data_dir: None,
+            browser_pool: None,
             compress_output: false, // Default to uncompressed for easier inspection
             compression_threshold_bytes: Some(1_048_576), // 1MB default
+            max_page_retries: Some(3),
         }
     }
 }
@@ -249,11 +267,21 @@ impl CrawlConfig {
     /// to the incremental indexing service during crawling.
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
+    /// use kodegen_tools_citescrape::config::CrawlConfig;
+    /// use kodegen_tools_citescrape::search::{IndexingSender, IncrementalIndexingService};
+    /// use kodegen_tools_citescrape::search::engine::SearchEngine;
+    ///
+    /// // Create the indexing service (requires SearchEngine)
+    /// let search_engine = SearchEngine::open("./search_index").await?;
+    /// let (_service, indexing_sender) = IncrementalIndexingService::start(search_engine).await?;
+    ///
+    /// // Attach to config
     /// let config = CrawlConfig::builder()
+    ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
-    ///     .with_indexing_sender(indexing_sender)
-    ///     .build();
+    ///     .build()?
+    ///     .with_indexing_sender(indexing_sender);
     /// ```
     #[must_use]
     pub fn with_indexing_sender(
@@ -279,11 +307,17 @@ impl CrawlConfig {
     ///
     /// # Example
     /// ```rust
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let session_id = "example_session";
     /// let chrome_dir = std::env::temp_dir().join(format!("chrome_{}", session_id));
     /// let config = CrawlConfig::builder()
+    ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
-    ///     .with_chrome_data_dir(chrome_dir)
-    ///     .build();
+    ///     .build()?
+    ///     .with_chrome_data_dir(chrome_dir);
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_chrome_data_dir(mut self, dir: PathBuf) -> Self {
@@ -312,5 +346,37 @@ impl CrawlConfig {
     #[must_use]
     pub fn compression_threshold_bytes(&self) -> usize {
         self.compression_threshold_bytes.unwrap_or(1_048_576)
+    }
+
+    /// Set browser pool for pre-warmed browser instances
+    ///
+    /// When set, the orchestrator will acquire browsers from this pool instead
+    /// of launching fresh browser instances. This eliminates the 2-5 second
+    /// cold-start delay for each crawl.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use kodegen_tools_citescrape::config::CrawlConfig;
+    /// use kodegen_tools_citescrape::BrowserPool;
+    ///
+    /// let pool = BrowserPool::new(Default::default());
+    /// pool.start().await?;
+    ///
+    /// let config = CrawlConfig::builder()
+    ///     .storage_dir("./output")
+    ///     .start_url("https://example.com")
+    ///     .build()?
+    ///     .with_browser_pool(pool);
+    /// ```
+    #[must_use]
+    pub fn with_browser_pool(mut self, pool: Arc<crate::browser_pool::BrowserPool>) -> Self {
+        self.browser_pool = Some(pool);
+        self
+    }
+
+    /// Get the browser pool if configured
+    #[must_use]
+    pub fn browser_pool(&self) -> Option<&Arc<crate::browser_pool::BrowserPool>> {
+        self.browser_pool.as_ref()
     }
 }

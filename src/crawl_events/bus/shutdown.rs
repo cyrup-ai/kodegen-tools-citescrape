@@ -23,10 +23,25 @@ impl CrawlEventBus {
     /// Subscribers should use this with `tokio::select`! to exit gracefully:
     ///
     /// ```rust
-    /// tokio::select! {
-    ///     Ok(event) = rx.recv() => { /* handle event */ }
-    ///     _ = bus.wait_for_shutdown() => { break; }
+    /// # use kodegen_tools_citescrape::crawl_events::CrawlEventBus;
+    /// # tokio_test::block_on(async {
+    /// let bus = CrawlEventBus::new(100);
+    /// let mut rx = bus.subscribe();
+    ///
+    /// // Trigger shutdown in background after a short delay
+    /// let bus_clone = bus.clone();
+    /// tokio::spawn(async move {
+    ///     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    ///     bus_clone.shutdown();
+    /// });
+    ///
+    /// loop {
+    ///     tokio::select! {
+    ///         Ok(event) = rx.recv() => { /* handle event */ }
+    ///         _ = bus.wait_for_shutdown() => { break; }
+    ///     }
     /// }
+    /// # });
     /// ```
     pub async fn wait_for_shutdown(&self) {
         self.shutdown.notified().await;
@@ -59,11 +74,18 @@ impl CrawlEventBus {
     /// # Example
     ///
     /// ```rust
+    /// # use kodegen_tools_citescrape::crawl_events::CrawlEventBus;
+    /// # use kodegen_tools_citescrape::crawl_events::types::ShutdownReason;
+    /// # tokio_test::block_on(async {
+    /// let bus = CrawlEventBus::new(1000);
+    ///
     /// // At end of crawl
     /// bus.shutdown_gracefully(ShutdownReason::CrawlCompleted).await;
     ///
     /// // On error
-    /// bus.shutdown_gracefully(ShutdownReason::Error(e.to_string())).await;
+    /// let error_msg = "connection timeout".to_string();
+    /// bus.shutdown_gracefully(ShutdownReason::Error(error_msg)).await;
+    /// # });
     /// ```
     pub async fn shutdown_gracefully(&self, reason: crate::crawl_events::types::ShutdownReason) {
         log::info!("Beginning graceful shutdown of event bus: {reason:?}");

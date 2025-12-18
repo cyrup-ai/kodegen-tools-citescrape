@@ -49,31 +49,26 @@
 //! ## Example Usage
 //!
 //! ```rust,no_run
-//! use kodegen_citescrape::{
-//!     StartCrawlTool, GetCrawlResultsTool, SearchCrawlResultsTool,
-//!     CrawlSessionManager, SearchEngineCache
+//! use kodegen_tools_citescrape::{
+//!     ScrapeUrlTool, FetchTool, WebSearchTool, CrawlRegistry, SearchEngineCache,
+//!     BrowserPool, BrowserPoolConfig,
 //! };
-//! use kodegen_mcp_schema::Tool;
+//! use std::sync::Arc;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create shared managers (once at startup)
-//! let session_manager = CrawlSessionManager::new();
-//! let engine_cache = SearchEngineCache::new();
+//! // Create shared managers
+//! let engine_cache = Arc::new(SearchEngineCache::new());
+//! let browser_pool = BrowserPool::new(BrowserPoolConfig::default());
+//! browser_pool.start().await?;
+//! let registry = Arc::new(CrawlRegistry::new(engine_cache.clone(), browser_pool.clone()));
 //!
 //! // Create tools
-//! let start_crawl = StartCrawlTool::new(
-//!     session_manager.clone(),
-//!     engine_cache.clone(),
-//! );
-//! let get_results = GetCrawlResultsTool::new(session_manager.clone());
-//! let search = SearchCrawlResultsTool::new(
-//!     session_manager.clone(),
-//!     engine_cache.clone(),
-//! );
+//! let scrape_tool = ScrapeUrlTool::new(registry.clone());
+//! let fetch_tool = FetchTool::new(registry.clone());
+//! let browser_manager = Arc::new(kodegen_tools_citescrape::web_search::BrowserManager::new());
+//! let search_tool = WebSearchTool::new(browser_manager);
 //!
-//! // Tools implement kodegen_mcp_schema::Tool trait for MCP registration
-//! println!("Tool name: {}", StartCrawlTool::name());
-//! println!("Description: {}", StartCrawlTool::description());
+//! // Tools are ready to use
 //! # Ok(())
 //! # }
 //! ```

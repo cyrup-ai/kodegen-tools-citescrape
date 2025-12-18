@@ -28,15 +28,26 @@ type CrawlMap = HashMap<(String, u32), Arc<CrawlSession>>;
 pub struct CrawlRegistry {
     crawls: Arc<Mutex<CrawlMap>>,
     engine_cache: Arc<SearchEngineCache>,
+    /// Shared browser pool for pre-warmed Chrome instances
+    browser_pool: Arc<crate::browser_pool::BrowserPool>,
 }
 
 impl CrawlRegistry {
-    /// Create a new crawl registry
-    pub fn new(engine_cache: Arc<SearchEngineCache>) -> Self {
+    /// Create a new crawl registry with browser pool
+    pub fn new(
+        engine_cache: Arc<SearchEngineCache>,
+        browser_pool: Arc<crate::browser_pool::BrowserPool>,
+    ) -> Self {
         Self {
             crawls: Arc::new(Mutex::new(HashMap::new())),
             engine_cache,
+            browser_pool,
         }
+    }
+
+    /// Get reference to the browser pool
+    pub fn browser_pool(&self) -> &Arc<crate::browser_pool::BrowserPool> {
+        &self.browser_pool
     }
 
     /// Find or create a crawl session
@@ -60,6 +71,7 @@ impl CrawlRegistry {
                 crawl_id,
                 output_dir,
                 self.engine_cache.clone(),
+                self.browser_pool.clone(),
             )
         );
 

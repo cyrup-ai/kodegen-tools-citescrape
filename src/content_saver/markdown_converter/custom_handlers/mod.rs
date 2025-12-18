@@ -60,6 +60,14 @@ pub fn create_converter() -> HtmlToMarkdown {
         .add_handler(vec!["ul"], ul_handler)
         .add_handler(vec!["li"], li_handler)
         
+        // Table handlers - MUST be registered to override htmd defaults
+        .add_handler(vec!["table"], table_handler)
+        .add_handler(vec!["thead"], thead_handler)
+        .add_handler(vec!["tbody"], tbody_handler)
+        .add_handler(vec!["tr"], tr_handler)
+        .add_handler(vec!["th"], th_handler)
+        .add_handler(vec!["td"], td_handler)
+        
         // Fallback for all other inline elements
         // This ensures text is NEVER lost
         .add_handler(inline_elements, inline_element_handler)
@@ -93,7 +101,7 @@ fn heading_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerR
     use markup5ever_rcdom::NodeData;
     
     // Determine heading level from tag name
-    let level = if let NodeData::Element { ref name, .. } = element.node.data {
+    let level = if let NodeData::Element { name, .. } = &element.node.data {
         match &*name.local {
             "h1" => 1,
             "h2" => 2,
@@ -145,7 +153,7 @@ fn pre_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResul
         .borrow()
         .iter()
         .any(|child| {
-            if let NodeData::Element { ref name, .. } = child.data {
+            if let NodeData::Element { name, .. } = &child.data {
                 &*name.local == "code"
             } else {
                 false
@@ -291,30 +299,41 @@ fn link_handler(_handlers: &dyn Handlers, element: Element) -> Option<HandlerRes
     let text = extract_raw_text(element.node);
     let text = text.trim();
 
+    // DIAGNOSTIC: Log what we extracted for debugging missing link text issues
+    tracing::debug!(
+        "link_handler: href={:?}, extracted_text={:?}, is_meaningful={}",
+        href,
+        text,
+        is_meaningful_link_text(text)
+    );
+
     // Determine final link text with robust fallback chain
     let link_text = if is_meaningful_link_text(text) {
         // Text is meaningful, use it
         text.to_string()
     } else {
-        // Text is empty or meaningless, try fallbacks
+        // Text is empty or meaningless, try attribute fallbacks
         get_attr(element.attrs, "aria-label")
             .filter(|s| is_meaningful_link_text(s))
             .or_else(|| get_attr(element.attrs, "title").filter(|s| is_meaningful_link_text(s)))
             .or_else(|| get_attr(element.attrs, "alt").filter(|s| is_meaningful_link_text(s)))
-            .unwrap_or_else(|| clean_url_for_display(&href))
+            .or_else(|| {
+                // Try cleaned URL for display
+                let cleaned = clean_url_for_display(&href);
+                if is_meaningful_link_text(&cleaned) {
+                    Some(cleaned)
+                } else {
+                    // ✅ ULTIMATE FALLBACK: Use raw href as link text
+                    // Better to have [/api/v1/users](/api/v1/users) than lose the link
+                    None
+                }
+            })
+            .unwrap_or_else(|| href.clone())  // ← Use href itself as last resort
     };
 
-    // Final validation: if link_text is STILL not meaningful, skip the link
-    if !is_meaningful_link_text(&link_text) {
-        // This should rarely happen with the improved clean_url_for_display,
-        // but if it does, return empty to skip the link entirely
-        tracing::warn!(
-            "Skipping link with no meaningful text: href={}, extracted_text={:?}",
-            href,
-            text
-        );
-        return Some(HandlerResult::from(String::new()));
-    }
+    // ✅ REMOVED: Final validation that returns empty string
+    // Philosophy: ALWAYS emit a link structure for valid hrefs
+    // It's better to have redundant [url](url) than silently lose links
 
     // Get optional title for markdown link (only if different from link text)
     let title = get_attr(element.attrs, "title");
@@ -443,14 +462,32 @@ fn span_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResu
 /// Uses walk_children to preserve nested elements like links
 fn strong_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
     // Use handler pipeline to properly process nested elements (including links)
-    let result = handlers.walk_children(element.node);
-    let content = result.content.trim();
+    let content = handlers.walk_children(element.node).content;
     
     if content.is_empty() {
         return None;
     }
     
-    Some(HandlerResult::from(format!("**{}**", content)))
+    // Calculate whitespace bounds to preserve spacing outside markers
+    // This matches htmd's emphasis_handler architecture
+    let leading_space = content.len() - content.trim_start().len();
+    let trailing_space = content.len() - content.trim_end().len();
+    let trimmed = content.trim();
+    
+    if trimmed.is_empty() {
+        return None;
+    }
+    
+    // Reconstruct: leading_ws + ** + content + ** + trailing_ws
+    // Result: ` **content** ` (spaces OUTSIDE markers, not inside)
+    let result = format!(
+        "{}**{}**{}",
+        &content[..leading_space],
+        trimmed,
+        &content[content.len() - trailing_space..]
+    );
+    
+    Some(HandlerResult::from(result))
 }
 
 /// Handle <em> and <i> tags - italic text
@@ -538,6 +575,220 @@ fn ul_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult
     Some(HandlerResult::from(format!("\n\n{}\n\n", output)))
 }
 
+// === Table Handlers ===
+
+/// Handle `<table>` elements - construct proper markdown tables
+///
+/// This handler walks the table structure to extract:
+/// - Header row from `<thead>` (if present)
+/// - Data rows from `<tbody>` (or direct `<tr>` children)
+/// - Generates proper markdown table format with separator row
+fn table_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    use markup5ever_rcdom::NodeData;
+    
+    let mut header_row: Option<Vec<String>> = None;
+    let mut data_rows: Vec<Vec<String>> = Vec::new();
+    
+    // Walk through table children to find thead and tbody
+    for child in element.node.children.borrow().iter() {
+        if let NodeData::Element { name, .. } = &child.data {
+            match &*name.local {
+                "thead" => {
+                    // Extract header row from thead
+                    header_row = extract_table_header(handlers, child);
+                }
+                "tbody" => {
+                    // Extract data rows from tbody
+                    data_rows.extend(extract_table_rows(handlers, child));
+                }
+                "tr" => {
+                    // Direct <tr> child (table without tbody)
+                    if let Some(row) = extract_single_row(handlers, child) {
+                        // If no header yet and this looks like a header row, use it
+                        if header_row.is_none() && is_header_row(child) {
+                            header_row = Some(row);
+                        } else {
+                            data_rows.push(row);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    // If we have no rows at all, skip the table
+    if data_rows.is_empty() && header_row.is_none() {
+        return None;
+    }
+    
+    // Build markdown table
+    let mut output = String::from("\n\n");
+    
+    // Write header row (or create a generic one if missing)
+    let headers = header_row.unwrap_or_else(|| {
+        // Generate generic headers based on column count
+        let col_count = data_rows.first().map(|r| r.len()).unwrap_or(2);
+        (1..=col_count).map(|i| format!("Column {}", i)).collect()
+    });
+    
+    if !headers.is_empty() {
+        output.push_str("| ");
+        output.push_str(&headers.join(" | "));
+        output.push_str(" |\n");
+        
+        // Write separator row
+        output.push('|');
+        for _ in 0..headers.len() {
+            output.push_str("---|");
+        }
+        output.push('\n');
+    }
+    
+    // Write data rows
+    for row in data_rows {
+        if !row.is_empty() {
+            output.push_str("| ");
+            output.push_str(&row.join(" | "));
+            output.push_str(" |\n");
+        }
+    }
+    
+    output.push('\n');
+    
+    Some(HandlerResult::from(output))
+}
+
+/// Extract header row from `<thead>` element
+fn extract_table_header(handlers: &dyn Handlers, thead_node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Option<Vec<String>> {
+    use markup5ever_rcdom::NodeData;
+    
+    // Find the <tr> inside thead
+    for child in thead_node.children.borrow().iter() {
+        if let NodeData::Element { name, .. } = &child.data
+            && &*name.local == "tr"
+        {
+            return extract_header_row_cells(handlers, child);
+        }
+    }
+    None
+}
+
+/// Extract header cells from a `<tr>` containing `<th>` elements
+fn extract_header_row_cells(handlers: &dyn Handlers, tr_node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Option<Vec<String>> {
+    use markup5ever_rcdom::NodeData;
+    
+    let mut cells = Vec::new();
+    
+    for child in tr_node.children.borrow().iter() {
+        if let NodeData::Element { name, .. } = &child.data
+            && &*name.local == "th"
+        {
+            // Extract text from <th> using handlers to process nested elements
+            let result = handlers.walk_children(child);
+            let text = result.content.trim().to_string();
+            cells.push(text);
+        }
+    }
+    
+    if cells.is_empty() {
+        None
+    } else {
+        Some(cells)
+    }
+}
+
+/// Extract data rows from `<tbody>` element
+fn extract_table_rows(handlers: &dyn Handlers, tbody_node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Vec<Vec<String>> {
+    use markup5ever_rcdom::NodeData;
+    
+    let mut rows = Vec::new();
+    
+    for child in tbody_node.children.borrow().iter() {
+        if let NodeData::Element { name, .. } = &child.data
+            && &*name.local == "tr"
+            && let Some(row) = extract_single_row(handlers, child)
+        {
+            rows.push(row);
+        }
+    }
+    
+    rows
+}
+
+/// Extract cells from a single `<tr>` element
+fn extract_single_row(handlers: &dyn Handlers, tr_node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Option<Vec<String>> {
+    use markup5ever_rcdom::NodeData;
+    
+    let mut cells = Vec::new();
+    
+    for child in tr_node.children.borrow().iter() {
+        if let NodeData::Element { name, .. } = &child.data
+            && (&*name.local == "td" || &*name.local == "th")
+        {
+            // Extract text from cell using handlers to process nested elements
+            let result = handlers.walk_children(child);
+            let text = result.content.trim().to_string();
+            cells.push(text);
+        }
+    }
+    
+    if cells.is_empty() {
+        None
+    } else {
+        Some(cells)
+    }
+}
+
+/// Check if a `<tr>` element contains `<th>` cells (making it a header row)
+fn is_header_row(tr_node: &std::rc::Rc<markup5ever_rcdom::Node>) -> bool {
+    use markup5ever_rcdom::NodeData;
+    
+    for child in tr_node.children.borrow().iter() {
+        if let NodeData::Element { name, .. } = &child.data
+            && &*name.local == "th"
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Handle `<thead>` elements - suppress default output since table_handler processes it
+fn thead_handler(_handlers: &dyn Handlers, _element: Element) -> Option<HandlerResult> {
+    // Return empty to suppress default handling
+    // The table_handler will process thead content
+    Some(HandlerResult::from(String::new()))
+}
+
+/// Handle `<tbody>` elements - suppress default output since table_handler processes it
+fn tbody_handler(_handlers: &dyn Handlers, _element: Element) -> Option<HandlerResult> {
+    // Return empty to suppress default handling
+    // The table_handler will process tbody content
+    Some(HandlerResult::from(String::new()))
+}
+
+/// Handle `<tr>` elements - suppress default output since table_handler processes it
+fn tr_handler(_handlers: &dyn Handlers, _element: Element) -> Option<HandlerResult> {
+    // Return empty to suppress default handling
+    // The table_handler will process tr content
+    Some(HandlerResult::from(String::new()))
+}
+
+/// Handle `<th>` elements - suppress default output since table_handler processes it
+fn th_handler(_handlers: &dyn Handlers, _element: Element) -> Option<HandlerResult> {
+    // Return empty to suppress default handling
+    // The table_handler will process th content
+    Some(HandlerResult::from(String::new()))
+}
+
+/// Handle `<td>` elements - suppress default output since table_handler processes it
+fn td_handler(_handlers: &dyn Handlers, _element: Element) -> Option<HandlerResult> {
+    // Return empty to suppress default handling
+    // The table_handler will process td content
+    Some(HandlerResult::from(String::new()))
+}
+
 // === Helper Functions ===
 
 /// Extract raw text content from a node tree, preserving all whitespace
@@ -549,10 +800,48 @@ fn extract_raw_text(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> String {
 
     match &node.data {
         NodeData::Text { contents } => {
+            let content = contents.borrow();
+            // ✅ ADD DEBUG LOGGING
+            if !content.is_empty() {
+                tracing::trace!("extract_raw_text: Found text node: {:?}", &content[..content.len().min(50)]);
+            }
             // Preserve text exactly as-is (including angle brackets from decoded entities)
-            text.push_str(&contents.borrow());
+            text.push_str(&content);
         }
-        NodeData::Element { .. } | NodeData::Document | NodeData::Doctype { .. } => {
+        NodeData::Element { name, .. } => {
+            // ✅ ADD DEBUG LOGGING for element traversal
+            tracing::trace!("extract_raw_text: Processing element: {}", &name.local);
+            
+            // Recursively process all children with intelligent spacing
+            for (i, child) in node.children.borrow().iter().enumerate() {
+                let child_text = extract_raw_text(child);
+                
+                // Add space between sibling inline elements if needed
+                if i > 0 && !child_text.is_empty() && !text.is_empty() {
+                    // Check if we need to add space between elements
+                    let last_char = text.chars().last();
+                    let first_char = child_text.chars().next();
+                    
+                    // Add space if:
+                    // - Previous text doesn't end with whitespace
+                    // - Current text doesn't start with whitespace
+                    // - NOT transitioning between adjacent punctuation
+                    if let (Some(last), Some(first)) = (last_char, first_char) {
+                        let needs_space = 
+                            !last.is_whitespace() 
+                            && !first.is_whitespace()
+                            && !is_punctuation_pair(last, first);
+                        
+                        if needs_space {
+                            text.push(' ');
+                        }
+                    }
+                }
+                
+                text.push_str(&child_text);
+            }
+        }
+        NodeData::Document | NodeData::Doctype { .. } => {
             // Recursively process all children with intelligent spacing
             for (i, child) in node.children.borrow().iter().enumerate() {
                 let child_text = extract_raw_text(child);
@@ -627,7 +916,7 @@ fn is_inside_pre(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> bool {
 
     while let Some(weak_parent) = current {
         if let Some(parent) = weak_parent.upgrade() {
-            if let NodeData::Element { ref name, .. } = parent.data
+            if let NodeData::Element { name, .. } = &parent.data
                 && &*name.local == "pre"
             {
                 return true;
@@ -648,7 +937,7 @@ fn find_source_url(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Option<String
 
     // Check direct children only (not recursive - source elements are direct children)
     for child in node.children.borrow().iter() {
-        if let NodeData::Element { ref name, ref attrs, .. } = child.data {
+        if let NodeData::Element { name, attrs, .. } = &child.data {
             // Check if this is a <source> element
             if &*name.local == "source" {
                 // Extract src attribute
@@ -723,7 +1012,7 @@ fn get_language_from_parent(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Opti
     let weak_parent = weak_parent?;
     let parent_rc = weak_parent.upgrade()?;
     
-    if let NodeData::Element { ref attrs, .. } = parent_rc.data {
+    if let NodeData::Element { attrs, .. } = &parent_rc.data {
         // Check parent's class attribute
         for attr in attrs.borrow().iter() {
             if &*attr.name.local == "class" {
@@ -1455,5 +1744,165 @@ fn test_nested_list_indentation() {
     assert!(
         lines.iter().any(|l| l.starts_with("- Set environment variables")), 
         "Expected second parent list item without indentation. Got:\n{}", result
+    );
+}
+
+#[test]
+fn test_link_with_no_extractable_text() {
+    let converter = create_converter();
+    
+    // Case 1: Link with nested empty spans
+    let html = r#"<a href="/guide"><span></span></a>"#;
+    let md = converter.convert(html).unwrap();
+    
+    // Should use href as fallback, NOT return empty string
+    assert!(md.contains("["), "Link structure must be preserved");
+    assert!(md.contains("](/guide)"), "Link URL must be preserved");
+    assert!(!md.trim().is_empty(), "Must not return empty string for valid links");
+    
+    // Case 2: Link with only whitespace
+    let html = r#"<a href="/api">   </a>"#;
+    let md = converter.convert(html).unwrap();
+    
+    assert!(md.contains("["), "Link structure must be preserved");
+    assert!(md.contains("](/api)"), "Link URL must be preserved");
+    
+    // Case 3: Link with nested structure but no text
+    let html = r#"<a href="/console"><span><span></span></span></a>"#;
+    let md = converter.convert(html).unwrap();
+    
+    assert!(md.contains("["), "Link structure must be preserved");
+    assert!(md.contains("](/console)"), "Link URL must be preserved");
+}
+
+#[test]
+fn test_link_always_produces_markdown_structure() {
+    let converter = create_converter();
+    
+    // Every valid href should produce [text](url) format
+    let test_cases = vec![
+        (r#"<a href="/guide">Guide</a>"#, "[Guide](/guide)"),
+        (r#"<a href="/guide"></a>"#, "(/guide)"),  // Will contain href in some form
+        (r#"<a href="/guide">   </a>"#, "(/guide)"),  // Will contain href in some form
+        (r#"<a href="/api/v1/users"></a>"#, "(/api/v1/users)"),  // Will contain href
+    ];
+    
+    for (html, expected_contains) in test_cases {
+        let md = converter.convert(html).unwrap();
+        assert!(
+            md.contains(expected_contains),
+            "HTML '{}' should produce markdown containing '{}', got: '{}'",
+            html, expected_contains, md
+        );
+        assert!(!md.trim().is_empty(), "Must never return empty for valid href");
+    }
+}
+
+#[test]
+fn test_table_with_thead_proper_headers() {
+    let converter = create_converter();
+    
+    // Test the exact structure from code.claude.com that was failing
+    let html = r#"<table>
+  <thead>
+    <tr>
+      <th>File</th>
+      <th>Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>~/.claude/settings.json</code></td>
+      <td>User settings (permissions, hooks, model overrides)</td>
+    </tr>
+    <tr>
+      <td><code>.claude/settings.json</code></td>
+      <td>Project settings (checked into source control)</td>
+    </tr>
+  </tbody>
+</table>"#;
+    
+    let md = converter.convert(html).unwrap();
+    
+    // MUST have proper table header row
+    assert!(
+        md.contains("| File | Purpose |"),
+        "Table must have proper header row '| File | Purpose |'. Got: {}",
+        md
+    );
+    
+    // MUST have separator row
+    assert!(
+        md.contains("|---|---|"),
+        "Table must have separator row '|---|---|'. Got: {}",
+        md
+    );
+    
+    // MUST NOT have header text as plain text above table
+    assert!(
+        !md.contains("File Purpose\n\n|") && !md.contains("FilePurpose"),
+        "Table headers must NOT appear as plain text above the table. Got: {}",
+        md
+    );
+    
+    // MUST preserve inline code in cells
+    assert!(
+        md.contains("`~/.claude/settings.json`"),
+        "Table must preserve inline code formatting. Got: {}",
+        md
+    );
+    
+    // MUST have data rows
+    assert!(
+        md.contains("User settings"),
+        "Table must contain data rows. Got: {}",
+        md
+    );
+}
+
+#[test]
+fn test_table_without_thead() {
+    let converter = create_converter();
+    
+    // Test table without explicit thead - should still work
+    let html = r#"<table>
+  <tr>
+    <th>Column 1</th>
+    <th>Column 2</th>
+  </tr>
+  <tr>
+    <td>Data 1</td>
+    <td>Data 2</td>
+  </tr>
+</table>"#;
+    
+    let md = converter.convert(html).unwrap();
+    
+    // Should detect th elements and use as header
+    assert!(
+        md.contains("| Column 1 | Column 2 |"),
+        "Should detect <th> elements as headers. Got: {}",
+        md
+    );
+    
+    assert!(
+        md.contains("|---|---|"),
+        "Should have separator row. Got: {}",
+        md
+    );
+}
+
+#[test]
+fn test_empty_table() {
+    let converter = create_converter();
+    
+    let html = r#"<table></table>"#;
+    let md = converter.convert(html).unwrap();
+    
+    // Empty table should produce minimal output
+    assert!(
+        md.trim().is_empty() || md.trim().len() < 10,
+        "Empty table should produce minimal/no output. Got: '{}'",
+        md
     );
 }

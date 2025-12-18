@@ -11,6 +11,7 @@
 //! Markdown table has correct structure even if content is repeated.
 
 use anyhow::Result;
+use htmlentity::entity::{decode, ICodedDataTrait};
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use std::collections::HashMap;
@@ -46,9 +47,19 @@ static THEAD_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
         .expect("BUG: hardcoded selector 'thead' is statically valid")
 });
 
+static CAPTION_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("caption")
+        .expect("BUG: hardcoded selector 'caption' is statically valid")
+});
+
 static TABLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<table[^>]*>.*?</table>")
         .expect("BUG: hardcoded table regex is statically valid")
+});
+
+static PRE_TABLE_TEXT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(<span[^>]*data-as="p"[^>]*>)(.*?)(</span>)\s*(<(?:div[^>]*>)*\s*<table)"#)
+        .expect("BUG: pre-table text regex is valid")
 });
 
 // ============================================================================
@@ -108,6 +119,207 @@ enum Alignment {
 // ============================================================================
 // Main Entry Point
 // ============================================================================
+
+/// Fix text elements before tables by ensuring proper paragraph wrapping
+///
+/// This function detects text elements (specifically `<span data-as="p">` elements)
+/// that immediately precede tables and wraps them in proper `<p>` tags with appropriate
+/// spacing to prevent them from being merged with table headers during markdown conversion.
+///
+/// # Arguments
+/// * `html` - HTML string that may contain tables with preceding text elements
+///
+/// # Returns
+/// * `Ok(String)` - HTML with proper element separation before tables
+/// * `Err(anyhow::Error)` - If processing fails
+pub fn fix_pre_table_text(html: &str) -> Result<String> {
+    let result = PRE_TABLE_TEXT.replace_all(html, |caps: &regex::Captures| {
+        let text_content = &caps[2];
+        let table_start = &caps[4];
+        
+        // Convert span to paragraph with double newline before table
+        format!("<p>{}</p>\n\n{}", text_content.trim(), table_start)
+    });
+    
+    Ok(result.to_string())
+}
+
+/// Inject preceding text elements as table headers
+///
+/// This function detects text elements (p, h1-h6, div) that immediately precede tables
+/// and appear to be table headers based on word count matching column count. It injects
+/// these as proper `<thead><tr><th>` elements into the table and removes the preceding
+/// text element.
+///
+/// # Detection Criteria
+/// A preceding element is treated as table headers if ALL conditions are met:
+/// 1. Table has NO `<thead>` elements AND NO `<th>` elements
+/// 2. There is an IMMEDIATE preceding sibling element
+/// 3. Element type is `<p>`, `<h1>-<h6>`, or `<div>`
+/// 4. Element contains 2-5 words (split on whitespace, filtered for non-empty)
+/// 5. Word count EXACTLY matches the table's column count (from first row)
+///
+/// # Arguments
+/// * `html` - HTML string that may contain tables with preceding header text
+///
+/// # Returns
+/// * `Ok(String)` - HTML with headers injected into tables
+/// * `Err(anyhow::Error)` - If processing fails
+///
+/// # Examples
+///
+/// **Before:**
+/// ```html
+/// <p>File Purpose</p>
+/// <table>
+///   <tr><td>~/.claude/settings.json</td><td>User settings...</td></tr>
+/// </table>
+/// ```
+///
+/// **After:**
+/// ```html
+/// <table>
+///   <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+///   <tbody>
+///     <tr><td>~/.claude/settings.json</td><td>User settings...</td></tr>
+///   </tbody>
+/// </table>
+/// ```
+pub fn inject_preceding_headers(html: &str) -> Result<String> {
+    // Strategy: Parse with scraper to analyze, then use string manipulation for replacement
+    // This avoids DOM mutation complexity while leveraging scraper's analysis capabilities
+    
+    let document = Html::parse_document(html);
+    let mut modifications: Vec<(usize, usize, String)> = Vec::new();
+    
+    // Find all table elements
+    for table in document.select(&TABLE_SELECTOR) {
+        // Check if table already has headers
+        let has_thead = table.select(&THEAD_SELECTOR).next().is_some();
+        let has_th = table.select(&TH_SELECTOR).next().is_some();
+        
+        if has_thead || has_th {
+            continue;
+        }
+        
+        // Count table columns (from first row)
+        let first_row = table.select(&TR_SELECTOR).next();
+        let column_count = match first_row {
+            Some(row) => row.select(&CELL_SELECTOR).count(),
+            None => continue,
+        };
+        
+        if column_count == 0 {
+            continue;
+        }
+        
+        // Try to find preceding text element by searching backwards in HTML
+        // Get the table's HTML to find its position
+        let table_html = table.html();
+        
+        // Find where this table appears in the source HTML
+        let table_pos = match html.find(&table_html) {
+            Some(pos) => pos,
+            None => continue,
+        };
+        
+        // Look backwards for a text element
+        let html_before = &html[..table_pos];
+        
+        // Try to match any of: </p>, </h1>, </h2>, </h3>, </h4>, </h5>, </h6>, </div>
+        // followed by optional whitespace before the table
+        let tag_patterns = ["</p>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</div>"];
+        
+        let mut found_preceding: Option<(usize, usize, String)> = None;
+        
+        for tag_close in &tag_patterns {
+            if let Some(close_pos) = html_before.rfind(tag_close) {
+                // Check if this is immediately before the table (with optional whitespace)
+                let between = &html[close_pos + tag_close.len()..table_pos];
+                if !between.trim().is_empty() {
+                    continue;
+                }
+                
+                // Extract the tag name
+                let tag_name = &tag_close[2..tag_close.len()-1]; // Remove </ and >
+                let open_tag = format!("<{}", tag_name);
+                
+                // Find the opening tag
+                let search_start = close_pos.saturating_sub(1000); // Look back up to 1000 chars
+                let search_text = &html[search_start..close_pos];
+                
+                if let Some(rel_open_pos) = search_text.rfind(&open_tag) {
+                    let open_pos = search_start + rel_open_pos;
+                    
+                    // Find where the opening tag ends
+                    let tag_content_start = match html[open_pos..].find('>') {
+                        Some(pos) => open_pos + pos + 1,
+                        None => continue,
+                    };
+                    
+                    // Extract text content
+                    let text_content = &html[tag_content_start..close_pos];
+                    
+                    // Count words
+                    let words: Vec<&str> = text_content.split_whitespace()
+                        .filter(|w| !w.is_empty())
+                        .collect();
+                    let word_count = words.len();
+                    
+                    // Validate word count (2-5 is reasonable for table headers)
+                    if !(2..=5).contains(&word_count) {
+                        continue;
+                    }
+                    
+                    // Check if word count matches column count
+                    if word_count != column_count {
+                        continue;
+                    }
+                    
+                    // Build thead HTML
+                    let mut thead_html = String::from("<thead><tr>");
+                    for word in words {
+                        thead_html.push_str("<th>");
+                        // Simple HTML escaping
+                        let escaped = word
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;")
+                            .replace('"', "&quot;");
+                        thead_html.push_str(&escaped);
+                        thead_html.push_str("</th>");
+                    }
+                    thead_html.push_str("</tr></thead>");
+                    
+                    // Record modification: remove preceding element, inject thead
+                    found_preceding = Some((open_pos, close_pos + tag_close.len(), thead_html));
+                    break;
+                }
+            }
+        }
+        
+        if let Some((remove_start, remove_end, thead_html)) = found_preceding {
+            // Find the table opening tag position
+            let table_open_end = match html[table_pos..].find('>') {
+                Some(pos) => table_pos + pos + 1,
+                None => continue,
+            };
+            
+            modifications.push((remove_start, remove_end, String::new())); // Remove preceding
+            modifications.push((table_open_end, table_open_end, thead_html)); // Insert thead
+        }
+    }
+    
+    // Apply modifications in reverse order to maintain positions
+    modifications.sort_by(|a, b| b.0.cmp(&a.0));
+    
+    let mut result = html.to_string();
+    for (start, end, replacement) in modifications {
+        result.replace_range(start..end, &replacement);
+    }
+    
+    Ok(result)
+}
 
 /// Preprocess all tables in HTML
 ///
@@ -229,46 +441,266 @@ fn extract_table_text(table: &ElementRef) -> String {
         .join(" ")
 }
 
+/// Extract caption text from table
+///
+/// Captions should be placed as regular text BEFORE the markdown table,
+/// not embedded as a table cell.
+///
+/// # Arguments
+/// * `table` - Table element to extract caption from
+///
+/// # Returns
+/// * `Some(String)` - Caption text if found
+/// * `None` - No caption element found
+fn extract_table_caption(table: &ElementRef) -> Option<String> {
+    table.select(&CAPTION_SELECTOR)
+        .next()
+        .map(|caption| {
+            caption.text()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// Extract descriptive header rows from table
+///
+/// Descriptive headers are rows in `<thead>` where a single cell (or cells that
+/// together) span the entire table width. These are not actual column headers
+/// but explanatory text that should be placed BEFORE the table in markdown.
+///
+/// # Detection Logic
+/// A row is considered descriptive if:
+/// 1. It's in the `<thead>` section
+/// 2. It has a single cell with `colspan >= max_cols`, OR
+/// 3. All cells together sum to exactly `max_cols` but there's only 1-2 cells total
+///    (indicating a full-width description split across cells)
+///
+/// # Arguments
+/// * `table` - Table element to analyze
+/// * `max_cols` - Maximum number of columns in the table
+///
+/// # Returns
+/// * `Vec<String>` - List of descriptive text strings (empty if none found)
+fn extract_descriptive_headers(table: &ElementRef, max_cols: usize) -> Vec<String> {
+    let mut descriptive_texts = Vec::new();
+    
+    // Find thead section
+    let thead = match table.select(&THEAD_SELECTOR).next() {
+        Some(t) => t,
+        None => return descriptive_texts,
+    };
+    
+    // Examine each row in thead
+    for row in thead.select(&TR_SELECTOR) {
+        let cells: Vec<ElementRef> = row.select(&CELL_SELECTOR).collect();
+        
+        if cells.is_empty() {
+            continue;
+        }
+        
+        // Calculate total colspan for this row
+        let total_colspan: usize = cells.iter()
+            .map(|cell| {
+                cell.value().attr("colspan")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(1)
+            })
+            .sum();
+        
+        // Check if this is a descriptive row
+        let is_descriptive = if cells.len() == 1 {
+            // Single cell spanning full width or more
+            total_colspan >= max_cols
+        } else {
+            // Two cells that together span full width (unusual but possible)
+            // Multiple cells = actual header row
+            cells.len() <= 2 && total_colspan >= max_cols
+        };
+        
+        if is_descriptive {
+            // Extract text from all cells
+            let text = cells.iter()
+                .flat_map(|cell| {
+                    cell.text()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            
+            if !text.is_empty() {
+                descriptive_texts.push(text);
+            }
+        }
+    }
+    
+    descriptive_texts
+}
+
+/// Identify the indices of descriptive header rows in the table
+///
+/// Returns the 0-based indices of rows (across the entire table, not just thead)
+/// that should be skipped during grid parsing because they're descriptive text.
+///
+/// # Arguments
+/// * `table` - Table element to analyze
+/// * `max_cols` - Maximum number of columns in the table
+///
+/// # Returns
+/// * `HashSet<usize>` - Set of row indices to skip (empty if none)
+fn identify_descriptive_row_indices(
+    table: &ElementRef, 
+    max_cols: usize
+) -> std::collections::HashSet<usize> {
+    use std::collections::HashSet;
+    
+    let mut skip_indices = HashSet::new();
+    
+    // Find thead section
+    let thead = match table.select(&THEAD_SELECTOR).next() {
+        Some(t) => t,
+        None => return skip_indices,
+    };
+    
+    // Get all rows in the table (for global indexing)
+    let all_rows: Vec<_> = table.select(&TR_SELECTOR).collect();
+    
+    // Get rows in thead (for analysis)
+    let thead_rows: Vec<_> = thead.select(&TR_SELECTOR).collect();
+    
+    // Analyze each thead row
+    for thead_row in &thead_rows {
+        let cells: Vec<_> = thead_row.select(&CELL_SELECTOR).collect();
+        
+        if cells.is_empty() {
+            continue;
+        }
+        
+        let total_colspan: usize = cells.iter()
+            .map(|cell| {
+                cell.value().attr("colspan")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(1)
+            })
+            .sum();
+        
+        let is_descriptive = if cells.len() == 1 {
+            total_colspan >= max_cols
+        } else {
+            cells.len() <= 2 && total_colspan >= max_cols
+        };
+        
+        if is_descriptive {
+            // Find this row's index in the all_rows list
+            if let Some(global_idx) = all_rows.iter().position(|r| {
+                std::ptr::eq(r.value(), thead_row.value())
+            }) {
+                skip_indices.insert(global_idx);
+            }
+        }
+    }
+    
+    skip_indices
+}
+
 // ============================================================================
 // Data Table Normalization
 // ============================================================================
 
-/// Normalize data table by expanding colspan/rowspan
+/// Normalize data table by expanding colspan/rowspan and extracting descriptive elements
 ///
-/// This function:
-/// 1. Parses the table into a 2D grid
-/// 2. Expands cells with colspan/rowspan by duplicating content
-/// 3. Rebuilds clean HTML without colspan/rowspan attributes
+/// This function now:
+/// 1. Extracts `<caption>` elements as text before the table
+/// 2. Identifies and extracts descriptive header rows (full-width th cells)
+/// 3. Parses the remaining table into a grid (skipping descriptive rows)
+/// 4. Builds output as: descriptive text + "\n\n" + normalized table HTML
+///
+/// # Arguments
+/// * `table` - Table element to normalize
+///
+/// # Returns
+/// * `Ok(String)` - Normalized table with descriptive text placed before it
+/// * `Err(anyhow::Error)` - If normalization fails
 fn normalize_data_table(table: &ElementRef) -> Result<String> {
-    // Parse table into grid with colspan/rowspan expansion
-    let grid = parse_table_to_grid(table)?;
-    
-    if grid.is_empty() {
+    // Step 1: Calculate max columns (needed for descriptive header detection)
+    let rows: Vec<_> = table.select(&TR_SELECTOR).collect();
+    if rows.is_empty() {
         return Ok(String::new());
     }
+    let max_cols = calculate_max_columns(&rows)?;
     
-    // Rebuild HTML table from grid
-    let normalized_html = build_table_from_grid(&grid);
+    // Step 2: Extract caption
+    let caption = extract_table_caption(table);
     
-    Ok(normalized_html)
+    // Step 3: Extract descriptive headers
+    let descriptive_headers = extract_descriptive_headers(table, max_cols);
+    
+    // Step 4: Identify row indices to skip during grid parsing
+    let skip_row_indices = identify_descriptive_row_indices(table, max_cols);
+    
+    // Step 5: Parse table into grid (excluding descriptive rows)
+    let grid = parse_table_to_grid(table, &skip_row_indices)?;
+    
+    if grid.is_empty() {
+        // If table is empty after removing descriptive rows, return just the descriptive text
+        let mut output = String::new();
+        if let Some(cap) = caption {
+            output.push_str(&cap);
+        }
+        for desc in descriptive_headers {
+            if !output.is_empty() {
+                output.push(' ');
+            }
+            output.push_str(&desc);
+        }
+        return Ok(output);
+    }
+    
+    // Step 6: Build output with descriptive text before table
+    let mut output = String::new();
+    
+    // Add caption if present
+    if let Some(cap) = caption {
+        output.push_str(&cap);
+        output.push_str("\n\n");
+    }
+    
+    // Add descriptive headers if present
+    for desc in descriptive_headers {
+        output.push_str(&desc);
+        output.push_str("\n\n");
+    }
+    
+    // Add the normalized table HTML
+    let table_html = build_table_from_grid(&grid);
+    output.push_str(&table_html);
+    
+    Ok(output)
 }
 
 /// Parse HTML table into a 2D grid, expanding colspan/rowspan
 ///
-/// Algorithm:
-/// 1. Determine maximum columns by examining all rows
-/// 2. Enforce MAX_GRID_COLS security limit
-/// 3. Create a 2D grid to hold all logical cells
-/// 4. Track cells occupied by rowspan from previous rows
-/// 5. For each cell, fill the grid positions it spans
-/// 6. Enforce MAX_GRID_ROWS security limit during expansion
-/// 7. Duplicate content across spanned cells
+/// This function now accepts a list of row indices to skip (descriptive header rows).
+///
+/// # Arguments
+/// * `table` - Table element to parse
+/// * `skip_row_indices` - Set of row indices (0-based) to skip during parsing
+///
+/// # Returns
+/// * `Ok(Vec<Vec<GridCell>>)` - 2D grid of cells
+/// * `Err(anyhow::Error)` - If table exceeds security limits
 ///
 /// # Security
 /// - MAX_GRID_ROWS: Prevents DoS via excessive rowspan accumulation
 /// - MAX_GRID_COLS: Prevents DoS via excessive colspan
 /// - Graceful truncation: Returns partial grid if limits exceeded
-fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
+fn parse_table_to_grid(
+    table: &ElementRef,
+    skip_row_indices: &std::collections::HashSet<usize>
+) -> Result<Vec<Vec<GridCell>>> {
     let rows: Vec<_> = table.select(&TR_SELECTOR).collect();
     
     if rows.is_empty() {
@@ -291,23 +723,31 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
     // Initialize grid and rowspan tracker
     let mut grid: Vec<Vec<GridCell>> = Vec::new();
     let mut rowspan_tracker: HashMap<(usize, usize), usize> = HashMap::new();
-    let mut total_cells = 0usize;  // NEW: Track total cells
+    let mut total_cells = 0usize;  // Track total cells
     
-    for (row_idx, row) in rows.iter().enumerate() {
+    // Track grid row index separately from source row index
+    let mut grid_row_idx = 0;
+    
+    for (source_row_idx, row) in rows.iter().enumerate() {
+        // SKIP DESCRIPTIVE ROWS
+        if skip_row_indices.contains(&source_row_idx) {
+            continue;
+        }
+        
         // SECURITY: Enforce maximum grid height
         if grid.len() >= MAX_GRID_ROWS {
             warn!(
-                "Table exceeded maximum rows ({}), truncating at row {}. \
-                 Processed {} rows before limit.",
+                "Table exceeded maximum rows ({}), truncating at source row {}. \
+                 Processed {} grid rows before limit.",
                 MAX_GRID_ROWS,
-                row_idx,
+                source_row_idx,
                 grid.len()
             );
             break;  // Stop processing, return partial grid
         }
         
         // Ensure this row exists in grid
-        while grid.len() <= row_idx {
+        while grid.len() <= grid_row_idx {
             grid.push(vec![GridCell::empty(); max_cols]);
         }
         
@@ -315,7 +755,7 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
         
         for cell in row.select(&CELL_SELECTOR) {
             // Skip columns occupied by rowspan from previous rows
-            while col_idx < max_cols && rowspan_tracker.contains_key(&(row_idx, col_idx)) {
+            while col_idx < max_cols && rowspan_tracker.contains_key(&(grid_row_idx, col_idx)) {
                 col_idx += 1;
             }
             
@@ -334,10 +774,10 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
                 .unwrap_or(1)
                 .clamp(1, 100);
             
-            // CHANGE 1: Use saturating multiplication for overflow safety
+            // Use saturating multiplication for overflow safety
             let cells_in_span = colspan.saturating_mul(rowspan);
             
-            // CHANGE 2: Check total cell limit BEFORE allocation
+            // Check total cell limit BEFORE allocation
             let new_total = total_cells.saturating_add(cells_in_span);
             if new_total > MAX_TOTAL_CELLS {
                 return Err(anyhow::anyhow!(
@@ -354,14 +794,14 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
             
             // Fill grid cells for this span
             for r in 0..rowspan {
-                let target_row = row_idx.saturating_add(r);
+                let target_row = grid_row_idx.saturating_add(r);
                 
                 // SECURITY: Check if target_row would exceed maximum
                 if target_row >= MAX_GRID_ROWS {
                     debug!(
                         "Rowspan at cell ({}, {}) would exceed max rows ({}), \
                          clamping expansion at row {}",
-                        row_idx, col_idx, MAX_GRID_ROWS, target_row
+                        grid_row_idx, col_idx, MAX_GRID_ROWS, target_row
                     );
                     break;  // Stop expanding this cell vertically
                 }
@@ -390,14 +830,26 @@ fn parse_table_to_grid(table: &ElementRef) -> Result<Vec<Vec<GridCell>>> {
                 }
             }
             
-            col_idx = col_idx.saturating_add(colspan);  // CHANGE 4: Saturating addition
+            col_idx = col_idx.saturating_add(colspan);
         }
+        
+        grid_row_idx += 1;
     }
     
     Ok(grid)
 }
 
 /// Calculate maximum columns needed for the table
+///
+/// This is now used by `normalize_data_table` before calling `parse_table_to_grid`
+/// to determine the number of columns for descriptive header detection.
+///
+/// # Arguments
+/// * `rows` - Slice of table row elements
+///
+/// # Returns
+/// * `Ok(usize)` - Maximum number of columns across all rows
+/// * `Err(anyhow::Error)` - If table exceeds security limits
 fn calculate_max_columns(rows: &[ElementRef]) -> Result<usize> {
     let mut max_cols = 1usize;
     
@@ -458,10 +910,17 @@ fn extract_alignment(cell: &ElementRef) -> Option<Alignment> {
     None
 }
 
-/// Extract text content from cell, preserving inline formatting
+/// Extract text content from cell, preserving inline formatting but decoding HTML entities
 ///
 /// This extracts the inner HTML of the cell, which allows html2md
 /// to properly convert inline elements like <code>, <a>, <strong>, etc.
+///
+/// **Critical**: HTML entities MUST be decoded here because scraper's DOM
+/// preserves the original HTML source. Even though clean_html_content() decoded
+/// entities earlier in the pipeline, table preprocessing re-parses the HTML
+/// and extracts the raw source which still contains entities.
+///
+/// Entities decoded: &#124; → |, &lt; → <, &gt; → >, &amp; → &, and all HTML5 named entities
 fn extract_cell_content(cell: &ElementRef) -> String {
     let html = cell.html();
     
@@ -469,8 +928,23 @@ fn extract_cell_content(cell: &ElementRef) -> String {
     let start_tag_end = html.find('>').map(|pos| pos + 1).unwrap_or(0);
     let end_tag_start = html.rfind("</").unwrap_or(html.len());
     
-    // Extract and trim content
-    html[start_tag_end..end_tag_start].trim().to_string()
+    // Extract inner HTML
+    let inner_html = html[start_tag_end..end_tag_start].trim();
+    
+    // Decode HTML entities before returning
+    // This handles: &#124; → |, &lt; → <, &gt; → >, &amp; → &, etc.
+    match decode(inner_html.as_bytes()).to_string() {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            // If decoding fails, log warning and return original
+            // This ensures the conversion pipeline doesn't crash
+            tracing::warn!(
+                "Failed to decode HTML entities in table cell: {}. Using undecoded content.", 
+                e
+            );
+            inner_html.to_string()
+        }
+    }
 }
 
 /// Build normalized HTML table from grid

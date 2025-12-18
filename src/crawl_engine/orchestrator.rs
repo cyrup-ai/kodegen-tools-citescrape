@@ -8,6 +8,7 @@
 //! - Graceful shutdown and cleanup
 
 use anyhow::{Context, Result};
+use chromiumoxide::Browser;
 use dashmap::DashSet;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -19,9 +20,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
-use super::crawl_types::CrawlQueue;
+use super::crawl_types::{CrawlQueue, FailureKind};
+use rand::Rng;
 use super::{CircuitBreaker, DomainLimiter, extract_domain};
-use super::page_processor::{PageProcessorContext, process_single_page};
+use super::page_processor::{PageProcessorContext, PageResult, process_single_page};
+use super::retry_queue::RetryQueue;
 use super::progress::ProgressReporter;
 use crate::browser_setup::launch_browser;
 use crate::config::CrawlConfig;
@@ -30,6 +33,28 @@ use crate::crawl_events::{
     types::CrawlEvent,
 };
 use crate::link_rewriter::LinkRewriter;
+
+/// Calculate exponential backoff delay with jitter for page retries
+///
+/// Formula: base_delay * 2^(attempt-1) * failure_multiplier * (1 ± jitter)
+fn calculate_retry_backoff(retry_count: u8, failure_kind: FailureKind) -> std::time::Duration {
+    const BASE_DELAY_MS: u64 = 1000;  // 1 second
+    const MAX_DELAY_MS: u64 = 30_000; // 30 seconds cap
+    const JITTER_PERCENT: f64 = 0.2;  // ±20%
+    
+    // Exponential: 1s, 2s, 4s, 8s, 16s...
+    let exp_delay = BASE_DELAY_MS.saturating_mul(1 << retry_count.min(5));
+    
+    // Apply failure kind multiplier
+    let adjusted_delay = (exp_delay as f64 * failure_kind.delay_multiplier()) as u64;
+    
+    // Apply jitter to prevent thundering herd (using rand 0.9+ API)
+    let jitter = rand::rng().random_range(-JITTER_PERCENT..=JITTER_PERCENT);
+    let jittered_delay = (adjusted_delay as f64 * (1.0 + jitter)) as u64;
+    
+    // Cap at maximum
+    std::time::Duration::from_millis(jittered_delay.min(MAX_DELAY_MS))
+}
 
 /// Main crawl orchestration with event bus integration
 ///
@@ -67,6 +92,7 @@ pub async fn crawl_pages<P: ProgressReporter>(
         q.push_back(CrawlQueue {
             url: config.start_url.clone(),
             depth: 0,
+            retry_count: 0,
         });
         q
     }));
@@ -86,6 +112,11 @@ pub async fn crawl_pages<P: ProgressReporter>(
         None
     };
 
+    // Retry queue for circuit-breaker-rejected items
+    let retry_queue = circuit_breaker
+        .as_ref()
+        .map(|cb| Arc::new(RetryQueue::new(Arc::clone(cb))));
+
     // Atomic counter for total pages crawled
     let total_pages = Arc::new(AtomicUsize::new(0));
 
@@ -101,7 +132,11 @@ pub async fn crawl_pages<P: ProgressReporter>(
             .context("Failed to publish CrawlStarted event - event bus may be shutdown or full")?;
     }
 
-    // Setup browser - find system Chrome or download managed Chromium
+    // Setup browser - either from pool (instant) or launch fresh (2-5 second cold start)
+    //
+    // Pool mode: Acquire pre-warmed browser from pool, returns to pool when done
+    // Fresh mode: Launch new browser, clean up temp directory when done
+    //
     // launch_browser handles:
     // - Finding Chrome/Chromium executable (system paths + 'which' command)
     // - Downloading managed Chromium if not found (with proper dir creation)
@@ -109,16 +144,58 @@ pub async fn crawl_pages<P: ProgressReporter>(
     // - Spawning handler task to drive CDP connection
     // - Using unique chrome_data_dir per session (if configured) to prevent profile lock contention
 
-    let chrome_dir_param = config.chrome_data_dir().cloned();
+    // Track whether we're using a pooled browser (for cleanup logic)
+    let pool_guard: Option<crate::browser_pool::PooledBrowserGuard>;
+    let handler_task: Option<tokio::task::JoinHandle<()>>;
+    let chrome_data_dir_path: PathBuf;
+    let browser: Arc<Browser>;
 
-    let (browser, handler_task, chrome_data_dir_path) = launch_browser(config.headless(), chrome_dir_param)
-        .await
-        .context("Failed to launch browser")?;
+    if let Some(pool) = config.browser_pool() {
+        // Pool mode: acquire pre-warmed browser
+        match pool.acquire().await {
+            Ok(guard) => {
+                info!("Acquired pre-warmed browser from pool (id={})", guard.id());
+                browser = guard.browser_arc();
+                chrome_data_dir_path = std::env::temp_dir()
+                    .join(format!("kodegen_citescrape_pooled_{}", std::process::id()));
+                handler_task = None; // Pool manages the handler
+                pool_guard = Some(guard);
+            }
+            Err(e) => {
+                warn!("Failed to acquire from pool, launching fresh browser: {}", e);
+                // Fall back to fresh browser launch
+                let chrome_dir_param = config.chrome_data_dir().cloned();
+                let (fresh_browser, fresh_handler, fresh_dir) = launch_browser(config.headless(), chrome_dir_param)
+                    .await
+                    .context("Failed to launch browser")?;
+                browser = Arc::new(fresh_browser);
+                handler_task = Some(fresh_handler);
+                chrome_data_dir_path = fresh_dir;
+                pool_guard = None;
+            }
+        }
+    } else {
+        // Fresh mode: launch new browser
+        let chrome_dir_param = config.chrome_data_dir().cloned();
+        let (fresh_browser, fresh_handler, fresh_dir) = launch_browser(config.headless(), chrome_dir_param)
+            .await
+            .context("Failed to launch browser")?;
+        browser = Arc::new(fresh_browser);
+        handler_task = Some(fresh_handler);
+        chrome_data_dir_path = fresh_dir;
+        pool_guard = None;
+    }
+
+    // Extract user agent from browser for HTTP requests during resource inlining
+    // This ensures HTTP requests use the same User-Agent as the browser,
+    // preventing 403 Forbidden errors from servers that block non-browser requests
+    let user_agent = browser.user_agent().await
+        .context("Failed to get user agent from browser")?;
+    debug!("Browser user agent: {user_agent}");
 
     progress.report_browser_launched();
 
-    // Wrap browser in Arc for sharing across concurrent tasks
-    let browser = Arc::new(browser);
+    // Browser is already Arc-wrapped (either from pool or fresh launch above)
 
     // Concurrency control
     let concurrency = config.max_concurrent_pages();
@@ -129,6 +206,20 @@ pub async fn crawl_pages<P: ProgressReporter>(
     let mut active_tasks = FuturesUnordered::new();
 
     loop {
+        // Check retry queue for items ready to re-process
+        if let Some(ref rq) = retry_queue {
+            let ready_items = rq.drain_ready();
+            if !ready_items.is_empty() {
+                let mut q = queue.lock().await;
+                for item in ready_items {
+                    // Only re-queue if not already visited
+                    if !visited.contains(&item.url) {
+                        q.push_back(item);
+                    }
+                }
+            }
+        }
+
         // Fill up to concurrency limit
         while active_tasks.len() < concurrency {
             // Pop next item from queue
@@ -178,10 +269,13 @@ pub async fn crawl_pages<P: ProgressReporter>(
             let link_rewriter = link_rewriter.clone();
             let event_bus = event_bus.clone();
             let circuit_breaker = circuit_breaker.clone();
+            // Note: retry_queue is NOT passed to spawned task - it's only used
+            // by orchestrator to handle PageResult::NeedsRetry
             let total_pages = Arc::clone(&total_pages);
             let queue = Arc::clone(&queue);
             let indexing_sender = indexing_sender.clone();
             let visited = Arc::clone(&visited);
+            let user_agent = user_agent.clone();
 
             // Spawn concurrent task
             let task = tokio::spawn(async move {
@@ -200,18 +294,10 @@ pub async fn crawl_pages<P: ProgressReporter>(
                     queue,
                     indexing_sender,
                     visited,
+                    user_agent,
                 };
 
-                match process_single_page(browser, item, ctx).await {
-                    Ok(url) => {
-                        debug!("Successfully crawled: {url}");
-                        Ok(url)
-                    }
-                    Err(e) => {
-                        debug!("Failed to crawl page: {e}");
-                        Err(e)
-                    }
-                }
+                process_single_page(browser, item, ctx).await
             });
 
             active_tasks.push(task);
@@ -220,11 +306,77 @@ pub async fn crawl_pages<P: ProgressReporter>(
         // Wait for at least one task to complete
         match active_tasks.next().await {
             Some(Ok(result)) => match result {
-                Ok(url) => {
+                PageResult::Success(url) => {
                     debug!("Completed crawling: {url}");
                 }
-                Err(e) => {
-                    warn!("Crawl task failed: {e}");
+                
+                PageResult::NeedsRetry(item) => {
+                    // Circuit breaker rejected - queue for later retry
+                    if let Some(ref rq) = retry_queue {
+                        debug!("Circuit breaker: queueing for retry: {}", item.url);
+                        rq.add(item);
+                    } else {
+                        warn!("No retry queue available, discarding: {}", item.url);
+                    }
+                }
+                
+                PageResult::FailedRetryable { mut item, error, failure_kind } => {
+                    let max_retries = config.max_page_retries();
+                    
+                    if failure_kind.is_retryable() && item.retry_count < max_retries {
+                        item.retry_count += 1;
+                        
+                        // Calculate backoff delay
+                        let delay = calculate_retry_backoff(item.retry_count, failure_kind);
+                        
+                        warn!(
+                            "Page failed (attempt {}/{}): {} [{:?}] - retrying in {:?}",
+                            item.retry_count, max_retries, item.url, failure_kind, delay
+                        );
+                        
+                        // Remove from visited to allow re-processing
+                        visited.remove(&item.url);
+                        
+                        // Apply backoff delay before requeueing
+                        tokio::time::sleep(delay).await;
+                        
+                        // Re-add to main queue
+                        queue.lock().await.push_back(item);
+                    } else {
+                        warn!(
+                            "Page failed after {} attempts: {} [{:?}] - giving up: {}",
+                            item.retry_count, item.url, failure_kind, error
+                        );
+                        
+                        // Record failure in circuit breaker
+                        if let Some(ref cb) = circuit_breaker
+                            && let Ok(domain) = extract_domain(&item.url)
+                        {
+                            cb.record_failure(&domain, &error.to_string());
+                        }
+                        
+                        // Publish RetryExhausted event
+                        if let Some(bus) = &event_bus {
+                            let event = CrawlEvent::retry_exhausted(
+                                item.url,
+                                item.retry_count,
+                                error.to_string(),
+                            );
+                            if let Err(e) = bus.publish(event).await {
+                                warn!("Failed to publish RetryExhausted event: {e}");
+                            }
+                        }
+                    }
+                }
+                
+                PageResult::FailedPermanent { url, error } => {
+                    warn!("Permanent failure for {}: {}", url, error);
+                    // No retry, record failure in circuit breaker
+                    if let Some(ref cb) = circuit_breaker
+                        && let Ok(domain) = extract_domain(&url)
+                    {
+                        cb.record_failure(&domain, &error.to_string());
+                    }
                 }
             },
             Some(Err(e)) => {
@@ -235,8 +387,18 @@ pub async fn crawl_pages<P: ProgressReporter>(
 
         // Check if done
         let remaining = queue.lock().await.len();
-        if remaining == 0 && active_tasks.is_empty() {
+        let retry_remaining = retry_queue.as_ref().map_or(0, |rq| rq.len());
+        if remaining == 0 && retry_remaining == 0 && active_tasks.is_empty() {
             break;
+        }
+
+        // If only retry queue has items, add small sleep to avoid busy-spinning
+        if remaining == 0 && retry_remaining > 0 && active_tasks.is_empty() {
+            debug!(
+                "Main queue empty, {} items in retry queue waiting for circuit recovery",
+                retry_remaining
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
 
@@ -289,52 +451,65 @@ pub async fn crawl_pages<P: ProgressReporter>(
 
     progress.report_cleanup_started();
 
-    // CRITICAL: Cleanup order matters!
-    // 1. Unwrap browser from Arc (must happen before close)
-    // 2. Close browser gracefully (browser.close() + browser.wait())
-    // 3. Clean up temp directory
-    // 4. THEN abort handler task
-    //
-    // This ensures the browser is properly closed before the handler loses its CDP connection.
+    // Cleanup differs based on whether we used a pooled or fresh browser
+    if pool_guard.is_some() {
+        // POOLED BROWSER: Just drop the guard to return browser to pool
+        // The pool manages browser lifecycle and cleanup
+        info!("Returning browser to pool");
+        drop(pool_guard);
+        drop(browser); // Drop our Arc reference
+        debug!("Browser returned to pool successfully");
+    } else {
+        // FRESH BROWSER: Full cleanup required
+        // CRITICAL: Cleanup order matters!
+        // 1. Unwrap browser from Arc (must happen before close)
+        // 2. Close browser gracefully (browser.close() + browser.wait())
+        // 3. Clean up temp directory
+        // 4. THEN abort handler task
+        //
+        // This ensures the browser is properly closed before the handler loses its CDP connection.
 
-    // Try to unwrap browser from Arc - if there are still references, skip cleanup
-    let browser_for_cleanup = match Arc::try_unwrap(browser) {
-        Ok(b) => Some(b),
-        Err(arc) => {
-            warn!(
-                "Browser still has {} strong references, cleanup will happen on drop",
-                Arc::strong_count(&arc)
-            );
-            None
-        }
-    };
-
-    if let Some(browser_owned) = browser_for_cleanup {
-        // Close browser gracefully and clean up temp directory
-        match super::cleanup::cleanup_browser_and_data(browser_owned, chrome_data_dir_path.clone()).await {
-            Ok(super::cleanup::CleanupResult::Success) => {
-                debug!("Browser and data cleanup completed successfully");
+        // Try to unwrap browser from Arc - if there are still references, skip cleanup
+        let browser_for_cleanup = match Arc::try_unwrap(browser) {
+            Ok(b) => Some(b),
+            Err(arc) => {
+                warn!(
+                    "Browser still has {} strong references, cleanup will happen on drop",
+                    Arc::strong_count(&arc)
+                );
+                None
             }
-            Ok(super::cleanup::CleanupResult::PartialFailure(errors)) => {
-                warn!("Cleanup completed with failures: {errors:?}");
-                for error in &errors {
-                    progress.report_error(&format!("Cleanup error: {error}"));
+        };
+
+        if let Some(browser_owned) = browser_for_cleanup {
+            // Close browser gracefully and clean up temp directory
+            match super::cleanup::cleanup_browser_and_data(browser_owned, chrome_data_dir_path.clone()).await {
+                Ok(super::cleanup::CleanupResult::Success) => {
+                    debug!("Browser and data cleanup completed successfully");
+                }
+                Ok(super::cleanup::CleanupResult::PartialFailure(errors)) => {
+                    warn!("Cleanup completed with failures: {errors:?}");
+                    for error in &errors {
+                        progress.report_error(&format!("Cleanup error: {error}"));
+                    }
+                }
+                Err(e) => {
+                    warn!("Cleanup failed: {e}");
+                    progress.report_error(&format!("Cleanup failed: {e}"));
                 }
             }
-            Err(e) => {
-                warn!("Cleanup failed: {e}");
-                progress.report_error(&format!("Cleanup failed: {e}"));
+        }
+
+        // NOW abort the handler task (after browser is closed) - only for fresh browsers
+        if let Some(task) = handler_task {
+            info!("Aborting browser handler task");
+            task.abort();
+            if let Err(e) = task.await
+                && !e.is_cancelled()
+            {
+                warn!("Handler task failed during abort: {e}");
             }
         }
-    }
-
-    // NOW abort the handler task (after browser is closed)
-    info!("Aborting browser handler task");
-    handler_task.abort();
-    if let Err(e) = handler_task.await
-        && !e.is_cancelled()
-    {
-        warn!("Handler task failed during abort: {e}");
     }
 
     progress.report_completed();

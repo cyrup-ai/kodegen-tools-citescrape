@@ -50,6 +50,7 @@ serde_json = "1"
 thiserror = "2"
 anyhow = "1"
 lru = "0.16"
+libc = "0.2"
 
 # MCP tool dependencies
 rmcp = { version = "0.11", features = ["client", "schemars", "server", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
@@ -118,6 +119,7 @@ proptest = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
+tokio-test = "0.4"
 
 [features]
 default = ["mirror"]

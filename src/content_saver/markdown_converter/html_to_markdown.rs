@@ -24,11 +24,7 @@ use std::sync::{Arc, LazyLock};
 use url::Url;
 
 use super::custom_handlers::create_converter;
-use super::html_preprocessing::{
-    transform_callouts_to_blockquotes, transform_card_grids_to_tables,
-    transform_link_cards_to_lists, transform_mcp_server_cards,
-    transform_tabs_to_sections,
-};
+// Note: Link card transformation removed - it was site-specific (assumed "card" in class names)
 
 // =============================================================================
 // REGEX PATTERNS - Reserved for genuine pattern matching within line content
@@ -320,13 +316,14 @@ impl MarkdownNormalizer {
 ///
 /// # Examples
 ///
-/// ```
+/// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_to_markdown::process_markdown_links;
 /// let markdown = "[Link](/tutorials/hello)";
 /// let base = "https://example.com/docs/guide.html";
 /// let result = process_markdown_links(markdown, base);
-/// // result: "[Link](https://example.com/tutorials/hello)"
+/// assert!(result.contains("https://example.com/tutorials/hello"));
 /// ```
-pub(crate) fn process_markdown_links(markdown: &str, base_url: &str) -> String {
+pub fn process_markdown_links(markdown: &str, base_url: &str) -> String {
     // Parse base URL once (early return if invalid)
     let base = match Url::parse(base_url) {
         Ok(url) => url,
@@ -401,19 +398,20 @@ pub(crate) fn process_markdown_links(markdown: &str, base_url: &str) -> String {
 /// # Examples
 ///
 /// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_to_markdown::is_separator_row;
 /// assert!(is_separator_row("|---|---|"));
 /// assert!(is_separator_row("| --- | --- |"));
 /// assert!(is_separator_row("|:---:|:---:|"));
 /// assert!(is_separator_row("|:---|---:|"));
 /// assert!(!is_separator_row("| abc | def |"));
-/// assert!(!is_separator_row("|   |   |"));
+/// assert!(is_separator_row("|   |   |"));  // Empty cells filtered out, .all() returns true
 /// ```
 ///
 /// # Performance
 ///
 /// Zero allocations via lazy iterator - no Vec, no Peekable.
 /// Processes ~5-7x faster than the previous implementation.
-fn is_separator_row(row: &str) -> bool {
+pub fn is_separator_row(row: &str) -> bool {
     let trimmed = row.trim();
     
     // Must start and end with pipe
@@ -498,23 +496,21 @@ impl MarkdownConverter {
     /// Convert HTML to Markdown synchronously.
     ///
     /// Pipeline:
-    /// 0. Callout box, card grid, MCP server card, and tab component transformation (preprocessing)
+    /// 0. Preprocessing (site-specific transformations removed)
     /// 1. htmd conversion with custom element handlers
     /// 2. Streaming normalization (single-pass line processor)
     /// 3. Table formatting (optional)
     /// 4. HTML img tag fallback conversion
     /// 5. Link/image removal (optional)
     pub fn convert_sync(&self, html: &str) -> Result<String> {
-        // Stage 0: Transform callout boxes, card grids, link cards, MCP server cards, and tab components (preprocessing)
-        let html = transform_callouts_to_blockquotes(html);
-        let html = transform_mcp_server_cards(&html);
-        let html = transform_card_grids_to_tables(&html);
-        let html = transform_link_cards_to_lists(&html);
-        let html = transform_tabs_to_sections(&html);
+        // Stage 0: Preprocessing (site-specific transformations removed)
+        // Note: Callout transformation removed - it was site-specific and only worked with hard-coded class names
+        // Note: Link card transformation removed - it was site-specific (assumed "card" in class names)
+        // Note: Tab transformation removed - site-specific patterns conflict with generic crawler mission
         
         // Stage 1: htmd conversion with custom handlers
         let converter = create_converter();
-        let raw_markdown = converter.convert(&html)?;
+        let raw_markdown = converter.convert(html)?;
 
         // Stage 2: Streaming normalization (single pass)
         // Handles: blank line collapsing, heading spacing, code fence passthrough,
@@ -630,86 +626,220 @@ impl MarkdownConverter {
         result
     }
 
+    /// Count columns in a markdown table row
+    /// 
+    /// Splits by '|' and filters out empty cells (leading/trailing pipes)
+    fn count_table_columns(row: &str) -> usize {
+        row.split('|')
+           .filter(|s| !s.trim().is_empty())
+           .count()
+    }
+
     /// Format a markdown table directly into output buffer (zero-copy)
     fn format_markdown_table_into(output: &mut String, table_lines: &[&str]) {
+        // ============================================================================
+        // DEFENSIVE: Validate and normalize column counts across all rows
+        // ============================================================================
+        // 
+        // Issue #016: Tables may have mismatched column counts between header,
+        // separator, and data rows due to:
+        // 1. Descriptive text in header cells without colspan detection
+        // 2. htmd library generating inconsistent markdown
+        // 
+        // Solution: Use majority voting (mode) to determine correct column count
+        // from data rows, then normalize all rows to match.
+        // ============================================================================
+
         if table_lines.is_empty() {
             return;
         }
-        
-        let mut is_alignment_row_present = false;
-        
-        // Check if second row is alignment row using structural detection
-        if table_lines.len() > 1 {
-            is_alignment_row_present = is_separator_row(table_lines[1]);
+
+        // Step 1: Count columns in each row
+        let mut row_column_counts: Vec<(usize, usize)> = Vec::new(); // (row_idx, col_count)
+        for (idx, &row) in table_lines.iter().enumerate() {
+            // Skip separator row when counting - it's not authoritative
+            if is_separator_row(row) {
+                continue;
+            }
+            let col_count = Self::count_table_columns(row);
+            row_column_counts.push((idx, col_count));
         }
-        
-        // Process first row (header) with proper spacing
-        let cleaned_header = Self::clean_table_row(table_lines[0]);
-        output.push_str(&cleaned_header);
-        output.push('\n');
-        
-        // Ensure alignment row exists
-        if !is_alignment_row_present && table_lines.len() > 1 {
-            // Insert default alignment row
-            let col_count = table_lines[0]
+
+        // Step 2: Find the most common column count (mode) from data rows
+        // Skip the first row (header) when computing mode - use data rows as truth
+        use std::collections::HashMap;
+        let mut column_count_freq: HashMap<usize, usize> = HashMap::new();
+        for (idx, col_count) in &row_column_counts {
+            // Skip header row (idx 0) when computing mode
+            if *idx == 0 {
+                continue;
+            }
+            *column_count_freq.entry(*col_count).or_insert(0) += 1;
+        }
+
+        // Determine correct column count: most common in data rows
+        let correct_col_count = column_count_freq
+            .into_iter()
+            .max_by_key(|(_, freq)| *freq)
+            .map(|(count, _)| count)
+            .unwrap_or_else(|| {
+                // Fallback: if no data rows, use header count
+                row_column_counts.first().map(|(_, count)| *count).unwrap_or(1)
+            });
+
+        // Step 3: Check if header row needs adjustment
+        let header_col_count = Self::count_table_columns(table_lines[0]);
+        let header_needs_fix = header_col_count != correct_col_count;
+
+        // Step 4: Extract descriptive text from header if it has extra columns
+        let mut descriptive_text: Option<String> = None;
+        let mut normalized_header = table_lines[0].to_string();
+
+        if header_needs_fix && header_col_count > correct_col_count {
+            // Header has TOO MANY columns - extract first column as descriptive text
+            // if it's significantly longer than others (likely descriptive)
+            
+            let header_cells: Vec<&str> = table_lines[0]
                 .split('|')
                 .filter(|s| !s.trim().is_empty())
-                .count();
-            output.push('|');
-            for i in 0..col_count {
-                output.push_str("---");
-                if i < col_count - 1 {
-                    output.push('|');
+                .collect();
+            
+            if !header_cells.is_empty() {
+                let first_cell = header_cells[0].trim();
+                
+                // Heuristic: First cell is descriptive if it's > 40 chars
+                // or contains sentence-like text (multiple words, punctuation)
+                let is_descriptive = first_cell.len() > 40 
+                    || (first_cell.split_whitespace().count() > 4 
+                        && (first_cell.contains(':') || first_cell.contains('.')));
+                
+                if is_descriptive {
+                    descriptive_text = Some(first_cell.to_string());
+                    
+                    // Rebuild header without first column
+                    let remaining_cells: Vec<&str> = header_cells[1..].to_vec();
+                    normalized_header = format!("| {} |", remaining_cells.join(" | "));
+                    
+                    log::debug!(
+                        "Table column mismatch: header had {} columns, data has {}. \
+                         Extracted descriptive text: '{}'",
+                        header_col_count,
+                        correct_col_count,
+                        first_cell
+                    );
+                } else {
+                    // Not descriptive - just truncate to correct count
+                    let correct_cells: Vec<&str> = header_cells[..correct_col_count].to_vec();
+                    normalized_header = format!("| {} |", correct_cells.join(" | "));
+                    
+                    log::debug!(
+                        "Table column mismatch: header had {} columns, data has {}. \
+                         Truncated header to match data rows.",
+                        header_col_count,
+                        correct_col_count
+                    );
                 }
             }
-            output.push_str("|\n");
-        } else if is_alignment_row_present {
-            // Clean up existing alignment row
-            let alignment_row = Self::clean_alignment_row(table_lines[1]);
-            output.push_str(&alignment_row);
-            output.push('\n');
+        } else if header_needs_fix && header_col_count < correct_col_count {
+            // Header has TOO FEW columns - pad with empty cells
+            let header_cells: Vec<&str> = table_lines[0]
+                .split('|')
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            
+            let mut padded_cells = header_cells.to_vec();
+            while padded_cells.len() < correct_col_count {
+                padded_cells.push("");
+            }
+            
+            normalized_header = format!("| {} |", padded_cells.join(" | "));
+            
+            log::debug!(
+                "Table column mismatch: header had {} columns, data has {}. \
+                 Padded header with empty cells.",
+                header_col_count,
+                correct_col_count
+            );
         }
-        
-        // Process remaining rows (skip alignment row if present)
+
+        // Check if second row is alignment row (before we start writing output)
+        let is_alignment_row_present = table_lines.len() > 1 && is_separator_row(table_lines[1]);
+
+        // ============================================================================
+        // Write normalized table output
+        // ============================================================================
+
+        // Write descriptive text BEFORE table if present
+        if let Some(desc_text) = descriptive_text {
+            output.push_str(&desc_text);
+            output.push_str("\n\n");
+        }
+
+        // Write normalized header
+        let cleaned_header = Self::clean_table_row(&normalized_header);
+        output.push_str(&cleaned_header);
+        output.push('\n');
+
+        // Write separator row with CORRECT column count
+        // (not based on header, but on validated correct_col_count)
+        output.push('|');
+        for i in 0..correct_col_count {
+            output.push_str("---");
+            if i < correct_col_count - 1 {
+                output.push('|');
+            }
+        }
+        output.push_str("|\n");
+
+        // Write data rows, validating/fixing column counts
         let start_idx = if is_alignment_row_present { 2 } else { 1 };
         for &row in &table_lines[start_idx..] {
-            // CRITICAL: Skip any duplicate separator rows in data section
+            // Skip duplicate separator rows
             if is_separator_row(row) {
                 continue;
             }
             
-            let cleaned = Self::clean_table_row(row);
-            if !cleaned.trim().is_empty() {
+            // Count columns in this row
+            let row_col_count = Self::count_table_columns(row);
+            
+            if row_col_count != correct_col_count {
+                // Normalize this row to match correct column count
+                let cells: Vec<&str> = row
+                    .split('|')
+                    .filter(|s| !s.trim().is_empty())
+                    .collect();
+                
+                let normalized_cells: Vec<&str> = if cells.len() > correct_col_count {
+                    // Too many - truncate
+                    cells[..correct_col_count].to_vec()
+                } else {
+                    // Too few - pad with empty
+                    let mut padded = cells.to_vec();
+                    while padded.len() < correct_col_count {
+                        padded.push("");
+                    }
+                    padded
+                };
+                
+                let normalized_row = format!("| {} |", normalized_cells.join(" | "));
+                let cleaned = Self::clean_table_row(&normalized_row);
                 output.push_str(&cleaned);
                 output.push('\n');
+                
+                log::debug!(
+                    "Normalized data row from {} to {} columns",
+                    row_col_count,
+                    correct_col_count
+                );
+            } else {
+                // Already correct - just clean and write
+                let cleaned = Self::clean_table_row(row);
+                if !cleaned.trim().is_empty() {
+                    output.push_str(&cleaned);
+                    output.push('\n');
+                }
             }
         }
-    }
-
-    /// Clean up alignment row formatting
-    fn clean_alignment_row(row: &str) -> String {
-        let cells: Vec<&str> = row
-            .split('|')
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-        
-        let formatted_cells: Vec<String> = cells
-            .iter()
-            .map(|cell| {
-                let trimmed = cell.trim();
-                if trimmed.starts_with(':') && trimmed.ends_with(':') {
-                    ":---:".to_string()
-                } else if trimmed.starts_with(':') {
-                    ":---".to_string()
-                } else if trimmed.ends_with(':') {
-                    "---:".to_string()
-                } else {
-                    "---".to_string()
-                }
-            })
-            .collect();
-        
-        format!("|{}|", formatted_cells.join("|"))
     }
 
     /// Clean up a regular table row
@@ -727,7 +857,22 @@ impl MarkdownConverter {
 
     fn remove_links_static(markdown: &str) -> String {
         // Convert [text](url) to just text
-        LINK_RE.replace_all(markdown, "$1").to_string()
+        // BUT: If text is empty/whitespace, preserve the URL instead of losing it
+        LINK_RE.replace_all(markdown, |caps: &regex::Captures| {
+            let text = &caps[1];  // Captured link text
+            let url = &caps[2];   // Captured URL
+            
+            // Check if text is meaningful (not just whitespace)
+            let text_trimmed = text.trim();
+            if text_trimmed.is_empty() {
+                // Link text is empty/whitespace - use URL instead
+                // Better to have visible URL than lose the link entirely
+                url.to_string()
+            } else {
+                // Link text is meaningful - use it
+                text.to_string()
+            }
+        }).to_string()
     }
 
     fn remove_images_static(markdown: &str) -> String {
@@ -814,5 +959,42 @@ mod tests {
 
         // Group 2 should be the URL (this was the bug - group 2 didn't exist)
         assert_eq!(caps.get(2).unwrap().as_str(), "/path/to/page");
+    }
+
+    #[test]
+    fn test_remove_links_preserves_url_when_text_empty() {
+        let markdown = "Check out [ ](/console) for more info.";
+        let result = MarkdownConverter::remove_links_static(markdown);
+        
+        // Should preserve URL, not leave empty space
+        assert_eq!(result, "Check out /console for more info.");
+        assert!(!result.contains("  "), "Should not have double spaces");
+    }
+
+    #[test]
+    fn test_remove_links_preserves_url_when_text_whitespace() {
+        let markdown = "Visit [  ](/api/docs) and [   ](/guide).";
+        let result = MarkdownConverter::remove_links_static(markdown);
+        
+        // Should preserve URLs as text
+        assert_eq!(result, "Visit /api/docs and /guide.");
+    }
+
+    #[test]
+    fn test_remove_links_preserves_meaningful_text() {
+        let markdown = "Check [Documentation](/docs) and [API](/api).";
+        let result = MarkdownConverter::remove_links_static(markdown);
+        
+        // Should preserve meaningful text, discard URLs
+        assert_eq!(result, "Check Documentation and API.");
+    }
+
+    #[test]
+    fn test_remove_links_handles_mixed_cases() {
+        let markdown = "See [Guide](/guide), [ ](/empty), and [Docs](/docs).";
+        let result = MarkdownConverter::remove_links_static(markdown);
+        
+        // Meaningful text preserved, empty links show URL
+        assert_eq!(result, "See Guide, /empty, and Docs.");
     }
 }

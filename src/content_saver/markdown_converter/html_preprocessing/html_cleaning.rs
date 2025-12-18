@@ -178,6 +178,21 @@ static HEADING_ANCHOR_MARKERS: LazyLock<Regex> = LazyLock::new(|| {
         .expect("HEADING_ANCHOR_MARKERS: hardcoded regex is valid")
 });
 
+/// Matches accessibility navigation anchor links with "Navigate to header" text
+/// These appear in various documentation sites as screen-reader navigation aids
+/// Examples:
+///   <a href="#section">Navigate to header</a>
+///   <a href="#heading" class="skip-link">Navigate to header</a>
+///   <a aria-label="Navigate to header" href="#target">Navigate to header</a>
+/// 
+/// This pattern matches ANY anchor with this exact text, regardless of CSS classes
+/// or other attributes, because the text itself is the accessibility marker that
+/// should be removed.
+static HEADING_NAVIGATE_TO_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)<a[^>]*>Navigate to header</a>"#)
+        .expect("HEADING_NAVIGATE_TO_HEADER_RE: hardcoded regex is valid")
+});
+
 // ============================================================================
 // CSS Selectors for Content Protection
 // ============================================================================
@@ -299,6 +314,72 @@ fn remove_interactive_elements_from_dom(html: &str) -> String {
         ".nextra-copy-button",       // Nextra
         ".nextra-edit-page",         // Nextra edit page
         ".theme-doc-footer",         // Docusaurus footer
+        
+        // ========================================================================
+        // UI ARTIFACT REMOVAL (Issue #004) - Additional Patterns
+        // ========================================================================
+        
+        // Data attribute patterns for interactive elements
+        "[data-action]",                   // Generic action buttons
+        "[data-command]",                  // Command palette triggers
+        
+        // AI assistance buttons (common across modern documentation)
+        "[aria-label*='AI']",
+        "[aria-label*='ai']",
+        ".ai-assist",
+        ".ai-assistant",
+        ".ai-button",
+        ".ask-ai",
+        "[data-ai-action]",
+        
+        // Copy button variants (additional patterns)
+        ".copy-code",
+        ".copy-snippet",
+        ".clipboard-copy",
+        ".clipboard-button",
+        "[title*='Copy']",
+        "[title*='copy']",
+        "[data-copy]",
+        "[data-copy-code]",
+        
+        // Code block toolbars and action buttons
+        ".code-toolbar",
+        ".code-actions",
+        ".code-header",
+        ".toolbar-item",
+        "[class*='code-button']",
+        "[class*='code-action']",
+        
+        // Documentation framework patterns
+        ".astro-code-toolbar",             // Astro/Starlight
+        ".shiki-toolbar",                  // Shiki syntax highlighter
+        ".prism-toolbar",                  // Prism.js
+        ".hljs-toolbar",                   // Highlight.js
+        ".monaco-toolbar",                 // Monaco editor
+        ".cm-toolbar",                     // CodeMirror
+        
+        // Accessibility/screen-reader-only elements (often contain UI instructions)
+        ".sr-only",
+        ".screen-reader-only",
+        ".visually-hidden",
+        "[aria-hidden='true'][class*='button']",
+        "[aria-hidden='true'][class*='action']",
+        
+        // Modern documentation platforms
+        ".docusaurus-button",              // Docusaurus
+        ".nextra-button",                  // Nextra
+        ".vitepress-button",               // VitePress
+        ".mkdocs-button",                  // MkDocs
+        ".sphinx-button",                  // Sphinx
+        ".hugo-button",                    // Hugo
+        
+        // Generic action containers
+        "[class*='actions']",
+        "[class*='toolbar']",
+        "[class*='controls']",
+        "[id*='actions']",
+        "[id*='toolbar']",
+        "[id*='controls']",
     ];
     
     // Remove interactive elements with unwrap support for code block containers
@@ -1011,24 +1092,16 @@ fn create_element(tag_name: &str) -> kuchiki::NodeRef {
 /// <strong>Text </strong><pre><code>code</code></pre><strong> more text</strong>
 /// ```
 ///
-/// This ensures htmd emits:
-/// ```markdown
-/// **Text**
-/// ```rust
-/// code
-/// ```
-/// **more text**
-/// ```
+/// This ensures htmd emits clean markdown without bold spanning code blocks.
 ///
-/// Instead of:
-/// ```markdown
-/// **Text
+/// # Example
 /// ```rust
-/// code
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::html_cleaning::fix_bold_spanning_code_blocks;
+/// let html = r#"<strong>Text<code>code</code>more text</strong>"#;
+/// let fixed = fix_bold_spanning_code_blocks(html)?;
+/// # Ok::<(), anyhow::Error>(())
 /// ```
-/// more text**
-/// ```
-fn fix_bold_spanning_code_blocks(html: &str) -> Result<String> {
+pub fn fix_bold_spanning_code_blocks(html: &str) -> Result<String> {
     use kuchiki::traits::*;
     
     // Parse HTML to mutable DOM
@@ -1163,6 +1236,145 @@ pub fn normalize_html_structure(html: &str) -> Result<String> {
     Ok(html.to_string())
 }
 
+// ============================================================================
+// Syntax Highlighting Span Removal
+// ============================================================================
+
+/// Regex to match <pre> blocks
+static PRE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<pre([^>]*)>(.*?)</pre>")
+        .expect("PRE_BLOCK_RE: hardcoded regex is valid")
+});
+
+/// Regex to match <code> tags with attributes
+static CODE_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<code([^>]*)>(.*?)</code>")
+        .expect("CODE_TAG_RE: hardcoded regex is valid")
+});
+
+/// Strip syntax highlighting span tags from code blocks
+///
+/// Removes `<span>` tags with inline styles (syntax highlighting) from `<pre>` and `<code>` blocks.
+/// This preprocessing step must run BEFORE code block protection to ensure clean code text.
+///
+/// # Patterns Handled
+///
+/// 1. **Style attribute spans**: `<span style="--0:#COLOR;--1:#COLOR">text</span>` → `text`
+/// 2. **Indent class spans**: `<span class="indent">    </span>` → `    `
+/// 3. **Nested spans**: Recursively extracts text from all levels
+/// 4. **HTML entities**: Properly decodes entities in extracted text
+///
+/// # Arguments
+///
+/// * `html` - Raw HTML string potentially containing styled code blocks
+///
+/// # Returns
+///
+/// * `Ok(String)` - HTML with code blocks cleaned of span tags
+/// * `Err(anyhow::Error)` - If HTML parsing fails
+///
+/// # Example
+/// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::html_cleaning::strip_syntax_highlighting_spans;
+/// let html = r#"<pre><code><span style="--0:#C792EA">pub</span> <span style="--0:#C792EA">fn</span> main()</code></pre>"#;
+/// let clean = strip_syntax_highlighting_spans(html)?;
+/// assert!(clean.contains("pub fn main()"));
+/// assert!(!clean.contains("<span"));
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn strip_syntax_highlighting_spans(html: &str) -> Result<String> {
+    // Fast path: skip if no span tags in code blocks
+    if !html.contains("<pre") || !html.contains("<span") {
+        return Ok(html.to_string());
+    }
+    
+    let result = PRE_BLOCK_RE.replace_all(html, |caps: &regex::Captures| {
+        let pre_attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let inner_html = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        
+        // Check if this pre block contains span tags
+        if !inner_html.contains("<span") {
+            // No spans - return unchanged
+            return caps[0].to_string();
+        }
+        
+        // STEP 1: Extract language attribute from <code> tag BEFORE cleaning
+        // This must happen before extract_text_from_spans destroys the HTML structure
+        let code_attrs = extract_code_lang_attribute(inner_html);
+        
+        // STEP 2: Extract clean text by stripping all HTML tags (spans, code, etc.)
+        let clean_text = extract_text_from_spans(inner_html);
+        
+        // STEP 3: HTML-escape the clean text to prevent interpretation as HTML
+        let escaped_text = html_escape::encode_text(&clean_text).to_string();
+        
+        // STEP 4: Reconstruct clean pre block with preserved language attribute
+        if !code_attrs.is_empty() {
+            format!("<pre{}><code{}>{}</code></pre>", pre_attrs, code_attrs, escaped_text)
+        } else {
+            format!("<pre{}><code>{}</code></pre>", pre_attrs, escaped_text)
+        }
+    });
+    
+    Ok(result.to_string())
+}
+
+/// Extract text content from HTML with spans, stripping all span tags
+///
+/// Uses scraper to parse the HTML fragment and extract only text nodes,
+/// automatically handling nested spans and HTML entity decoding.
+///
+/// # Arguments
+/// * `html` - HTML fragment containing span tags
+///
+/// # Returns
+/// * Clean text with all span tags removed and entities decoded
+fn extract_text_from_spans(html: &str) -> String {
+    use scraper::node::Node;
+    
+    // Parse fragment
+    let fragment = Html::parse_fragment(html);
+    let mut result = String::new();
+    
+    // Recursively extract text from all nodes
+    for node in fragment.root_element().descendants() {
+        if let Node::Text(text) = node.value() {
+            result.push_str(text);
+        }
+    }
+    
+    result
+}
+
+/// Extract language attribute from <code> tag while preserving original HTML structure
+/// 
+/// This function extracts ONLY the attributes from the <code> tag without modifying
+/// the HTML structure. It looks for patterns like:
+/// - `class="language-rust"`
+/// - `class="lang-python"`
+/// - `data-lang="javascript"`
+///
+/// # Arguments
+/// * `html` - Original HTML fragment that may contain a <code> tag with language attribute
+///
+/// # Returns
+/// * Attribute string like ` class="language-rust"` (with leading space), or empty string
+fn extract_code_lang_attribute(html: &str) -> String {
+    if let Some(caps) = CODE_TAG_RE.captures(html) {
+        let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        
+        // Only return attributes if they contain language information
+        // This prevents returning empty or irrelevant attributes
+        if attrs.contains("language-") || attrs.contains("lang-") || attrs.contains("data-lang") {
+            attrs.to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    }
+}
+
 /// Clean HTML content by removing scripts, styles, ads, tracking, and other non-content elements
 ///
 /// This function performs aggressive cleaning including:
@@ -1184,10 +1396,13 @@ pub fn normalize_html_structure(html: &str) -> Result<String> {
 /// * `Err(anyhow::Error)` - If input exceeds size limit
 ///
 /// # Example
-/// ```
+/// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::clean_html_content;
 /// let html = r#"<div><script>alert('xss')</script><p>Hello &amp; goodbye</p></div>"#;
-/// let clean = clean_html_content(html);
-/// // Result: <div><p>Hello & goodbye</p></div>
+/// let clean = clean_html_content(html)?;
+/// assert!(clean.contains("<p>Hello"));
+/// assert!(!clean.contains("<script>"));
+/// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn clean_html_content(html: &str) -> Result<String> {
     // Validate input size to prevent memory exhaustion
@@ -1294,6 +1509,12 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     // Must happen before html2md conversion to prevent "## # Heading" duplication
     let result = HEADING_ANCHOR_MARKERS.replace_all(&result, "");
 
+    // Remove "Navigate to header" accessibility links (Issue #007)
+    // These appear as literal text in anchor elements for screen reader navigation
+    // Must be removed before htmd conversion to prevent markdown link duplication
+    // Pattern: <a ...>Navigate to header</a>
+    let result = HEADING_NAVIGATE_TO_HEADER_RE.replace_all(&result, "");
+
     // Unwrap heading wrapper divs (must be done before removing anchors)
     let result = HEADING_WRAPPER_RE.replace_all(&result, "$1");
 
@@ -1382,9 +1603,10 @@ pub fn clean_html_content(html: &str) -> Result<String> {
 ///
 /// # Example
 /// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::html_cleaning::normalize_image_tags;
 /// let html = r#"<img alt="demo" decoding="async" src="/image.jpg" width="800">"#;
 /// let result = normalize_image_tags(html);
-/// // Result: <img alt="demo" src="/image.jpg">
+/// assert_eq!(result, r#"<img src="/image.jpg" alt="demo">"#);
 /// ```
 pub fn normalize_image_tags(html: &str) -> String {
     // Process images with src in middle/end

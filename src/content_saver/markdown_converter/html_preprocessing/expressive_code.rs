@@ -23,7 +23,31 @@
 
 use anyhow::Result;
 use regex::Regex;
+use scraper::{Html, node::Node};
 use std::sync::LazyLock;
+
+/// Extract text content from HTML, stripping all tags including spans
+///
+/// Uses scraper to parse HTML and extract only text nodes, handling
+/// nested tags and HTML entity decoding automatically.
+///
+/// # Arguments
+/// * `html` - HTML fragment that may contain span tags and other markup
+///
+/// # Returns
+/// * Clean text with all HTML tags removed
+fn extract_text_from_html(html: &str) -> String {
+    let fragment = Html::parse_fragment(html);
+    let mut result = String::new();
+    
+    for node in fragment.root_element().descendants() {
+        if let Node::Text(text) = node.value() {
+            result.push_str(text);
+        }
+    }
+    
+    result
+}
 
 /// Use <br> elements as line separators - they survive HTML parser whitespace collapsing
 /// and will be converted to newlines by htmd in code blocks
@@ -67,16 +91,21 @@ pub fn preprocess_expressive_code(html: &str) -> Result<String> {
         }
         
         // Extract lines from ec-line divs
-        // We decode entities, then re-encode EACH LINE, then join with <br>
+        // Strip ALL HTML tags (including spans) FIRST, then encode the plain text
         // This ensures <br> stays as actual HTML element, not &lt;br&gt;
         let lines: Vec<String> = EC_LINE
             .captures_iter(inner_html)
             .map(|cap| {
                 let line_content = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-                // Decode HTML entities in the content
-                let decoded = html_escape::decode_html_entities(line_content).to_string();
-                // Re-encode special characters for valid HTML (BEFORE joining with <br>)
-                decoded
+                
+                // ✅ FIX: Strip ALL HTML tags (including spans) FIRST
+                // This extracts just the text content before any HTML escaping
+                let text_only = extract_text_from_html(line_content);
+                
+                // ✅ Now HTML-escape the PLAIN TEXT (no tags to break)
+                // The scraper crate already decoded entities, so we just need to
+                // escape special characters for valid HTML output
+                text_only
                     .replace('&', "&amp;")
                     .replace('<', "&lt;")
                     .replace('>', "&gt;")

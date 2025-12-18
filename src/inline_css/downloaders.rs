@@ -15,7 +15,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use citescrape::inline_css::downloaders::*;
+//! use kodegen_tools_citescrape::inline_css::downloaders::*;
 //! use reqwest::Client;
 //!
 //! let client = Client::new();
@@ -34,11 +34,12 @@ use base64::Engine;
 use futures::StreamExt;
 use reqwest::Client;
 
-use crate::utils::constants::CHROME_USER_AGENT;
-
 /// Configuration for download timeouts and size limits
 #[derive(Debug, Clone)]
 pub struct InlineConfig {
+    /// User-Agent string to use for HTTP requests (extracted from browser)
+    pub user_agent: String,
+
     /// Timeout for CSS downloads
     pub css_timeout: std::time::Duration,
     /// Timeout for image downloads
@@ -62,17 +63,17 @@ pub struct InlineConfig {
     pub max_svg_size: usize,
 }
 
-impl Default for InlineConfig {
-    fn default() -> Self {
+impl InlineConfig {
+    /// Create a new InlineConfig with the browser's User-Agent
+    pub fn new(user_agent: String) -> Self {
         Self {
+            user_agent,
             css_timeout: std::time::Duration::from_secs(30),
             image_timeout: std::time::Duration::from_secs(60),
             svg_timeout: std::time::Duration::from_secs(30),
-
-            // Reasonable defaults based on real-world usage
-            max_css_size: 2 * 1024 * 1024,   // 2MB (down from 10MB)
-            max_image_size: 5 * 1024 * 1024, // 5MB (down from 50MB)
-            max_svg_size: 1024 * 1024,       // 1MB (down from 5MB)
+            max_css_size: 2 * 1024 * 1024,
+            max_image_size: 5 * 1024 * 1024,
+            max_svg_size: 1024 * 1024,
         }
     }
 }
@@ -91,7 +92,7 @@ async fn download_css_core(url: String, client: Client, config: &InlineConfig) -
     let response = client
         .get(&url)
         .timeout(config.css_timeout)
-        .header("User-Agent", CHROME_USER_AGENT)
+        .header("User-Agent", &config.user_agent)
         .header("Accept", "text/css,*/*;q=0.1")
         .send()
         .await
@@ -163,7 +164,7 @@ async fn download_and_encode_image_core(
     let response = client
         .get(&url)
         .timeout(config.image_timeout)
-        .header("User-Agent", CHROME_USER_AGENT)
+        .header("User-Agent", &config.user_agent)
         .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
         .send()
         .await
@@ -262,7 +263,7 @@ async fn download_svg_core(url: String, client: Client, config: &InlineConfig) -
     let response = client
         .get(&url)
         .timeout(config.svg_timeout)
-        .header("User-Agent", CHROME_USER_AGENT)
+        .header("User-Agent", &config.user_agent)
         .header("Accept", "image/svg+xml,*/*;q=0.8")
         .send()
         .await

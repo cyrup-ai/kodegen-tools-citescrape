@@ -27,7 +27,7 @@ fn test_heading_element_structure() {
 #[test]
 fn test_ordinal_hierarchy() {
     // Test ordinal hierarchy for nested headings
-    let headings = vec![
+    let headings = [
         HeadingElement {
             level: 1,
             text: "First H1".to_string(),
@@ -153,16 +153,17 @@ fn test_ensure_h1_at_start_with_empty_headings_uses_title() {
 #[test]
 fn test_page_metadata_has_headings_field() {
     // Test that PageMetadata can store headings
-    let mut metadata = PageMetadata::default();
-    
-    metadata.headings = vec![
-        HeadingElement {
-            level: 1,
-            text: "Test H1".to_string(),
-            id: Some("test-h1".to_string()),
-            ordinal: vec![1],
-        },
-    ];
+    let metadata = PageMetadata {
+        headings: vec![
+            HeadingElement {
+                level: 1,
+                text: "Test H1".to_string(),
+                id: Some("test-h1".to_string()),
+                ordinal: vec![1],
+            },
+        ],
+        ..Default::default()
+    };
 
     assert_eq!(metadata.headings.len(), 1);
     assert_eq!(metadata.headings[0].text, "Test H1");

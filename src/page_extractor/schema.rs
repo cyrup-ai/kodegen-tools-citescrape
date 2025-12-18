@@ -25,7 +25,6 @@ pub enum InteractiveElementType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractiveElement {
     pub element_type: String,
-    pub selector: String,
     pub text: Option<String>,
     pub url: Option<String>,
     pub attributes: std::collections::HashMap<String, String>,
@@ -48,7 +47,6 @@ pub struct FormElement {
     pub method: Option<String>,
     pub inputs: Vec<InputElement>,
     pub buttons: Vec<ButtonElement>,
-    pub selector: String,
     pub attributes: HashMap<String, String>,
 }
 
@@ -63,7 +61,6 @@ pub struct InputElement {
     pub required: bool,
     #[serde(default)]
     pub disabled: bool,
-    pub selector: String,
     pub validation: Option<InputValidation>,
     pub attributes: HashMap<String, String>,
 }
@@ -83,7 +80,6 @@ pub struct ButtonElement {
     pub id: Option<String>,
     pub text: Option<String>,
     pub button_type: Option<String>,
-    pub selector: String,
     #[serde(default)]
     pub disabled: bool,
     pub form_id: Option<String>,
@@ -97,13 +93,11 @@ pub struct LinkElement {
     pub title: Option<String>,
     pub target: Option<String>,
     pub rel: Option<String>,
-    pub selector: String,
     pub attributes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClickableElement {
-    pub selector: String,
     pub text: Option<String>,
     pub role: Option<String>,
     pub aria_label: Option<String>,
@@ -113,7 +107,6 @@ pub struct ClickableElement {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NavigationElement {
-    pub selector: String,
     pub text: Option<String>,
     pub url: Option<String>,
     pub nav_type: String, // "menu", "breadcrumb", "pagination", etc.

@@ -6,6 +6,7 @@
 use crate::utils::{
     DEFAULT_CRAWL_RATE_RPS, DEFAULT_MAX_DEPTH, SCREENSHOT_QUALITY, SEARCH_BATCH_SIZE,
 };
+use anyhow::{anyhow, Result};
 use regex::Regex;
 use std::marker::PhantomData;
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use super::types::CrawlConfig;
 /// # Errors
 ///
 /// Returns an error if the resulting regex pattern is invalid.
-fn compile_glob_pattern(pattern: &str) -> Result<Regex, String> {
+fn compile_glob_pattern(pattern: &str) -> Result<Regex> {
     // Convert glob pattern to regex: * becomes .*
     let regex_pattern = pattern.replace('*', ".*");
 
@@ -28,7 +29,7 @@ fn compile_glob_pattern(pattern: &str) -> Result<Regex, String> {
     let anchored = format!("^{regex_pattern}$");
 
     // Compile the regex
-    Regex::new(&anchored).map_err(|e| format!("Invalid glob pattern '{pattern}': {e}"))
+    Regex::new(&anchored).map_err(|e| anyhow!("Invalid glob pattern '{pattern}': {e}"))
 }
 
 // Type states for the builder
@@ -77,6 +78,7 @@ pub struct CrawlConfigBuilder<State = ()> {
     pub(crate) max_concurrent_pages: Option<usize>,
     pub(crate) max_concurrent_per_domain: Option<usize>,
     pub(crate) compression_threshold_bytes: Option<usize>,
+    pub(crate) max_page_retries: Option<u8>,
     pub(crate) _phantom: PhantomData<State>,
 }
 
@@ -123,6 +125,7 @@ impl Default for CrawlConfigBuilder<()> {
             max_concurrent_pages: Some(10),
             max_concurrent_per_domain: Some(2),
             compression_threshold_bytes: Some(1_048_576), // 1MB default
+            max_page_retries: Some(3),  // Default: 3 retry attempts
             _phantom: PhantomData,
         }
     }
@@ -179,6 +182,7 @@ impl CrawlConfigBuilder<()> {
             max_concurrent_pages: self.max_concurrent_pages,
             max_concurrent_per_domain: self.max_concurrent_per_domain,
             compression_threshold_bytes: self.compression_threshold_bytes,
+            max_page_retries: self.max_page_retries,
             _phantom: PhantomData,
         }
     }
@@ -237,6 +241,7 @@ impl CrawlConfigBuilder<WithStorageDir> {
             max_concurrent_pages: self.max_concurrent_pages,
             max_concurrent_per_domain: self.max_concurrent_per_domain,
             compression_threshold_bytes: self.compression_threshold_bytes,
+            max_page_retries: self.max_page_retries,
             _phantom: PhantomData,
         }
     }
@@ -244,13 +249,13 @@ impl CrawlConfigBuilder<WithStorageDir> {
 
 // Build method only available when all required fields are set
 impl CrawlConfigBuilder<WithStartUrl> {
-    pub fn build(self) -> Result<CrawlConfig, String> {
+    pub fn build(self) -> Result<CrawlConfig> {
         // Compile excluded patterns once at config creation
         let excluded_patterns_compiled = if let Some(ref patterns) = self.excluded_patterns {
             patterns
                 .iter()
                 .map(|p| compile_glob_pattern(p))
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
@@ -272,8 +277,12 @@ impl CrawlConfigBuilder<WithStartUrl> {
         let headless = self.headless;
 
         Ok(CrawlConfig {
-            storage_dir: self.storage_dir.ok_or("storage_dir is required")?,
-            start_url: self.start_url.ok_or("start_url is required")?,
+            storage_dir: self
+                .storage_dir
+                .ok_or_else(|| anyhow!("storage_dir is required"))?,
+            start_url: self
+                .start_url
+                .ok_or_else(|| anyhow!("start_url is required"))?,
             only_html: self.only_html,
             full_resources: self.full_resources,
             limit: self.limit,
@@ -315,8 +324,10 @@ impl CrawlConfigBuilder<WithStartUrl> {
             max_concurrent_pages: self.max_concurrent_pages,
             max_concurrent_per_domain: self.max_concurrent_per_domain,
             chrome_data_dir: None,
+            browser_pool: None,
             compress_output: false, // Default to uncompressed
             compression_threshold_bytes: self.compression_threshold_bytes,
+            max_page_retries: self.max_page_retries,
         })
     }
 }
@@ -333,15 +344,47 @@ impl<State> CrawlConfigBuilder<State> {
     ///
     /// # Example
     /// ```rust
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
+    /// # fn main() -> anyhow::Result<()> {
     /// let config = CrawlConfig::builder()
     ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
     ///     .compression_threshold_bytes(5 * 1024 * 1024) // 5MB for high-perf server
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn compression_threshold_bytes(mut self, bytes: usize) -> Self {
         self.compression_threshold_bytes = Some(bytes);
+        self
+    }
+
+    /// Set maximum page retry attempts for transient failures
+    ///
+    /// When a page fails due to timeout, network error, or browser crash,
+    /// it will be retried up to this many times with exponential backoff.
+    ///
+    /// Set to 0 to disable page-level retries (errors become permanent).
+    ///
+    /// # Arguments
+    /// * `retries` - Maximum number of retry attempts (default: 3)
+    ///
+    /// # Example
+    /// ```rust
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
+    /// # fn main() -> anyhow::Result<()> {
+    /// let config = CrawlConfig::builder()
+    ///     .storage_dir("./output")
+    ///     .start_url("https://example.com")
+    ///     .max_page_retries(5)  // Allow up to 5 retries
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn max_page_retries(mut self, retries: u8) -> Self {
+        self.max_page_retries = Some(retries);
         self
     }
 }

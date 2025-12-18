@@ -13,7 +13,7 @@
 //!
 //! ## Standalone Scripts
 //! ```no_run
-//! use kodegen_citescrape::web_search;
+//! use kodegen_tools_citescrape::web_search;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -28,7 +28,7 @@
 //!
 //! ## MCP Tools (Managed Lifecycle)
 //! ```no_run
-//! use kodegen_citescrape::web_search::{BrowserManager, search_with_manager};
+//! use kodegen_tools_citescrape::web_search::{BrowserManager, search_with_manager};
 //!
 //! async fn tool_execute(manager: &BrowserManager) -> anyhow::Result<()> {
 //!     let results = search_with_manager(manager, "query").await?;
@@ -113,7 +113,7 @@ pub async fn search_with_manager(
 ///
 /// # Example
 /// ```no_run
-/// use kodegen_citescrape::web_search;
+/// use kodegen_tools_citescrape::web_search;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
@@ -140,7 +140,7 @@ pub async fn search(query: impl Into<String>) -> Result<SearchResults> {
 ///
 /// # Example
 /// ```no_run
-/// use kodegen_citescrape::web_search;
+/// use kodegen_tools_citescrape::web_search;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {

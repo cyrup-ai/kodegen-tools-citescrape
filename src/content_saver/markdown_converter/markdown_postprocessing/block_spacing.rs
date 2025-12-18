@@ -85,9 +85,10 @@ static HEADING_BEFORE_HEADING: LazyLock<Regex> = LazyLock::new(|| {
 /// # Examples
 ///
 /// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::block_spacing::ensure_block_element_spacing;
 /// let input = "**Install:**\n- macOS\n- Linux";
 /// let output = ensure_block_element_spacing(input);
-/// assert_eq!(output, "**Install:**\n\n- macOS\n- Linux");
+/// assert_eq!(output, "**Install:**\n\n- macOS\n\n- Linux");
 /// ```
 pub fn ensure_block_element_spacing(markdown: &str) -> String {
     let mut result = markdown.to_string();

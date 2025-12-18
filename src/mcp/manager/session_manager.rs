@@ -135,8 +135,9 @@ impl CrawlSessionManager {
     /// # Usage
     /// Called from main.rs after wrapping manager in Arc:
     /// ```rust,no_run
+    /// use kodegen_tools_citescrape::mcp::manager::CrawlSessionManager;
     /// use std::sync::Arc;
-    ///
+    /// 
     /// let session_manager = Arc::new(CrawlSessionManager::new());
     /// session_manager.clone().start_cleanup_task();
     /// ```

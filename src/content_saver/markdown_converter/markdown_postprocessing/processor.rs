@@ -154,7 +154,7 @@ pub fn process_markdown_headings(markdown: &str) -> String {
 
     // Auto-close fence if still open (best-effort recovery)
     if let Some(fence) = fence_stack {
-        tracing::warn!(
+        tracing::debug!(
             "Unclosed code fence starting at line {} (char: '{}', count: {}), attempting recovery",
             fence.line_number,
             fence.char,
@@ -184,7 +184,7 @@ pub fn process_markdown_headings(markdown: &str) -> String {
             let insert_pos = (last_code_idx + 1).min(processed_lines.len());
             processed_lines.insert(insert_pos, closing);
 
-            tracing::info!(
+            tracing::debug!(
                 "Auto-closed fence at line {} (after last code-like content at line {})",
                 insert_pos + 1,
                 last_code_idx + 1

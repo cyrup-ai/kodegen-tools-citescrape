@@ -18,6 +18,8 @@ impl ErrorContext {
     ///
     /// # Example
     /// ```
+    /// use kodegen_tools_citescrape::mcp::validation::ErrorContext;
+    /// 
     /// let ctx = ErrorContext::new("Get crawl results");
     /// ```
     pub fn new(operation: impl Into<String>) -> Self {
@@ -32,8 +34,11 @@ impl ErrorContext {
     ///
     /// # Example
     /// ```
-    /// ctx.detail("crawl_id: Some(\"abc-123\")")
-    ///    .detail("Session not found in active manager");
+    /// use kodegen_tools_citescrape::mcp::validation::ErrorContext;
+    /// 
+    /// let ctx = ErrorContext::new("Get crawl results")
+    ///     .detail("crawl_id: Some(\"abc-123\")")
+    ///     .detail("Session not found in active manager");
     /// ```
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.details.push(detail.into());
@@ -44,8 +49,11 @@ impl ErrorContext {
     ///
     /// # Example
     /// ```
-    /// ctx.suggest("Verify the crawl_id is correct")
-    ///    .suggest("Use get_crawl_results to check status");
+    /// use kodegen_tools_citescrape::mcp::validation::ErrorContext;
+    /// 
+    /// let error = ErrorContext::new("Get crawl results")
+    ///     .suggest("Verify the crawl_id is correct")
+    ///     .suggest("Use get_crawl_results to check status");
     /// ```
     pub fn suggest(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestions.push(suggestion.into());

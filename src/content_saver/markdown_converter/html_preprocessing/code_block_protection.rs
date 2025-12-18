@@ -43,11 +43,13 @@ impl CodeBlockProtector {
     /// 3. Replace with HTML comment: <!--CITESCRAPE-PRE-{id}:{base64}-->
     /// 4. HTML comments are guaranteed to pass through DOM parsers unchanged
     ///
-    /// Example transformation:
-    /// ```
-    /// <pre><code>npm install -g @anthropic-ai/claude-code</code></pre>
-    /// ↓
-    /// <!--CITESCRAPE-PRE-0:PHByZT48Y29kZT5ucG0gaW5zdGFsbCAtZyBAYW50aHJvcGljLWFpL2NsYXVkZS1jb2RlPC9jb2RlPjwvcHJlPg==-->
+    /// # Example
+    /// ```rust
+    /// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::code_block_protection::CodeBlockProtector;
+    /// let mut protector = CodeBlockProtector::new();
+    /// let html = r#"<pre><code>npm install -g @anthropic-ai/claude-code</code></pre>"#;
+    /// let protected = protector.protect(html);
+    /// assert!(protected.contains("<!--CITESCRAPE-PRE-"));
     /// ```
     ///
     /// Returns: HTML with all <pre> blocks replaced by comment placeholders

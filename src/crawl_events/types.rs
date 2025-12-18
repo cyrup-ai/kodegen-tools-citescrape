@@ -54,6 +54,13 @@ pub enum CrawlEvent {
         url: String,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+    /// Emitted when a page has exhausted all retry attempts
+    RetryExhausted {
+        url: String,
+        attempts: u8,
+        final_error: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
     /// Signals that the event bus is shutting down
     ///
     /// Subscribers should exit their event loops when receiving this event.
@@ -201,6 +208,17 @@ impl CrawlEvent {
     pub fn cache_hit(url: String) -> Self {
         Self::CacheHit {
             url,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    /// Create a RetryExhausted event
+    #[must_use]
+    pub fn retry_exhausted(url: String, attempts: u8, final_error: String) -> Self {
+        Self::RetryExhausted {
+            url,
+            attempts,
+            final_error,
             timestamp: chrono::Utc::now(),
         }
     }

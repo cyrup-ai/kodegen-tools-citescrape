@@ -15,12 +15,32 @@ use url::Url;
 /// otherwise falls back to `~/.local/share/kodegen/citescrape`.
 ///
 /// # Examples
+/// 
+/// Basic usage with default output directory:
 /// ```
-/// url_to_output_dir("https://ratatui.rs/concepts/layout", None)
-/// // => Ok(PathBuf::from("${git_root}/.kodegen/citescrape/ratatui.rs"))
-///
-/// url_to_output_dir("https://example.com:8080/path", Some("/custom/path"))
-/// // => Ok(PathBuf::from("/custom/path/example.com_8080"))
+/// use kodegen_tools_citescrape::mcp::manager::url_to_output_dir;
+/// 
+/// let output_dir = url_to_output_dir(
+///     "https://ratatui.rs/concepts/layout",
+///     None,
+///     None
+/// ).unwrap();
+/// 
+/// assert!(output_dir.to_string_lossy().contains("ratatui.rs"));
+/// ```
+/// 
+/// With custom base directory:
+/// ```
+/// use kodegen_tools_citescrape::mcp::manager::url_to_output_dir;
+/// use std::path::PathBuf;
+/// 
+/// let output_dir = url_to_output_dir(
+///     "https://example.com:8080/path",
+///     Some("/tmp/custom"),
+///     None
+/// ).unwrap();
+/// 
+/// assert_eq!(output_dir, PathBuf::from("/tmp/custom/example.com"));
 /// ```
 pub fn url_to_output_dir(
     url: &str,

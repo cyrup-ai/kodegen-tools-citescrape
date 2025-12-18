@@ -283,6 +283,68 @@ fn has_shell_patterns(content: &str) -> bool {
     false
 }
 
+/// Check if content contains PowerShell-specific patterns
+fn has_powershell_patterns(content: &str) -> bool {
+    use regex::Regex;
+    use once_cell::sync::Lazy;
+    
+    // PowerShell cmdlet verb-noun pattern (most distinctive PowerShell feature)
+    static POWERSHELL_CMDLET_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"\b(Get|Set|New|Remove|Add|Clear|Copy|Move|Rename|Write|Read|Test|Invoke|Start|Stop|Restart|Enable|Disable|Import|Export|ConvertTo|ConvertFrom|Select|Where|ForEach|Sort|Group|Measure)-[A-Z]\w+"
+        ).expect("Invalid PowerShell cmdlet regex")
+    });
+    
+    // PowerShell aliases
+    static POWERSHELL_ALIAS_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\b(irm|iex|iwr)\b").expect("Invalid PowerShell alias regex")
+    });
+    
+    // .NET type invocation syntax [Type]::Method
+    static DOTNET_TYPE_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\[[A-Z]\w+(\.[A-Z]\w+)*\]::").expect("Invalid .NET type regex")
+    });
+    
+    // PowerShell comparison operators
+    static POWERSHELL_OPERATOR_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"-(eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|in|notin|and|or|not|xor)\b")
+            .expect("Invalid PowerShell operator regex")
+    });
+    
+    // PowerShell automatic variables
+    static POWERSHELL_VAR_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\$(PSScriptRoot|PSVersionTable|PSCommandPath|PSBoundParameters|ErrorActionPreference|ProgressPreference|Host|MyInvocation)\b")
+            .expect("Invalid PowerShell variable regex")
+    });
+    
+    // Check for PowerShell cmdlets (strongest signal)
+    if POWERSHELL_CMDLET_REGEX.is_match(content) {
+        return true;
+    }
+    
+    // Check for PowerShell aliases
+    if POWERSHELL_ALIAS_REGEX.is_match(content) {
+        return true;
+    }
+    
+    // Check for .NET type syntax
+    if DOTNET_TYPE_REGEX.is_match(content) {
+        return true;
+    }
+    
+    // Check for PowerShell operators
+    if POWERSHELL_OPERATOR_REGEX.is_match(content) {
+        return true;
+    }
+    
+    // Check for PowerShell automatic variables
+    if POWERSHELL_VAR_REGEX.is_match(content) {
+        return true;
+    }
+    
+    false
+}
+
 /// Validate that HTML-provided language hint matches content
 ///
 /// Returns true if the hint seems correct, false if suspicious.
@@ -320,6 +382,20 @@ pub fn validate_html_language(html_lang: &str, code: &str) -> bool {
         )
     {
         return false; // HTML says sql/ruby/php/cpp/toml/css/go, but content is shell
+    }
+
+    // PowerShell indicators - if present, reject non-PowerShell language hints
+    if has_powershell_patterns(code)
+        && matches!(
+            html_lang_lower.as_str(),
+            "toml" | "bash" | "sh" | "shell" 
+                | "python" | "ruby" | "perl"
+                | "sql" | "mysql" | "postgres" | "postgresql"
+                | "yaml" | "json"
+                | "javascript" | "typescript"
+        )
+    {
+        return false; // HTML says toml/bash/etc, but content is PowerShell
     }
 
     // TOML indicators - if present, bash/shell hints are wrong

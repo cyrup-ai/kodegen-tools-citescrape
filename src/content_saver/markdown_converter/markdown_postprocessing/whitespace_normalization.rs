@@ -4,6 +4,22 @@
 //! CommonMark structural semantics.
 
 use super::code_fence_detection::{detect_code_fence, CodeFence};
+use std::sync::LazyLock;
+
+// Fix angle bracket spacing from htmd's unknown element handler
+// Matches: < word with internal spaces >
+// Examples: < nam e > → <name>, < ur l > → <url>, < comman d > → <command>
+// Does NOT match shell heredoc markers: << EOF >
+static ANGLE_BRACKET_SPACING: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    // Pattern explanation:
+    // (?<!<)          - Negative lookbehind: NOT preceded by < (avoids heredoc: << EOF >)
+    // < \s+           - Opening bracket followed by one or more whitespace
+    // ([\w\s-]+?)     - Capture group: word chars, spaces, hyphens (non-greedy)
+    // \s+ >           - One or more whitespace followed by closing bracket
+    // Uses fancy_regex for negative lookbehind support
+    fancy_regex::Regex::new(r"(?<!<)<\s+([\w\s-]+?)\s+>")
+        .expect("ANGLE_BRACKET_SPACING: hardcoded regex is valid")
+});
 
 /// Classification of markdown line types for spacing logic
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,9 +201,10 @@ fn should_add_blank_after(line_type: LineType) -> bool {
 /// # Examples
 ///
 /// ```rust
-/// let input = "# Heading\n\n\n\nParagraph with trailing spaces   \n\n\nAnother paragraph";
-/// let output = normalize_whitespace(input);
-/// // Output: "# Heading\n\nParagraph with trailing spaces\n\nAnother paragraph"
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::whitespace_normalization::normalize_whitespace;
+/// let input = "# Title\n\n\n\nParagraph   \n\n";
+/// let result = normalize_whitespace(input);
+/// // Normalizes excessive blank lines and trailing spaces
 /// ```
 pub fn normalize_whitespace(markdown: &str) -> String {
     let lines: Vec<&str> = markdown.lines().collect();
@@ -286,7 +303,7 @@ pub fn normalize_whitespace(markdown: &str) -> String {
     
     // Handle unclosed code fence (best-effort recovery)
     if let Some(fence) = fence_stack {
-        tracing::warn!(
+        tracing::debug!(
             "Unclosed code fence starting at line {} (char: '{}', count: {})",
             fence.line_number,
             fence.char,
@@ -437,4 +454,173 @@ pub fn fix_bold_internal_spacing(markdown: &str) -> String {
     result = SPACE_BEFORE_PUNCTUATION.replace_all(&result, "$1$2").to_string();
 
     result
+}
+
+/// Fix angle bracket spacing caused by htmd's unknown element handler
+///
+/// When HTML contains literal angle brackets like `<name>` or `<url>` for
+/// placeholders, the HTML parser treats them as unknown HTML elements.
+/// htmd's default element handler then inserts spaces, producing `< nam e >`.
+///
+/// This function detects and fixes the pattern:
+/// - `< nam e >` → `<name>`
+/// - `< ur l >` → `<url>`  
+/// - `< comman d >` → `<command>`
+///
+/// # Arguments
+///
+/// * `markdown` - The markdown content to fix
+///
+/// # Returns
+///
+/// Markdown with corrected angle bracket spacing
+///
+/// # Examples
+///
+/// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::fix_angle_bracket_spacing;
+/// let broken = "Use < nam e > and < ur l > as placeholders";
+/// let fixed = fix_angle_bracket_spacing(broken);
+/// assert_eq!(fixed, "Use <name> and <url> as placeholders");
+/// ```
+pub fn fix_angle_bracket_spacing(markdown: &str) -> String {
+    ANGLE_BRACKET_SPACING.replace_all(markdown, |caps: &fancy_regex::Captures| {
+        // Extract the captured content (everything between < and >)
+        let content = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        
+        // Remove all internal whitespace
+        let cleaned = content.split_whitespace().collect::<String>();
+        
+        // Return with properly formatted angle brackets (no spaces)
+        format!("<{}>", cleaned)
+    }).to_string()
+}
+
+
+/// Fix spacing in HTML tag syntax from htmd's unknown element handler
+///
+/// When htmd encounters unrecognized HTML elements (like `<span style="...">` in code blocks),
+/// its default element handler treats them as text and adds spaces around punctuation characters.
+/// This creates malformed HTML syntax like:
+/// - `< /span >` instead of `</span>`
+/// - `style = "..."` instead of `style="..."`
+/// - `style="..." >` instead of `style="...">`
+///
+/// This function detects and fixes these patterns using regex replacements. It is careful to
+/// only match HTML attribute contexts (e.g., `attr="value" >`) and not shell redirect operators
+/// (e.g., `echo 'text' >`).
+///
+/// # Arguments
+///
+/// * `markdown` - The markdown content to fix
+///
+/// # Returns
+///
+/// Markdown with corrected HTML tag spacing
+///
+/// # Examples
+///
+/// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::fix_html_tag_spacing;
+/// let broken = r#"<span style = "color:red" > text < /span >"#;
+/// let fixed = fix_html_tag_spacing(broken);
+/// assert_eq!(fixed, r#"<span style="color:red"> text </span>"#);
+/// ```
+pub fn fix_html_tag_spacing(markdown: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    
+    // Pattern 1: Fix spaces around = in attributes
+    // Matches: attribute = "value" or attribute ="value" or attribute= "value"
+    // Replaces with: attribute="value"
+    static ATTR_EQUALS_SPACING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(\w+)\s*=\s*""#)
+            .expect("ATTR_EQUALS_SPACING: hardcoded regex is valid")
+    });
+    
+    // Pattern 2: Fix spaces before closing > in HTML tags only
+    // Matches: attribute="value" > or attribute='value' >
+    // Does NOT match shell redirects like: echo 'text' >
+    // Uses negative lookbehind to ensure quote is preceded by = (HTML attribute context)
+    static CLOSE_BRACKET_SPACING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(=["'][^"']*["'])\s+>"#)
+            .expect("CLOSE_BRACKET_SPACING: hardcoded regex is valid")
+    });
+    
+    // Pattern 5: Fix spaces after closing > in opening HTML tags
+    // Matches: "> text" when the > follows a quoted attribute value
+    // Replaces with: ">text" (no space)
+    // Does NOT match shell redirects because quote must immediately precede >
+    static OPEN_TAG_AFTER_GT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(["'])>\s+"#)
+            .expect("OPEN_TAG_AFTER_GT: hardcoded regex is valid")
+    });
+    
+    // Pattern 6: Fix spaces before opening < in closing tags
+    // Matches: content followed by space(s) followed by </
+    // Replaces with: content immediately followed by </
+    // This handles cases like "git </span>" -> "git</span>"
+    static SPACE_BEFORE_CLOSE_TAG: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\s+</")
+            .expect("SPACE_BEFORE_CLOSE_TAG: hardcoded regex is valid")
+    });
+    
+    // Pattern 3: Fix spaces in closing tags after <
+    // Matches: < /tag
+    // Replaces with: </tag
+    static CLOSE_TAG_AFTER_LT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"<\s+/")
+            .expect("CLOSE_TAG_AFTER_LT: hardcoded regex is valid")
+    });
+    
+    // Pattern 4: Fix spaces in closing tags before >
+    // Matches: </tag >
+    // Replaces with: </tag>
+    static CLOSE_TAG_BEFORE_GT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(/\w+)\s+>")
+            .expect("CLOSE_TAG_BEFORE_GT: hardcoded regex is valid")
+    });
+    
+    let mut result = markdown.to_string();
+    
+    // Apply fixes in sequence
+    // Order matters: fix attribute equals first, then closing bracket, then after bracket,
+    // then fix < / to </, THEN remove spaces before </, then fix /tag >
+    result = ATTR_EQUALS_SPACING.replace_all(&result, "$1=\"").to_string();
+    result = CLOSE_BRACKET_SPACING.replace_all(&result, "$1>").to_string();
+    result = OPEN_TAG_AFTER_GT.replace_all(&result, "$1>").to_string();  // Pattern 5
+    result = CLOSE_TAG_AFTER_LT.replace_all(&result, "</").to_string();  // Pattern 3: < / -> </
+    result = SPACE_BEFORE_CLOSE_TAG.replace_all(&result, "</").to_string();  // Pattern 6: " </" -> "</"
+    result = CLOSE_TAG_BEFORE_GT.replace_all(&result, "$1>").to_string();
+    
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fix_html_tag_spacing_complete() {
+        let input = r#"<span style = "--0:#82AAFF;--1:#3B61B0" > git < /span >"#;
+        let expected = r#"<span style="--0:#82AAFF;--1:#3B61B0">git</span>"#;
+        let result = fix_html_tag_spacing(input);
+        assert_eq!(result, expected, "All HTML tag spacing issues should be fixed");
+    }
+
+    #[test]
+    fn test_fix_html_tag_spacing_space_after_gt() {
+        let input = r#"<span style="color:red"> text</span>"#;
+        let expected = r#"<span style="color:red">text</span>"#;
+        let result = fix_html_tag_spacing(input);
+        assert_eq!(result, expected, "Space after > should be removed");
+    }
+
+    #[test]
+    fn test_fix_html_tag_spacing_preserves_shell_redirects() {
+        let input = r#"echo "hello" > file.txt"#;
+        let result = fix_html_tag_spacing(input);
+        // Should NOT change shell redirects
+        assert_eq!(result, input, "Shell redirects should be preserved");
+    }
 }

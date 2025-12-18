@@ -1084,6 +1084,138 @@ pub static SQL: LanguageDefinition = LanguageDefinition {
     ],
 };
 
+pub static POWERSHELL: LanguageDefinition = LanguageDefinition {
+    name: "powershell",
+    patterns: &[
+        // Unique to PowerShell (10 pts each) - Cmdlet verb-noun pattern
+        WeightedPattern::new(r#"\b(Get|Set|New|Remove|Add|Clear|Copy|Move|Rename|Write|Read|Test|Invoke|Start|Stop|Restart|Enable|Disable|Import|Export|ConvertTo|ConvertFrom|Select|Where|ForEach|Sort|Group|Measure)-[A-Z]\w+"#, Unique),
+        
+        // PowerShell cmdlet aliases (10 pts each)
+        WeightedPattern::new(r#"\b(irm|iex|iwr|iwk)\b"#, Unique),  // Invoke-RestMethod, Invoke-Expression, Invoke-WebRequest, Invoke-WebKit
+        
+        // .NET type syntax - unique to PowerShell (10 pts each)
+        WeightedPattern::new(r#"\[[A-Z]\w+(\.[A-Z]\w+)*\]::"#, Unique),  // [Type]::Method or [Namespace.Type]::
+        WeightedPattern::new(r#"\[scriptblock\]::"#, Unique),
+        WeightedPattern::new(r#"\[System\.\w+\]::"#, Unique),
+        WeightedPattern::new(r#"\[PSCustomObject\]"#, Unique),
+        WeightedPattern::new(r#"\[CmdletBinding\(\)"#, Unique),
+        WeightedPattern::new(r#"\[Parameter\([^\)]*\)\]"#, Unique),
+        WeightedPattern::new(r#"\[ValidateSet\([^\)]*\)\]"#, Unique),
+        WeightedPattern::new(r#"\[ValidateNotNull\(\)\]"#, Unique),
+        WeightedPattern::new(r#"\[ValidateNotNullOrEmpty\(\)\]"#, Unique),
+        
+        // PowerShell automatic variables (10 pts each)
+        WeightedPattern::new(r#"\$PSScriptRoot\b"#, Unique),
+        WeightedPattern::new(r#"\$PSVersionTable\b"#, Unique),
+        WeightedPattern::new(r#"\$PSCommandPath\b"#, Unique),
+        WeightedPattern::new(r#"\$PSBoundParameters\b"#, Unique),
+        WeightedPattern::new(r#"\$ErrorActionPreference\b"#, Unique),
+        WeightedPattern::new(r#"\$ProgressPreference\b"#, Unique),
+        WeightedPattern::new(r#"\$VerbosePreference\b"#, Unique),
+        WeightedPattern::new(r#"\$WarningPreference\b"#, Unique),
+        WeightedPattern::new(r#"\$Host\b"#, Unique),
+        WeightedPattern::new(r#"\$MyInvocation\b"#, Unique),
+        
+        // PowerShell comparison operators (10 pts each)
+        WeightedPattern::new(r#"-eq\b"#, Unique),
+        WeightedPattern::new(r#"-ne\b"#, Unique),
+        WeightedPattern::new(r#"-gt\b"#, Unique),
+        WeightedPattern::new(r#"-ge\b"#, Unique),
+        WeightedPattern::new(r#"-lt\b"#, Unique),
+        WeightedPattern::new(r#"-le\b"#, Unique),
+        WeightedPattern::new(r#"-like\b"#, Unique),
+        WeightedPattern::new(r#"-notlike\b"#, Unique),
+        WeightedPattern::new(r#"-match\b"#, Unique),
+        WeightedPattern::new(r#"-notmatch\b"#, Unique),
+        WeightedPattern::new(r#"-contains\b"#, Unique),
+        WeightedPattern::new(r#"-notcontains\b"#, Unique),
+        WeightedPattern::new(r#"-in\b"#, Unique),
+        WeightedPattern::new(r#"-notin\b"#, Unique),
+        
+        // PowerShell logical operators (10 pts each)
+        WeightedPattern::new(r#"-and\b"#, Unique),
+        WeightedPattern::new(r#"-or\b"#, Unique),
+        WeightedPattern::new(r#"-not\b"#, Unique),
+        WeightedPattern::new(r#"-xor\b"#, Unique),
+        
+        // PowerShell pipeline variable (10 pts each)
+        WeightedPattern::new(r#"\$_\."#, Unique),
+        WeightedPattern::new(r#"\$PSItem\."#, Unique),
+        
+        // PowerShell splatting (10 pts each)
+        WeightedPattern::new(r#"@\w+\s*="#, Unique),  // @Parameters = @{}
+        WeightedPattern::new(r#"@\{[^}]*\}"#, Unique),  // Hash table literal
+        WeightedPattern::new(r#"@\([^\)]*\)"#, Unique),  // Array subexpression
+        
+        // PowerShell here-strings (10 pts each)
+        WeightedPattern::new(r#"@["']"#, Unique),  // Start of here-string
+        WeightedPattern::new(r#"^["']@"#, Unique),  // End of here-string
+        
+        // PowerShell function syntax (8 pts each - Strong)
+        WeightedPattern::new(r#"\bfunction\s+\w+\s*\{"#, Strong),
+        WeightedPattern::new(r#"\bparam\s*\("#, Strong),
+        WeightedPattern::new(r#"\[string\]\s*\$\w+"#, Strong),
+        WeightedPattern::new(r#"\[int\]\s*\$\w+"#, Strong),
+        WeightedPattern::new(r#"\[bool\]\s*\$\w+"#, Strong),
+        WeightedPattern::new(r#"\[array\]\s*\$\w+"#, Strong),
+        WeightedPattern::new(r#"\[hashtable\]\s*\$\w+"#, Strong),
+        
+        // Common PowerShell cmdlets (8 pts each - Strong)
+        WeightedPattern::new(r#"\bWrite-Host\b"#, Strong),
+        WeightedPattern::new(r#"\bWrite-Output\b"#, Strong),
+        WeightedPattern::new(r#"\bWrite-Error\b"#, Strong),
+        WeightedPattern::new(r#"\bWrite-Warning\b"#, Strong),
+        WeightedPattern::new(r#"\bWrite-Verbose\b"#, Strong),
+        WeightedPattern::new(r#"\bWrite-Debug\b"#, Strong),
+        WeightedPattern::new(r#"\bGet-Content\b"#, Strong),
+        WeightedPattern::new(r#"\bSet-Content\b"#, Strong),
+        WeightedPattern::new(r#"\bGet-ChildItem\b"#, Strong),
+        WeightedPattern::new(r#"\bGet-Process\b"#, Strong),
+        WeightedPattern::new(r#"\bGet-Service\b"#, Strong),
+        WeightedPattern::new(r#"\bTest-Path\b"#, Strong),
+        WeightedPattern::new(r#"\bNew-Item\b"#, Strong),
+        WeightedPattern::new(r#"\bRemove-Item\b"#, Strong),
+        WeightedPattern::new(r#"\bCopy-Item\b"#, Strong),
+        WeightedPattern::new(r#"\bMove-Item\b"#, Strong),
+        
+        // PowerShell control flow (8 pts - Strong)
+        WeightedPattern::new(r#"\bforeach\s*\(\s*\$\w+\s+in\s+"#, Strong),
+        WeightedPattern::new(r#"\bif\s*\([^)]*-\w+\s+"#, Strong),  // if with PowerShell operator
+        WeightedPattern::new(r#"\belseif\s*\("#, Strong),
+        WeightedPattern::new(r#"\bswitch\s*\(\s*\$"#, Strong),
+        WeightedPattern::new(r#"\btry\s*\{"#, Strong),
+        WeightedPattern::new(r#"\bcatch\s*\{"#, Strong),
+        WeightedPattern::new(r#"\bfinally\s*\{"#, Strong),
+        
+        // PowerShell pipeline operators (5 pts - Medium)
+        WeightedPattern::new(r#"\|\s*Where-Object"#, Medium),
+        WeightedPattern::new(r#"\|\s*Select-Object"#, Medium),
+        WeightedPattern::new(r#"\|\s*ForEach-Object"#, Medium),
+        WeightedPattern::new(r#"\|\s*Sort-Object"#, Medium),
+        WeightedPattern::new(r#"\|\s*Group-Object"#, Medium),
+        WeightedPattern::new(r#"\|\s*Measure-Object"#, Medium),
+        WeightedPattern::new(r#"\|\s*Out-"#, Medium),
+        
+        // PowerShell common aliases (5 pts - Medium)
+        WeightedPattern::new(r#"\b(ls|dir|cd|pwd|rm|cp|mv|cat|echo|kill|ps|sleep)\s+"#, Medium),
+        
+        // PowerShell comments (5 pts - Medium)
+        WeightedPattern::new(r#"<#[\s\S]*?#>"#, Medium),  // Block comment
+        WeightedPattern::new(r##"#[^\n]+$"##, Medium),     // Line comment
+        
+        // Negative patterns - disqualify PowerShell for other language syntax
+        WeightedPattern::new(r#"\bfn\s+\w+\s*\("#, Negative),           // Rust
+        WeightedPattern::new(r#"\bdef\s+\w+\s*\("#, Negative),          // Python
+        WeightedPattern::new(r#"public\s+class\s+\w+"#, Negative),     // Java
+        WeightedPattern::new(r#"\bpackage\s+\w+"#, Negative),          // Go
+        WeightedPattern::new(r##"#\[derive\("##, Negative),            // Rust attribute
+        WeightedPattern::new(r#"\bimpl\s+\w+\s+for\s+"#, Negative),    // Rust
+        WeightedPattern::new(r#"SELECT\s+.+\s+FROM\s+"#, Negative),    // SQL
+        WeightedPattern::new(r#"\[package\]"#, Negative),              // TOML (Cargo.toml)
+        WeightedPattern::new(r#"\[dependencies\]"#, Negative),         // TOML
+    ],
+};
+
 pub static TOML: LanguageDefinition = LanguageDefinition {
     name: "toml",
     patterns: &[
@@ -1139,6 +1271,12 @@ pub static TOML: LanguageDefinition = LanguageDefinition {
         WeightedPattern::new(r#"\bcargo\s+(build|run)"#, Negative),
         WeightedPattern::new(r#"\bexport\s+\w+=['\"]"#, Negative),
         WeightedPattern::new(r##"#!/bin/(bash|sh)"##, Negative),
+        // PowerShell command patterns - disqualify TOML for PowerShell content
+        WeightedPattern::new(r#"\b(irm|iex|iwr)\b"#, Negative),                    // PowerShell aliases
+        WeightedPattern::new(r#"\[[A-Z]\w+\]::"#, Negative),                       // .NET type syntax
+        WeightedPattern::new(r#"-(eq|ne|like|match|contains)\b"#, Negative),       // PowerShell operators
+        WeightedPattern::new(r#"\$(PSScriptRoot|PSVersionTable)\b"#, Negative),    // PowerShell variables
+        WeightedPattern::new(r#"\b(Get|Set|Invoke|Write)-[A-Z]\w+"#, Negative),   // PowerShell cmdlets
     ],
 };
 
@@ -1510,6 +1648,7 @@ pub static ALL_LANGUAGES: &[&LanguageDefinition] = &[
     &RUBY,
     &PHP,
     &SHELL,
+    &POWERSHELL,
     &SQL,
     &JAVASCRIPT,
     &TOML,

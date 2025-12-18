@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use super::content_validator::validate_page_content;
-use super::crawl_types::CrawlQueue;
+use super::crawl_types::{CrawlQueue, FailureKind};
 use super::{CircuitBreaker, extract_domain};
 use super::page_timeout::with_page_timeout;
 use crate::config::CrawlConfig;
@@ -36,6 +36,38 @@ use crate::content_saver::markdown_converter::{ConversionOptions, convert_html_t
 use crate::crawl_events::{CrawlEventBus, types::{CrawlEvent, PageCrawlMetadata}};
 use crate::link_rewriter::LinkRewriter;
 use crate::page_extractor;
+
+/// Result of processing a single page
+///
+/// This enum allows the orchestrator to distinguish between:
+/// - Success: Page processed, URL returned
+/// - NeedsRetry: Circuit breaker rejected, item should be queued for later
+/// - FailedRetryable: Transient failure, item should be retried immediately
+/// - FailedPermanent: Permanent failure, should not be retried
+#[derive(Debug)]
+pub enum PageResult {
+    /// Page processed successfully
+    Success(String),
+    
+    /// Circuit breaker is open - queue for later retry via RetryQueue
+    /// This waits for the circuit to transition to HalfOpen
+    NeedsRetry(CrawlQueue),
+    
+    /// Retryable failure - navigation timeout, network error, browser crash
+    /// Item should be re-queued immediately if retry_count < max_retries
+    FailedRetryable {
+        item: CrawlQueue,
+        error: anyhow::Error,
+        failure_kind: FailureKind,
+    },
+    
+    /// Permanent failure - should NOT be retried
+    /// Content validation failure, parse errors, etc.
+    FailedPermanent {
+        url: String,
+        error: anyhow::Error,
+    },
+}
 
 /// RAII guard for chromiumoxide Page that ensures proper cleanup
 ///
@@ -60,7 +92,11 @@ use crate::page_extractor;
 ///
 /// # Usage
 ///
-/// ```rust
+/// ```rust,no_run
+/// # use kodegen_tools_citescrape::crawl_engine::page_processor::PageGuard;
+/// # use chromiumoxide::Browser;
+/// # async fn example(browser: Browser) -> anyhow::Result<()> {
+/// let url = "https://example.com".to_string();
 /// let guard = PageGuard::new(browser.new_page("about:blank").await?, url);
 /// 
 /// // Use page via Deref
@@ -69,8 +105,8 @@ use crate::page_extractor;
 ///
 /// // Explicit close (preferred)
 /// guard.close().await?;
-/// 
-/// // Or let Drop handle it on error paths (spawns background cleanup)
+/// # Ok(())
+/// # }
 /// ```
 pub struct PageGuard {
     page: Option<chromiumoxide::Page>,
@@ -157,6 +193,8 @@ pub struct PageProcessorContext {
     pub queue: Arc<tokio::sync::Mutex<VecDeque<CrawlQueue>>>,
     pub indexing_sender: Option<Arc<crate::search::IndexingSender>>,
     pub visited: Arc<DashSet<String>>,
+    /// User-Agent string extracted from browser (used for HTTP requests during resource inlining)
+    pub user_agent: String,
 }
 
 /// Navigate to a URL with timeout and circuit breaker error handling
@@ -239,13 +277,14 @@ async fn navigate_to_page(
 /// * `ctx` - Page processor context containing crawler state and configuration
 ///
 /// # Returns
-/// * `Ok(String)` - Successfully crawled URL
-/// * `Err` - Any error during page processing
+/// * `PageResult::Success(String)` - Successfully crawled URL
+/// * `PageResult::NeedsRetry(CrawlQueue)` - Circuit breaker rejected, needs retry
+/// * `PageResult::Error(anyhow::Error)` - Any error during page processing
 pub async fn process_single_page(
     browser: Arc<Browser>,
     item: CrawlQueue,
     ctx: PageProcessorContext,
-) -> Result<String> {
+) -> PageResult {
     let page_start = Instant::now();
 
     // Apply rate limiting
@@ -260,12 +299,18 @@ pub async fn process_single_page(
         }
     }
 
-    // Check circuit breaker
+    // Check circuit breaker - return NeedsRetry instead of error
     if let Some(ref cb) = ctx.circuit_breaker {
-        let domain = extract_domain(&item.url).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let domain = match extract_domain(&item.url) {
+            Ok(d) => d,
+            Err(e) => return PageResult::FailedPermanent { 
+                url: item.url, 
+                error: anyhow::anyhow!("{e}") 
+            },
+        };
         if !cb.should_attempt(&domain) {
-            debug!("Circuit breaker OPEN, skipping: {}", item.url);
-            return Err(anyhow::anyhow!("Circuit breaker open for domain"));
+            debug!("Circuit breaker OPEN, queueing for retry: {}", item.url);
+            return PageResult::NeedsRetry(item);
         }
     }
 
@@ -300,7 +345,9 @@ pub async fn process_single_page(
             {
                 cb.record_failure(&domain, &e.to_string());
             }
-            return Err(e.into());
+            let error = anyhow::Error::from(e);
+            let failure_kind = FailureKind::classify(&error);
+            return PageResult::FailedRetryable { item, error, failure_kind };
         }
     };
 
@@ -329,7 +376,10 @@ pub async fn process_single_page(
             Ok(mut response_events) => {
                 // Navigate to page first (cache check happens during navigation)
                 let page_load_timeout = ctx.config.page_load_timeout_secs();
-                navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await?;
+                if let Err(e) = navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await {
+                    let failure_kind = FailureKind::classify(&e);
+                    return PageResult::FailedRetryable { item, error: e, failure_kind };
+                }
 
                 // Use check_etag_from_events which handles multiple Document resources
                 // by matching normalized URLs (not just "first Document")
@@ -353,7 +403,10 @@ pub async fn process_single_page(
                 
                 // Navigate to page anyway (fallback without cache check)
                 let page_load_timeout = ctx.config.page_load_timeout_secs();
-                navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await?;
+                if let Err(e) = navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await {
+                    let failure_kind = FailureKind::classify(&e);
+                    return PageResult::FailedRetryable { item, error: e, failure_kind };
+                }
                 
                 (None, false) // No cache check possible, proceed with full processing
             }
@@ -453,7 +506,8 @@ pub async fn process_single_page(
                 if let Err(e) = navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await {
                     // CRITICAL: Abort the status capture task
                     status_task_handle.abort();
-                    return Err(e);
+                    let failure_kind = FailureKind::classify(&e);
+                    return PageResult::FailedRetryable { item, error: e, failure_kind };
                 }
 
                 // Wait for HTTP status (with timeout to avoid blocking)
@@ -494,7 +548,10 @@ pub async fn process_single_page(
                 
                 // Navigate to page anyway (fallback without HTTP status capture)
                 let page_load_timeout = ctx.config.page_load_timeout_secs();
-                navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await?;
+                if let Err(e) = navigate_to_page(&page_guard, &item.url, page_load_timeout, &ctx.circuit_breaker).await {
+                    let failure_kind = FailureKind::classify(&e);
+                    return PageResult::FailedRetryable { item, error: e, failure_kind };
+                }
                 
                 None // No HTTP status available in fallback path
             }
@@ -528,7 +585,7 @@ pub async fn process_single_page(
         if let Err(e) = page_guard.close().await {
             warn!("Failed to close page for {}: {} (non-fatal)", item.url, e);
         }
-        return Ok(item.url);
+        return PageResult::Success(item.url);
     }
 
     // Wait for page load
@@ -550,7 +607,8 @@ pub async fn process_single_page(
         {
             cb.record_failure(&domain, &e.to_string());
         }
-        return Err(e);
+        let failure_kind = FailureKind::classify(&e);
+        return PageResult::FailedRetryable { item, error: e, failure_kind };
     }
 
     // Retry configuration constants
@@ -580,6 +638,7 @@ pub async fn process_single_page(
         crawl_rate_rps: ctx.config.crawl_rate_rps,
         save_html: ctx.config.save_raw_html(),
         compression_threshold_bytes: ctx.config.compression_threshold_bytes(),
+        user_agent: ctx.user_agent.clone(),
     };
 
     for attempt in 0..MAX_RETRIES {
@@ -620,7 +679,10 @@ pub async fn process_single_page(
                     {
                         cb.record_failure(&domain, &e.to_string());
                     }
-                    return Err(e);
+                    return PageResult::FailedPermanent {
+                        url: item.url,
+                        error: e,
+                    };
                 }
             }
         };
@@ -703,22 +765,43 @@ pub async fn process_single_page(
                     );
                 }
 
-                return Err(anyhow::anyhow!(
-                    "Content validation failed after {} retries: {}",
-                    MAX_RETRIES,
-                    validation.reason.unwrap_or_else(|| "Unknown error".to_string())
-                ));
+                return PageResult::FailedPermanent {
+                    url: item.url,
+                    error: anyhow::anyhow!(
+                        "Content validation failed after {} retries: {}",
+                        MAX_RETRIES,
+                        validation.reason.unwrap_or_else(|| "Unknown error".to_string())
+                    ),
+                };
             }
         }
     }
 
     // Unwrap validated data (guaranteed to be Some if we reach here)
-    let mut page_data = page_data.ok_or_else(|| {
-        anyhow::anyhow!("Failed to extract valid page data after {} retries", MAX_RETRIES)
-    })?;
-    let processed_markdown = processed_markdown.ok_or_else(|| {
-        anyhow::anyhow!("Failed to produce valid markdown after {} retries", MAX_RETRIES)
-    })?;
+    let mut page_data = match page_data {
+        Some(data) => data,
+        None => {
+            return PageResult::FailedPermanent {
+                url: item.url,
+                error: anyhow::anyhow!(
+                    "Failed to extract valid page data after {} retries",
+                    MAX_RETRIES
+                ),
+            };
+        }
+    };
+    let processed_markdown = match processed_markdown {
+        Some(md) => md,
+        None => {
+            return PageResult::FailedPermanent {
+                url: item.url,
+                error: anyhow::anyhow!(
+                    "Failed to produce valid markdown after {} retries",
+                    MAX_RETRIES
+                ),
+            };
+        }
+    };
 
     // Ensure markdown starts with H1 (using extracted headings or title as fallback)
     let processed_markdown = ensure_h1_at_start(
@@ -844,6 +927,7 @@ pub async fn process_single_page(
                     results.push(CrawlQueue {
                         url: normalized_url,
                         depth: item.depth + 1,
+                        retry_count: 0,
                     });
                 }
             }
@@ -941,5 +1025,5 @@ pub async fn process_single_page(
         // Continue - page will be cleaned up by browser, this is best-effort
     }
 
-    Ok(item.url)
+    PageResult::Success(item.url)
 }

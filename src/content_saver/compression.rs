@@ -31,20 +31,6 @@ const MAX_METADATA_JSON_LEN: usize = 60_000;
 /// 2. charset parameter if present
 ///
 /// Discards non-essential parameters that could be used for DoS attacks.
-///
-/// # Examples
-/// ```
-/// assert_eq!(
-///     sanitize_content_type("text/html; charset=utf-8"),
-///     "text/html; charset=utf-8"
-/// );
-///
-/// // Long malicious header is truncated intelligently
-/// let malicious = format!("text/html; {}", "junk;".repeat(10000));
-/// let result = sanitize_content_type(&malicious);
-/// assert!(result.len() <= 512);
-/// assert!(result.starts_with("text/html"));
-/// ```
 fn sanitize_content_type(raw: &str) -> String {
     // Fast path: already within limits
     if raw.len() <= MAX_CONTENT_TYPE_LEN {

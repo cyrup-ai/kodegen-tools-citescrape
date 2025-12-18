@@ -51,11 +51,19 @@ pub struct SearchEngineCacheEntry {
 ///
 /// **Shutdown Pattern:**
 /// ```rust
-/// // During application initialization
-/// let search_cache = Arc::new(SearchEngineCache::new());
-///
-/// // During application shutdown (e.g., SIGTERM handler)
-/// search_cache.shutdown().await;
+/// use kodegen_tools_citescrape::mcp::manager::SearchEngineCache;
+/// use std::sync::Arc;
+/// 
+/// #[tokio::main]
+/// async fn main() {
+///     // During application initialization
+///     let search_cache = Arc::new(SearchEngineCache::new());
+///     
+///     // ... application runs ...
+///     
+///     // During application shutdown (e.g., SIGTERM handler)
+///     search_cache.shutdown().await;
+/// }
 /// ```
 ///
 /// **Resource Details:**
@@ -207,11 +215,19 @@ impl SearchEngineCache {
     /// **Thread Safety:**
     /// Uses async Mutex lock to safely drain concurrent cache access.
     ///
-    /// **Example:**
+    /// # Example
     /// ```rust
-    /// // In application shutdown handler
-    /// app_state.search_cache.shutdown().await;
-    /// log::info!("Search engine cache shutdown complete");
+    /// use kodegen_tools_citescrape::mcp::manager::SearchEngineCache;
+    /// 
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let search_cache = SearchEngineCache::new();
+    ///     
+    ///     // ... use search_cache ...
+    ///     
+    ///     // Shutdown during application termination
+    ///     search_cache.shutdown().await;
+    /// }
     /// ```
     pub async fn shutdown(&self) {
         log::info!("Shutting down search engine cache");
@@ -238,10 +254,16 @@ impl SearchEngineCache {
     /// - Verifying shutdown completion (should return 0 after shutdown)
     /// - Debugging cache behavior
     ///
-    /// **Example:**
+    /// # Example
     /// ```rust
-    /// let size = search_cache.cache_size().await;
-    /// log::info!("Search cache contains {} engines", size);
+    /// use kodegen_tools_citescrape::mcp::manager::SearchEngineCache;
+    /// 
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let search_cache = SearchEngineCache::new();
+    ///     let size = search_cache.cache_size().await;
+    ///     assert_eq!(size, 0); // Empty cache initially
+    /// }
     /// ```
     pub async fn cache_size(&self) -> usize {
         self.engines.lock().await.len()
@@ -324,8 +346,9 @@ impl SearchEngineCache {
     /// # Usage
     /// Called from main.rs after wrapping cache in Arc:
     /// ```rust,no_run
+    /// use kodegen_tools_citescrape::mcp::manager::SearchEngineCache;
     /// use std::sync::Arc;
-    ///
+    /// 
     /// let engine_cache = Arc::new(SearchEngineCache::new());
     /// engine_cache.clone().start_cleanup_task();
     /// ```

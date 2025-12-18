@@ -20,6 +20,8 @@ pub struct ExtractPageDataConfig {
     pub crawl_rate_rps: Option<f64>,
     pub save_html: bool,
     pub compression_threshold_bytes: usize,
+    /// User-Agent string extracted from browser (used for HTTP requests during resource inlining)
+    pub user_agent: String,
 }
 
 /// Extract event handler attribute names from element attributes
@@ -84,7 +86,6 @@ fn convert_interactive_elements(
                     id: element.attributes.get("id").cloned(),
                     text: element.text.clone(),
                     button_type: element.attributes.get("type").cloned(),
-                    selector: element.selector.clone(),
                     disabled: element.attributes.contains_key("disabled"),
                     form_id: element.attributes.get("form").cloned(),
                     attributes: element.attributes.clone(),
@@ -102,7 +103,6 @@ fn convert_interactive_elements(
                         title: element.attributes.get("title").cloned(),
                         target: element.attributes.get("target").cloned(),
                         rel: element.attributes.get("rel").cloned(),
-                        selector: element.selector.clone(),
                         attributes: element.attributes.clone(),
                     });
                 }
@@ -120,7 +120,6 @@ fn convert_interactive_elements(
                     placeholder: element.attributes.get("placeholder").cloned(),
                     required: element.attributes.contains_key("required"),
                     disabled: element.attributes.contains_key("disabled"),
-                    selector: element.selector.clone(),
                     validation: extract_validation(&element.attributes),
                     attributes: element.attributes.clone(),
                 });
@@ -134,7 +133,6 @@ fn convert_interactive_elements(
                     placeholder: element.attributes.get("placeholder").cloned(),
                     required: element.attributes.contains_key("required"),
                     disabled: element.attributes.contains_key("disabled"),
-                    selector: element.selector.clone(),
                     validation: None,
                     attributes: element.attributes.clone(),
                 });
@@ -143,7 +141,6 @@ fn convert_interactive_elements(
             // Native interactive HTML elements
             "details" | "summary" | "dialog" | "menu" => {
                 result.clickable.push(ClickableElement {
-                    selector: element.selector.clone(),
                     text: element.text.clone(),
                     role: Some(element.element_type.clone()),
                     aria_label: element.attributes.get("aria-label").cloned(),
@@ -156,7 +153,6 @@ fn convert_interactive_elements(
             "label" => {
                 if element.attributes.contains_key("for") {
                     result.clickable.push(ClickableElement {
-                        selector: element.selector.clone(),
                         text: element.text.clone(),
                         role: Some("label".to_string()),
                         aria_label: element.attributes.get("aria-label").cloned(),
@@ -173,7 +169,6 @@ fn convert_interactive_elements(
                     || has_event_handlers(&element.attributes)
                 {
                     result.clickable.push(ClickableElement {
-                        selector: element.selector.clone(),
                         text: element.text.clone(),
                         role: element.attributes.get("role").cloned(),
                         aria_label: element.attributes.get("aria-label").cloned(),
@@ -294,6 +289,7 @@ pub async fn extract_page_data(
             config.max_inline_image_size_bytes,
             config.crawl_rate_rps,
             config.compression_threshold_bytes,
+            &config.user_agent,
         )
         .await
         {

@@ -27,14 +27,17 @@ pub struct CrawlSession {
     output_dir: PathBuf,
     state: Arc<Mutex<CrawlState>>,
     engine_cache: Arc<SearchEngineCache>,
+    /// Shared browser pool for pre-warmed Chrome instances
+    browser_pool: Arc<crate::browser_pool::BrowserPool>,
 }
 
 impl CrawlSession {
-    /// Create a new crawl session
+    /// Create a new crawl session with browser pool
     pub fn new(
         crawl_id: u32,
         output_dir: PathBuf,
         engine_cache: Arc<SearchEngineCache>,
+        browser_pool: Arc<crate::browser_pool::BrowserPool>,
     ) -> Self {
         Self {
             crawl_id,
@@ -47,6 +50,7 @@ impl CrawlSession {
                 start_time: None,
             })),
             engine_cache,
+            browser_pool,
         }
     }
 
@@ -76,9 +80,11 @@ impl CrawlSession {
             state.start_time = Some(Instant::now());
         }
 
-        // Create unique Chrome user data directory for this crawl session
-        // Using crawl_id ensures profile isolation between concurrent/sequential crawls
-        let chrome_data_dir = std::env::temp_dir().join(format!("kodegen_chrome_{}", self.crawl_id));
+        // Create unique Chrome user data directory for this crawl session using UUID
+        // UUID ensures profile isolation between concurrent/sequential crawls
+        let chrome_data_dir = crate::browser_profile::create_unique_profile_with_prefix(
+            &format!("kodegen_chrome_crawl_{}", self.crawl_id)
+        )?.into_path();
 
         // Build crawl config (reuse existing logic from start_crawl.rs)
         let mut config = CrawlConfig {
@@ -100,6 +106,9 @@ impl CrawlSession {
 
         // Attach chrome data dir to config for browser profile isolation
         config = config.with_chrome_data_dir(chrome_data_dir);
+
+        // Attach browser pool for pre-warmed browser instances
+        config = config.with_browser_pool(self.browser_pool.clone());
 
         // Get or initialize search engine if enabled
         if args.enable_search {

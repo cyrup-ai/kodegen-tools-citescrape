@@ -15,8 +15,11 @@ async fn test_evasions() -> Result<()> {
 
     let page = browser.new_page("about:blank").await?;
 
-    // Inject our evasion scripts
+    // Inject our evasion scripts (registers them for new documents)
     inject(page.clone()).await?;
+
+    // Navigate to trigger script execution (mirrors real crawler behavior)
+    page.goto("data:text/html,<html><body></body></html>").await?;
 
     // Test navigator properties
     let vendor_result = page.evaluate("navigator.vendor").await?;
@@ -65,7 +68,7 @@ async fn test_evasions() -> Result<()> {
         && webgl_array.len() >= 2
     {
         if let Some(vendor) = webgl_array[0].as_str() {
-            assert_eq!(vendor, "Intel Open Source Technology Center");
+            assert_eq!(vendor, "Intel Inc.");
         }
         if let Some(renderer) = webgl_array[1].as_str() {
             assert!(renderer.contains("Intel"));

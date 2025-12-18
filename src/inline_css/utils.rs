@@ -8,9 +8,31 @@ use std::collections::HashMap;
 use url::Url;
 
 /// Resolve a potentially relative URL against a base URL
+///
+/// This function ensures proper percent-encoding of query parameters,
+/// fixing issues with URLs from HTML that have unencoded special characters
+/// (e.g., Google Fonts URLs with `:`, `,`, `@`, `;` in query strings).
 pub fn resolve_url(base_url: &str, url: &str) -> Result<String> {
     let base = Url::parse(base_url).context("Invalid base URL")?;
-    let resolved = base.join(url).context("Failed to resolve URL")?;
+    let mut resolved = base.join(url).context("Failed to resolve URL")?;
+    
+    // Re-encode query string to fix unencoded special characters from HTML
+    // Some servers (like Google Fonts) strictly require proper percent-encoding
+    if resolved.query().is_some() {
+        // Collect query pairs into owned strings to avoid borrow conflicts
+        let query_pairs: Vec<(String, String)> = resolved
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        
+        // Rebuild query string with proper URL encoding
+        // The url crate's serialization will properly encode special characters
+        resolved.query_pairs_mut().clear();
+        for (key, value) in query_pairs {
+            resolved.query_pairs_mut().append_pair(&key, &value);
+        }
+    }
+    
     Ok(resolved.to_string())
 }
 
@@ -348,4 +370,62 @@ pub fn replace_img_tags_with_svg(
         .context("Failed to serialize HTML after SVG replacement")?;
 
     String::from_utf8(html_output).context("Failed to convert HTML bytes to UTF-8 string")
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_google_fonts_url_encoding() {
+        // Test the exact URL from the error that was failing with 400 Bad Request
+        let base_url = "https://www.anthropic.com/";
+        let google_fonts_url = "https://fonts.googleapis.com/css2?family=Anthropic+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400;1,500;1,600;1,700;1,800&display=swap";
+        
+        let result = resolve_url(base_url, google_fonts_url).unwrap();
+        
+        // Verify the special characters are properly percent-encoded
+        assert!(result.contains("%40"), "@ should be encoded as %40");
+        assert!(result.contains("%3B"), "; should be encoded as %3B");
+        assert!(result.contains("0%2C400"), ", should be encoded as %2C");
+        
+        // Verify the URL is still valid
+        assert!(result.starts_with("https://fonts.googleapis.com/css2?"));
+        
+        println!("Encoded URL: {}", result);
+    }
+
+    #[test]
+    fn test_url_encoding_normalizes_spaces() {
+        let base_url = "https://example.com/";
+        let already_encoded = "https://fonts.googleapis.com/css2?family=Test%20Font";
+        
+        let result = resolve_url(base_url, already_encoded).unwrap();
+        
+        // The url crate normalizes %20 (percent-encoded space) to + (form-encoded space)
+        // Both are valid encodings for spaces in query strings per RFC 3986
+        assert!(result.contains("+") || result.contains("%20"), 
+                "Space should be encoded as either + or %20");
+    }
+
+    #[test]
+    fn test_relative_url_resolution() {
+        let base_url = "https://example.com/path/page.html";
+        let relative_url = "../styles/main.css";
+        
+        let result = resolve_url(base_url, relative_url).unwrap();
+        
+        assert_eq!(result, "https://example.com/styles/main.css");
+    }
+
+    #[test]
+    fn test_url_without_query_string() {
+        let base_url = "https://example.com/";
+        let url = "https://example.com/style.css";
+        
+        let result = resolve_url(base_url, url).unwrap();
+        
+        assert_eq!(result, "https://example.com/style.css");
+    }
 }

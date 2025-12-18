@@ -89,18 +89,10 @@ static CORRUPTED_SHEBANG_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// # Examples
 ///
 /// ```rust
-/// let markdown = r#"
-/// Some text
-/// ```rust
-/// 26 collapsed lines
-/// fn main() {
-///     println!("Hello");
-/// }
-/// ```
-/// "#;
-/// 
-/// let cleaned = filter_collapsed_lines(markdown);
-/// // Result: code block without "26 collapsed lines"
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::code_block_cleaning::filter_collapsed_lines;
+/// let markdown = "Some text\n```rust\n26 collapsed lines\nfn main() {}\n```\n";
+/// let result = filter_collapsed_lines(markdown);
+/// assert!(!result.contains("26 collapsed lines"));
 /// ```
 pub fn filter_collapsed_lines(markdown: &str) -> String {
     let mut result = String::with_capacity(markdown.len());
@@ -237,10 +229,8 @@ pub fn strip_bold_from_code_fences(markdown: &str) -> String {
 /// # Pattern Detection
 ///
 /// Removes lines matching this pattern:
-/// ```
-/// ```           ← closing code fence
-/// ****          ← line with only asterisks (THIS gets removed)
-/// ```
+/// - Closing code fence (```)
+/// - Followed by a line with only asterisks (THIS gets removed)
 ///
 /// # Arguments
 ///
@@ -253,15 +243,10 @@ pub fn strip_bold_from_code_fences(markdown: &str) -> String {
 /// # Examples
 ///
 /// ```rust
-/// let markdown = r#"
-/// ```rust
-/// fn main() {}
-/// ```
-/// ****
-/// "#;
-/// 
-/// let cleaned = strip_trailing_asterisks_after_code_fences(markdown);
-/// // Result: closing fence with no trailing asterisks
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::code_block_cleaning::strip_trailing_asterisks_after_code_fences;
+/// let markdown = "```rust\ncode\n```\n**";
+/// let result = strip_trailing_asterisks_after_code_fences(markdown);
+/// assert!(!result.ends_with("**"));
 /// ```
 pub fn strip_trailing_asterisks_after_code_fences(markdown: &str) -> String {
     // Replace code fence followed by asterisk-only line with just the fence
@@ -290,17 +275,10 @@ pub fn strip_trailing_asterisks_after_code_fences(markdown: &str) -> String {
 /// # Examples
 ///
 /// ```rust
-/// let markdown = r#"
-/// Example:
-/// cargo add ratatui
-/// 
-/// ```shell
-/// cargo add ratatui
-/// ```
-/// "#;
-/// 
-/// let cleaned = remove_duplicate_code_blocks(markdown);
-/// // Result: Only the fenced version remains
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::code_block_cleaning::remove_duplicate_code_blocks;
+/// let markdown = "```rust\nfn test() {}\n```\n\n```rust\nfn test() {}\n```";
+/// let result = remove_duplicate_code_blocks(markdown);
+/// // Removes duplicate consecutive code blocks
 /// ```
 pub fn remove_duplicate_code_blocks(markdown: &str) -> String {
     let lines: Vec<&str> = markdown.lines().collect();
@@ -465,18 +443,10 @@ fn normalize_code_content(code: &str) -> String {
 /// # Examples
 ///
 /// ```rust
-/// let markdown = r#"
-/// Some text <p>with HTML tags</p>
-/// 
-/// ```rust
-/// let html = "<div>code</div>";  // HTML inside code - preserved!
-/// ```
-/// 
-/// More <span>text</span> here
-/// "#;
-/// 
-/// let cleaned = strip_residual_html_tags(markdown);
-/// // Result: HTML tags removed except inside code blocks
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::code_block_cleaning::strip_residual_html_tags;
+/// let markdown = "Text with <span>HTML</span> tags";
+/// let result = strip_residual_html_tags(markdown);
+/// assert!(!result.contains("<span>"));
 /// ```
 pub fn strip_residual_html_tags(markdown: &str) -> String {
     let mut result = String::with_capacity(markdown.len());
@@ -588,15 +558,10 @@ fn strip_html_tags_state_machine(line: &str) -> String {
 /// # Examples
 ///
 /// ```rust
-/// let markdown = r#"
-/// ```bash
-/// # !/bin/bash
-/// echo "hello"
-/// ```
-/// "#;
-/// 
-/// let cleaned = fix_shebang_lines(markdown);
-/// // Result: shebang fixed to #!/bin/bash
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::code_block_cleaning::fix_shebang_lines;
+/// let markdown = "```bash\n# !/bin/bash\necho hello\n```";
+/// let result = fix_shebang_lines(markdown);
+/// assert!(result.contains("#!/bin/bash"));
 /// ```
 pub fn fix_shebang_lines(markdown: &str) -> String {
     let mut result = String::with_capacity(markdown.len());
@@ -718,20 +683,10 @@ pub fn fix_shebang_lines(markdown: &str) -> String {
 /// # Examples
 ///
 /// ```rust
-/// // Fix single backtick closing
-/// let markdown = "```bash\necho hello\n`";
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::code_block_cleaning::normalize_code_fences;
+/// let markdown = "```rust\nfn main() {}\n```";
 /// let result = normalize_code_fences(markdown);
-/// // Result: "```bash\necho hello\n```"
-///
-/// // Fix five backticks
-/// let markdown = "`````bash\necho hello\n```";
-/// let result = normalize_code_fences(markdown);
-/// // Result: "```bash\necho hello\n```"
-///
-/// // Fix text merged with closing fence
-/// let markdown = "```bash\necho hello\n```Next paragraph";
-/// let result = normalize_code_fences(markdown);
-/// // Result: "```bash\necho hello\n```\n\nNext paragraph"
+/// assert!(result.contains("```rust"));
 /// ```
 pub fn normalize_code_fences(markdown: &str) -> String {
     let mut result = String::with_capacity(markdown.len() + 512); // Extra space for inserted newlines

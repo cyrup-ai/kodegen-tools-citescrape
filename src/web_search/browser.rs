@@ -10,9 +10,7 @@ use futures::StreamExt;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::task::{self, JoinHandle};
-use tracing::info;
-
-use crate::utils::constants::CHROME_USER_AGENT;
+use tracing::{debug, info};
 
 /// Wrapper for Browser and its event handler task
 ///
@@ -112,10 +110,10 @@ pub async fn launch_browser() -> Result<(Browser, JoinHandle<()>, PathBuf)> {
         Err(_) => crate::browser_setup::download_managed_browser().await?,
     };
 
-    // Create unique temp directory for this browser instance
-    let user_data_dir = std::env::temp_dir().join(format!("kodegen_chrome_{}", std::process::id()));
-
-    std::fs::create_dir_all(&user_data_dir).context("Failed to create user data directory")?;
+    // Create unique temp directory for this browser instance using UUID
+    let profile = crate::browser_profile::create_unique_profile()
+        .context("Failed to create unique web_search browser profile")?;
+    let user_data_dir = profile.into_path();
 
     // Build browser config with stealth settings
     let browser_config = BrowserConfigBuilder::default()
@@ -125,7 +123,7 @@ pub async fn launch_browser() -> Result<(Browser, JoinHandle<()>, PathBuf)> {
         .chrome_executable(chrome_path)
         .headless_mode(chromiumoxide::browser::HeadlessMode::default())
         // Stealth mode arguments
-        .arg(format!("--user-agent={}", CHROME_USER_AGENT))
+        // Note: We don't set --user-agent here; Chrome uses its built-in user agent.
         .arg("--disable-blink-features=AutomationControlled")
         .arg("--disable-infobars")
         .arg("--disable-notifications")
@@ -159,7 +157,7 @@ pub async fn launch_browser() -> Result<(Browser, JoinHandle<()>, PathBuf)> {
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build browser config: {e}"))?;
 
-    info!("Launching browser with config");
+    debug!("Launching browser with config");
 
     // Launch browser and get REAL handler (not a dummy)
     let (browser, mut handler) = Browser::launch(browser_config)

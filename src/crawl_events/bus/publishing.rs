@@ -56,12 +56,18 @@ impl CrawlEventBus {
     /// * `Err(EventBusError::NoSubscribers)` - No active subscribers
     ///
     /// # Example with Error Mode
-    /// ```
+    /// ```rust
+    /// # use kodegen_tools_citescrape::crawl_events::{CrawlEventBus, EventBusConfig};
+    /// # use kodegen_tools_citescrape::crawl_events::config::BackpressureMode;
+    /// # use kodegen_tools_citescrape::crawl_events::types::{CrawlEvent, ShutdownReason};
+    /// # use kodegen_tools_citescrape::crawl_events::EventBusError;
+    /// # tokio_test::block_on(async {
     /// let config = EventBusConfig {
     ///     backpressure_mode: BackpressureMode::Error,
     ///     ..Default::default()
     /// };
     /// let bus = CrawlEventBus::with_config(config);
+    /// let event = CrawlEvent::shutdown(ShutdownReason::CrawlCompleted);
     ///
     /// match bus.publish_with_backpressure(event).await {
     ///     Ok(count) => log::info!("Published to {} subscribers", count),
@@ -70,18 +76,27 @@ impl CrawlEventBus {
     ///     }
     ///     Err(e) => log::error!("Publish failed: {}", e),
     /// }
+    /// # });
     /// ```
     ///
     /// # Example with Block Mode
-    /// ```
+    /// ```rust
+    /// # use kodegen_tools_citescrape::crawl_events::{CrawlEventBus, EventBusConfig};
+    /// # use kodegen_tools_citescrape::crawl_events::config::BackpressureMode;
+    /// # use kodegen_tools_citescrape::crawl_events::types::{CrawlEvent, ShutdownReason};
+    /// # tokio_test::block_on(async {
     /// let config = EventBusConfig {
     ///     backpressure_mode: BackpressureMode::Block,
     ///     ..Default::default()
     /// };
     /// let bus = CrawlEventBus::with_config(config);
+    /// let event = CrawlEvent::shutdown(ShutdownReason::CrawlCompleted);
     ///
     /// // This will wait until space is available
-    /// let count = bus.publish_with_backpressure(event).await?;
+    /// if let Ok(count) = bus.publish_with_backpressure(event).await {
+    ///     log::info!("Published to {} subscribers", count);
+    /// }
+    /// # });
     /// ```
     pub async fn publish_with_backpressure(
         &self,
@@ -236,10 +251,26 @@ impl CrawlEventBus {
     /// # Example
     ///
     /// ```rust
+    /// # use kodegen_tools_citescrape::crawl_events::{CrawlEventBus, PageCrawlMetadata};
+    /// # use kodegen_tools_citescrape::crawl_events::types::CrawlEvent;
+    /// # use std::path::PathBuf;
+    /// # use std::time::Duration;
+    /// # tokio_test::block_on(async {
+    /// let bus = CrawlEventBus::new(1000);
+    ///
+    /// let metadata = PageCrawlMetadata {
+    ///     html_size: 1024,
+    ///     compressed_size: 512,
+    ///     links_found: 10,
+    ///     links_for_crawling: 5,
+    ///     screenshot_captured: true,
+    ///     processing_duration: Duration::from_millis(100),
+    /// };
+    ///
     /// let events = vec![
-    ///     CrawlEvent::page_crawled(...),
-    ///     CrawlEvent::page_crawled(...),
-    ///     CrawlEvent::crawl_completed(...),
+    ///     CrawlEvent::page_crawled("https://example.com".to_string(), PathBuf::from("/tmp/page1.html"), 0, metadata.clone()),
+    ///     CrawlEvent::page_crawled("https://example.com/about".to_string(), PathBuf::from("/tmp/page2.html"), 1, metadata),
+    ///     CrawlEvent::crawl_completed(2, 15, Duration::from_secs(10)),
     /// ];
     ///
     /// let result = bus.publish_batch(events).await;
@@ -253,6 +284,7 @@ impl CrawlEventBus {
     /// if result.is_complete() {
     ///     log::info!("All events delivered successfully");
     /// }
+    /// # });
     /// ```
     pub async fn publish_batch(&self, events: Vec<CrawlEvent>) -> BatchPublishResult {
         let total = events.len();

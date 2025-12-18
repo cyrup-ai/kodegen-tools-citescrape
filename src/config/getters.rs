@@ -255,6 +255,15 @@ impl CrawlConfig {
     pub fn max_concurrent_per_domain(&self) -> usize {
         self.max_concurrent_per_domain.unwrap_or(2)
     }
+
+    /// Get maximum page retry attempts
+    ///
+    /// Returns the configured maximum retry attempts for transient failures.
+    /// Default is 3 retries.
+    #[must_use]
+    pub fn max_page_retries(&self) -> u8 {
+        self.max_page_retries.unwrap_or(3)
+    }
 }
 
 fn get_available_memory() -> usize {

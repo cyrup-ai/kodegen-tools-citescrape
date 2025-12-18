@@ -16,6 +16,8 @@ pub mod search;
 pub mod utils;
 pub mod web_search;
 pub mod imurl;
+pub mod browser_pool;
+pub mod browser_profile;
 
 pub use browser_setup::{
     apply_stealth_measures, download_managed_browser, find_browser_executable, launch_browser,
@@ -30,6 +32,15 @@ pub use runtime::{AsyncJsonSave, AsyncStream, BrowserAction, CrawlRequest};
 pub use utils::{get_mirror_path, get_uri_from_path};
 pub use web_search::BrowserManager;
 pub use imurl::ImUrl;
+pub use browser_pool::{BrowserPool, BrowserPoolConfig, PooledBrowserGuard};
+pub use browser_profile::{
+    BrowserProfile,
+    create_unique_profile,
+    create_unique_profile_with_prefix,
+    is_singleton_lock_stale,
+    cleanup_stale_lock,
+    cleanup_stale_profiles,
+};
 
 // Test-accessible modules
 pub use crawl_engine::rate_limiter as crawl_rate_limiter;
@@ -103,6 +114,18 @@ impl kodegen_server_http::ShutdownHook for BrowserManagerWrapper {
     }
 }
 
+// Shutdown hook wrapper for BrowserPool
+struct BrowserPoolWrapper(std::sync::Arc<crate::BrowserPool>);
+
+impl kodegen_server_http::ShutdownHook for BrowserPoolWrapper {
+    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
+        let pool = self.0.clone();
+        Box::pin(async move {
+            pool.shutdown().await
+        })
+    }
+}
+
 /// Start the citescrape tools HTTP server programmatically
 ///
 /// Returns a ServerHandle for graceful shutdown control.
@@ -160,14 +183,27 @@ pub async fn start_server_with_listener(
             let mut prompt_router = PromptRouter::new();
             let managers = Managers::new();
 
+            // Create browser pool
+            let pool_config = crate::BrowserPoolConfig::default();
+            let browser_pool = crate::BrowserPool::new(pool_config);
+            if let Err(e) = browser_pool.start().await {
+                return Err(anyhow::anyhow!("Failed to start browser pool: {}", e));
+            }
+
             // Create managers
             let engine_cache = Arc::new(crate::SearchEngineCache::new());
             let browser_manager = Arc::new(crate::BrowserManager::new());
 
-            // Create crawl registry (NEW - replaces CrawlSessionManager)
-            let crawl_registry = Arc::new(crate::CrawlRegistry::new(engine_cache.clone()));
+            // Create crawl registry with browser pool
+            let crawl_registry = Arc::new(crate::CrawlRegistry::new(
+                engine_cache.clone(),
+                browser_pool.clone(),
+            ));
 
-            // Register browser manager for shutdown (closes Chrome)
+            // Register browser pool for shutdown
+            managers.register(BrowserPoolWrapper(browser_pool.clone())).await;
+
+            // Register browser manager for shutdown (still used by WebSearchTool)
             managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
 
             // Register tools

@@ -222,8 +222,9 @@ pub async fn process_css_links(
     html: String,
     base_url: String,
     client: Client,
+    user_agent: &str,
 ) -> Result<InliningResult> {
-    let config = InlineConfig::default();
+    let config = InlineConfig::new(user_agent.to_string());
     process_css_links_internal(document, html, base_url, client, &config).await
 }
 
@@ -329,8 +330,9 @@ pub async fn process_images(
     html: String,
     base_url: String,
     client: Client,
+    user_agent: &str,
 ) -> Result<InliningResult> {
-    let config = InlineConfig::default();
+    let config = InlineConfig::new(user_agent.to_string());
     process_images_internal(document, html, base_url, client, &config).await
 }
 
@@ -436,7 +438,8 @@ pub async fn process_svgs(
     html: String,
     base_url: String,
     client: Client,
+    user_agent: &str,
 ) -> Result<InliningResult> {
-    let config = InlineConfig::default();
+    let config = InlineConfig::new(user_agent.to_string());
     process_svgs_internal(document, html, base_url, client, &config).await
 }

@@ -57,18 +57,22 @@ impl<State> CrawlConfigBuilder<State> {
     /// # Example
     ///
     /// ```rust
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
+    /// # fn main() -> anyhow::Result<()> {
     /// // Recommended: Headless mode (default)
     /// let config = CrawlConfig::builder()
     ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
-    ///     .build();
+    ///     .build()?;
     ///
     /// // For debugging only: Headed mode
     /// let config = CrawlConfig::builder()
     ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
     ///     .headless(false)  // Show visible browser window
-    ///     .build();
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn headless(mut self, headless: bool) -> Self {
@@ -204,7 +208,7 @@ impl<State> CrawlConfigBuilder<State> {
     ///
     /// # Examples
     /// ```
-    /// # use citescrape::config::CrawlConfig;
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
     /// let config = CrawlConfig::builder()
     ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
@@ -225,7 +229,7 @@ impl<State> CrawlConfigBuilder<State> {
     ///
     /// # Examples
     /// ```
-    /// # use citescrape::config::CrawlConfig;
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
     /// let config = CrawlConfig::builder()
     ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
@@ -249,7 +253,7 @@ impl<State> CrawlConfigBuilder<State> {
     ///
     /// # Examples
     /// ```
-    /// # use citescrape::config::CrawlConfig;
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
     /// let config = CrawlConfig::builder()
     ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
@@ -324,7 +328,7 @@ impl<State> CrawlConfigBuilder<State> {
     ///
     /// # Examples
     /// ```
-    /// # use citescrape::config::CrawlConfig;
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
     /// let config = CrawlConfig::builder()
     ///     .storage_dir("./output")
     ///     .start_url("https://example.com")
@@ -348,7 +352,7 @@ impl<State> CrawlConfigBuilder<State> {
     ///
     /// # Examples
     /// ```
-    /// # use citescrape::config::CrawlConfig;
+    /// # use kodegen_tools_citescrape::config::CrawlConfig;
     /// let config = CrawlConfig::builder()
     ///     .storage_dir("./output")
     ///     .start_url("https://example.com")

@@ -18,6 +18,7 @@ pub mod page_processor;
 pub mod page_timeout;
 pub mod progress;
 pub mod rate_limiter;
+pub mod retry_queue;
 
 // Re-exports for public API
 pub use execution::crawl_impl;
@@ -35,6 +36,9 @@ pub use crawler::{ChromiumoxideCrawler, extract_valid_urls, should_visit_url};
 // Re-export circuit breaker types
 pub use circuit_breaker::{CircuitBreaker, CircuitState, DomainHealth, extract_domain};
 
+// Re-export retry queue
+pub use retry_queue::RetryQueue;
+
 // Re-export content validator types
 pub use content_validator::{validate_page_content, ContentValidationResult};
 
@@ -42,7 +46,7 @@ pub use content_validator::{validate_page_content, ContentValidationResult};
 pub use domain_limiter::DomainLimiter;
 
 // Re-export crawl types
-pub use crawl_types::{CrawlError, CrawlProgress, CrawlQueue, CrawlResult, Crawler};
+pub use crawl_types::{CrawlError, CrawlProgress, CrawlQueue, CrawlResult, Crawler, FailureKind};
 
 // Re-export page enhancer
 pub use page_enhancer::*;

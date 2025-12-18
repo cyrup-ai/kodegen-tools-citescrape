@@ -83,9 +83,13 @@ impl CrawlEventBus {
     /// # Example
     ///
     /// ```rust
+    /// # use kodegen_tools_citescrape::crawl_events::CrawlEventBus;
+    /// # use std::sync::atomic::Ordering;
+    /// let bus = CrawlEventBus::new(1000);
+    ///
     /// // Individual reads (may be inconsistent)
-    /// let published = bus.metrics().get_published();
-    /// let dropped = bus.metrics().get_dropped();
+    /// let published = bus.metrics().events_published.load(Ordering::SeqCst);
+    /// let dropped = bus.metrics().events_dropped.load(Ordering::SeqCst);
     ///
     /// // Consistent snapshot
     /// let snapshot = bus.metrics().snapshot();
@@ -105,7 +109,8 @@ impl CrawlEventBus {
     /// - >1.0 = impossible (channel drops oldest events)
     ///
     /// # Example
-    /// ```
+    /// ```rust
+    /// # use kodegen_tools_citescrape::crawl_events::CrawlEventBus;
     /// let bus = CrawlEventBus::new(1000);
     /// // ... publish some events ...
     /// let pressure = bus.pressure();
@@ -126,11 +131,16 @@ impl CrawlEventBus {
     /// (default 0.8 = 80% capacity)
     ///
     /// # Example
-    /// ```
+    /// ```rust
+    /// # use kodegen_tools_citescrape::crawl_events::CrawlEventBus;
+    /// # use std::time::Duration;
+    /// # tokio_test::block_on(async {
+    /// let bus = CrawlEventBus::new(1000);
     /// if bus.is_overloaded() {
     ///     log::warn!("Event bus overloaded, consider slowing down");
     ///     tokio::time::sleep(Duration::from_millis(10)).await;
     /// }
+    /// # });
     /// ```
     #[must_use]
     pub fn is_overloaded(&self) -> bool {

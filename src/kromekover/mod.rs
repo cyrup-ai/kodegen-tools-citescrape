@@ -31,7 +31,6 @@ const EVASION_SCRIPTS: &[&str] = &[
     "evasions/font_spoof.js",            // Font fingerprinting evasion
     "evasions/canvas_noise.js",          // Canvas fingerprinting protection (deterministic noise)
     // Window and frame behavior
-    "evasions/window_outerdimensions.js", // Window measurements
     "iframe_content_window.js",           // IFrame handling
     // Chrome-specific APIs
     "evasions/chrome_app.js",     // Chrome app detection

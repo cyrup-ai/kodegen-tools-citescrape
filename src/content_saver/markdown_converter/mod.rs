@@ -10,24 +10,28 @@
 //!
 //! ## Synchronous (for blocking contexts)
 //! ```rust
-//! use citescrape::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
-//!
+//! # use kodegen_tools_citescrape::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
 //! let html = "<html><body><h1>Title</h1><p>Content</p></body></html>";
 //! let options = ConversionOptions::default();
 //! let markdown = convert_html_to_markdown_sync(html, &options)?;
+//! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
 //! ## Asynchronous (recommended)
 //! ```rust
-//! use citescrape::content_saver::markdown_converter::{convert_html_to_markdown, ConversionOptions};
-//!
+//! # use kodegen_tools_citescrape::content_saver::markdown_converter::{convert_html_to_markdown, ConversionOptions};
+//! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! let html = "<html><body><h1>Title</h1><p>Content</p></body></html>";
 //! let options = ConversionOptions::default();
 //! let markdown = convert_html_to_markdown(html, &options).await?;
+//! # Ok::<(), anyhow::Error>(())
+//! # }).unwrap();
 //! ```
 //!
 //! ## Custom Configuration
 //! ```rust
+//! # use kodegen_tools_citescrape::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+//! # let html = "<html><body><h1>Title</h1></body></html>";
 //! let options = ConversionOptions {
 //!     extract_main_content: true,
 //!     clean_html: true,
@@ -36,17 +40,20 @@
 //!     preserve_images: false,  // Remove images
 //!     code_highlighting: true,
 //!     process_headings: true,
+//!     normalize_whitespace: true,
+//!     base_url: None,
 //! };
 //! let markdown = convert_html_to_markdown_sync(html, &options)?;
+//! # Ok::<(), anyhow::Error>(())
 //! ```
 
 use anyhow::Result;
 use std::sync::Arc;
 
 // Declare sub-modules
-mod html_preprocessing;
-mod html_to_markdown;
-mod markdown_postprocessing;
+pub mod html_preprocessing;
+pub mod html_to_markdown;
+pub mod markdown_postprocessing;
 pub mod custom_handlers;
 
 // Re-export sub-modules for advanced usage
@@ -212,6 +219,7 @@ impl ConversionOptions {
 /// # Examples
 ///
 /// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
 /// let html = r#"
 ///     <html>
 ///         <body>
@@ -226,6 +234,7 @@ impl ConversionOptions {
 /// let markdown = convert_html_to_markdown_sync(html, &ConversionOptions::default())?;
 /// assert!(markdown.contains("# My Article"));
 /// assert!(markdown.contains("**important**"));
+/// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) -> Result<String> {
     // Stage 0: Normalize HTML structure (PREVENTIVE - Layer 3 defense against HTML leakage)
@@ -248,10 +257,24 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
         }
     };
 
+    // ============================================================================
+    // Stage 0.55: Strip syntax highlighting spans from code blocks
+    // ============================================================================
+    // CRITICAL: Must run BEFORE code block protection (Stage 0.6)
+    // Removes <span style="..."> tags used for syntax highlighting that would
+    // otherwise be protected and survive into final markdown output.
+    let spans_stripped = match html_preprocessing::strip_syntax_highlighting_spans(&ec_preprocessed) {
+        Ok(cleaned) => cleaned,
+        Err(e) => {
+            tracing::warn!("Syntax highlighting span stripping failed: {}, using unprocessed HTML", e);
+            ec_preprocessed
+        }
+    };
+
     // Stage 0.6: Protect code blocks from DOM parsing whitespace collapse
     // MUST happen BEFORE extract_main_content and clean_html_content which use DOM parsing
     let mut code_protector = html_preprocessing::CodeBlockProtector::new();
-    let protected_html = code_protector.protect(&ec_preprocessed);
+    let protected_html = code_protector.protect(&spans_stripped);
 
     // Stage 1: Extract main content (with fallback to full HTML)
     let main_html = if options.extract_main_content {
@@ -290,17 +313,38 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // We need to convert them to actual newline characters before htmd processing.
     let clean_html = html_preprocessing::convert_br_to_newlines_in_code(&clean_html);
 
+    // Stage 2.45: Fix text elements before tables (MUST run before table preprocessing)
+    // Detects <span data-as="p"> elements immediately before tables and wraps them
+    // in proper <p> tags to prevent them from being merged with table headers
+    let pre_table_fixed = match html_preprocessing::fix_pre_table_text(&clean_html) {
+        Ok(fixed) => fixed,
+        Err(e) => {
+            tracing::warn!("Pre-table text fixing failed: {}, using unfixed HTML", e);
+            clean_html
+        }
+    };
+
     // Stage 2.5: Preprocess tables (always enabled when preserve_tables is true)
     let preprocessed_html = if options.preserve_tables {
-        match html_preprocessing::preprocess_tables(&clean_html) {
+        // First, inject any preceding headers into tables
+        let html_with_headers = match html_preprocessing::inject_preceding_headers(&pre_table_fixed) {
+            Ok(processed) => processed,
+            Err(e) => {
+                tracing::warn!("Header injection failed: {}, using unprocessed HTML", e);
+                pre_table_fixed.clone()
+            }
+        };
+        
+        // Then, normalize tables (expand colspan/rowspan, etc.)
+        match html_preprocessing::preprocess_tables(&html_with_headers) {
             Ok(processed) => processed,
             Err(e) => {
                 tracing::warn!("Table preprocessing failed: {}, using unprocessed HTML", e);
-                clean_html
+                html_with_headers
             }
         }
     } else {
-        clean_html
+        pre_table_fixed
     };
 
     // Stage 3: Convert to Markdown
@@ -313,6 +357,16 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
         .with_code_highlighting(options.code_highlighting);
 
     let markdown = converter.convert_sync(&preprocessed_html)?;
+
+    // Stage 3.2.5: Fix HTML tag spacing (Issue #013)
+    // Removes spaces inserted by htmd in HTML tag syntax within code blocks
+    // Fixes: style = \"...\" → style=\"...\", < /span > → </span>, \" > → \">
+    let markdown = markdown_postprocessing::fix_html_tag_spacing(&markdown);
+
+    // Stage 3.3: Fix angle bracket spacing (Issue #006)
+    // Removes extra spaces inserted by htmd's unknown element handler
+    // Fixes: < nam e > → <name>, < ur l > → <url>, < comman d > → <command>
+    let markdown = markdown_postprocessing::fix_angle_bracket_spacing(&markdown);
 
     // Stage 3.4: Fix merged code fences
     // Ensures code fences always start on a new line (fixes "text```" → "text\n\n```")
@@ -328,6 +382,10 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Stage 3.6: Filter collapsed code section indicators
     // Removes "X collapsed lines" UI artifacts from code viewer widgets
     let markdown = markdown_postprocessing::filter_collapsed_lines(&markdown);
+
+    // Stage 3.7: Filter UI artifact text (Issue #004)
+    // Removes common UI button text like "CopyAsk AI" that escaped HTML cleaning
+    let markdown = markdown_postprocessing::filter_ui_artifacts(&markdown);
 
     // Stage 3.6.5: Fix and preserve shebang lines
     // Fixes corrupted shebangs like "# !/bin/bash" → "#!/bin/bash"
@@ -413,9 +471,13 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
 /// # Examples
 ///
 /// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::{convert_html_to_markdown, ConversionOptions};
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
 /// let html = "<html><body><h1>Title</h1></body></html>";
 /// let options = ConversionOptions::default();
 /// let markdown = convert_html_to_markdown(html, &options).await?;
+/// # Ok::<(), anyhow::Error>(())
+/// # }).unwrap();
 /// ```
 pub async fn convert_html_to_markdown(html: &str, options: &ConversionOptions) -> Result<String> {
     // Arc for zero-copy sharing across thread boundary (follows existing pattern in search/engine.rs)

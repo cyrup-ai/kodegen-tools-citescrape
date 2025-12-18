@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 use tokio::task::{self, JoinHandle};
-use tracing::{error, info, trace, warn};
-
-use crate::utils::constants::CHROME_USER_AGENT;
+use tracing::{debug, error, info, trace, warn};
 
 /// Find Chrome/Chromium executable on the system with platform-specific search paths.
 pub async fn find_browser_executable() -> Result<PathBuf> {
@@ -120,13 +118,6 @@ pub async fn find_browser_executable() -> Result<PathBuf> {
 ///
 /// # Returns
 /// Expanded path string with all available environment variables substituted
-///
-/// # Example
-/// ```
-/// let path = "%PROGRAMFILES%\\Google\\Chrome\\Application\\chrome.exe";
-/// let expanded = expand_windows_env_vars(path);
-/// // Result: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-/// ```
 fn expand_windows_env_vars(path: &str) -> String {
     let mut result = String::with_capacity(path.len());
     let mut chars = path.chars().peekable();
@@ -237,12 +228,18 @@ pub async fn launch_browser(
         }
     };
 
-    // Use provided chrome_data_dir or fall back to process ID
-    let user_data_dir = chrome_data_dir.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("kodegen_chrome_{}", std::process::id()))
-    });
-
-    std::fs::create_dir_all(&user_data_dir).context("Failed to create user data directory")?;
+    // Use provided chrome_data_dir or create unique UUID-based profile
+    let user_data_dir = match chrome_data_dir {
+        Some(dir) => {
+            // Caller provided explicit directory - ensure it exists
+            std::fs::create_dir_all(&dir).context("Failed to create user data directory")?;
+            dir
+        }
+        None => {
+            // Create unique profile using UUID
+            crate::browser_profile::create_unique_profile()?.into_path()
+        }
+    };
 
     // Build browser config with the executable path
     let mut config_builder = BrowserConfigBuilder::default()
@@ -259,8 +256,10 @@ pub async fn launch_browser(
     }
 
     // Add stealth mode arguments
+    // Note: We don't set --user-agent here; Chrome uses its built-in user agent.
+    // After launch, we extract the actual user agent via browser.user_agent() and
+    // pass it to HTTP clients (InlineConfig, DomainQueueManager) to ensure consistency.
     config_builder = config_builder
-        .arg(format!("--user-agent={}", CHROME_USER_AGENT))
         .arg("--disable-blink-features=AutomationControlled")
         .arg("--disable-infobars")
         .arg("--disable-notifications")
@@ -297,7 +296,7 @@ pub async fn launch_browser(
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build browser config: {e}"))?;
 
-    info!("Launching browser with config: {:?}", browser_config);
+    debug!("Launching browser with config: {:?}", browser_config);
     let (browser, mut handler) = Browser::launch(browser_config)
         .await
         .context("Failed to launch browser")?;
@@ -349,18 +348,11 @@ pub async fn apply_stealth_measures(page: &chromiumoxide::Page) -> Result<()> {
     ";
     page.evaluate(webdriver_js).await?;
 
-    // 2. User agent consistency
-    let user_agent_js = format!(
-        r"
-        Object.defineProperty(navigator, 'userAgent', {{
-            value: '{}'
-        }});
-    ",
-        CHROME_USER_AGENT
-    );
-    page.evaluate(user_agent_js.as_str()).await?;
+    // Note: User agent is now extracted from the browser at runtime via browser.user_agent()
+    // and passed to HTTP clients for consistency. No need to override navigator.userAgent here
+    // since we're using Chrome's built-in user agent.
 
-    // 3. Languages
+    // 2. Languages
     let languages_js = r"
         Object.defineProperty(navigator, 'languages', {
             get: () => ['en-US', 'en']

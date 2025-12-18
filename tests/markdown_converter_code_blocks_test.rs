@@ -49,7 +49,11 @@ fn test_pre_tag_preserves_whitespace() {
 Line 2
     Indented line 3</pre>"#;
 
-    let options = ConversionOptions::default();
+    // Disable extract_main_content since raw HTML snippets have no <body>/<main>/<article>
+    let options = ConversionOptions {
+        extract_main_content: false,
+        ..Default::default()
+    };
     let markdown = convert_html_to_markdown_sync(html, &options).unwrap();
 
     println!("Pre tag markdown output:\n{}", markdown);
@@ -69,9 +73,15 @@ Line 2
 /// This is for Task 019: Echo and Heredoc Shell Commands Mangled
 #[test]
 fn test_shell_commands_preserve_spaces() {
+    // Disable extract_main_content since raw HTML snippets have no <body>/<main>/<article>
+    let options = ConversionOptions {
+        extract_main_content: false,
+        ..Default::default()
+    };
+    
     // Test 1: Basic echo with redirect
     let html1 = r#"<pre><code class="language-bash">echo 'Hello World' > output.txt</code></pre>"#;
-    let result1 = convert_html_to_markdown_sync(html1, &ConversionOptions::default()).unwrap();
+    let result1 = convert_html_to_markdown_sync(html1, &options).unwrap();
     
     println!("Test 1 - Basic Echo:");
     println!("HTML: {}", html1);
@@ -89,7 +99,7 @@ name: test
 description: Test agent
 ---
 ' > test.md</code></pre>"#;
-    let result2 = convert_html_to_markdown_sync(html2, &ConversionOptions::default()).unwrap();
+    let result2 = convert_html_to_markdown_sync(html2, &options).unwrap();
     
     println!("Test 2 - Multi-line Echo:");
     println!("Result:\n{}\n", result2);
@@ -103,7 +113,7 @@ key: value
 nested:
   item: data
 EOF</code></pre>"#;
-    let result3 = convert_html_to_markdown_sync(html3, &ConversionOptions::default()).unwrap();
+    let result3 = convert_html_to_markdown_sync(html3, &options).unwrap();
     
     println!("Test 3 - Heredoc:");
     println!("Result:\n{}\n", result3);
@@ -113,7 +123,7 @@ EOF</code></pre>"#;
     
     // Test 4: Pipeline with redirects
     let html4 = r#"<pre><code class="language-bash">echo 'data' | grep 'pattern' > results.txt</code></pre>"#;
-    let result4 = convert_html_to_markdown_sync(html4, &ConversionOptions::default()).unwrap();
+    let result4 = convert_html_to_markdown_sync(html4, &options).unwrap();
     
     println!("Test 4 - Pipeline:");
     println!("Result:\n{}\n", result4);

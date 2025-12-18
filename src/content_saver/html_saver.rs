@@ -13,8 +13,9 @@ pub async fn save_html_content(
     max_inline_image_size_bytes: Option<usize>,
     rate_rps: Option<f64>,
     compression_threshold: usize,
+    user_agent: &str,
 ) -> Result<()> {
-    let config = crate::inline_css::InlineConfig::default();
+    let config = crate::inline_css::InlineConfig::new(user_agent.to_string());
 
     // get_mirror_path is async, await it
     let path = get_mirror_path(&url, &output_dir, "index.html").await?;
@@ -68,6 +69,7 @@ pub async fn save_html_content(
 }
 
 /// Save HTML content with resource information for inlining
+#[allow(clippy::too_many_arguments)]
 pub async fn save_html_content_with_resources(
     html_content: &str,
     url: String,
@@ -76,6 +78,7 @@ pub async fn save_html_content_with_resources(
     max_inline_image_size_bytes: Option<usize>,
     rate_rps: Option<f64>,
     compression_threshold: usize,
+    user_agent: &str,
 ) -> Result<()> {
     let html_content = html_content.to_string();
     let resources = resources.clone();
@@ -87,7 +90,7 @@ pub async fn save_html_content_with_resources(
     ensure_domain_gitignore(&path, &output_dir).await?;
 
     // Then inline resources (async)
-    let config = crate::inline_css::InlineConfig::default();
+    let config = crate::inline_css::InlineConfig::new(user_agent.to_string());
     let inline_future = crate::inline_css::inline_resources_from_info(
         html_content.clone(),
         url.clone(),

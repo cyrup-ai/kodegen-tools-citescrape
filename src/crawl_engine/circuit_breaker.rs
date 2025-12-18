@@ -111,7 +111,11 @@ impl CircuitBreaker {
                     if opened.elapsed() >= self.half_open_timeout {
                         health.state = CircuitState::HalfOpen;
                         health.consecutive_successes_in_halfopen = 0;
-                        debug!("Circuit breaker transitioning to HALF-OPEN for domain: {domain}");
+                        info!(
+                            "Circuit breaker transitioning to HALF-OPEN for domain: {} (after {:?} timeout)",
+                            domain,
+                            opened.elapsed()
+                        );
                         return true;
                     }
                 } else {
@@ -210,6 +214,36 @@ impl CircuitBreaker {
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect()
+    }
+
+    /// Get list of domains currently in Open state
+    ///
+    /// Useful for monitoring and debugging circuit breaker status.
+    #[must_use]
+    pub fn get_open_domains(&self) -> Vec<String> {
+        self.domains
+            .iter()
+            .filter(|entry| entry.value().state == CircuitState::Open)
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Get count of domains in each state
+    #[must_use]
+    pub fn state_counts(&self) -> (usize, usize, usize) {
+        let mut closed = 0;
+        let mut half_open = 0;
+        let mut open = 0;
+        
+        for entry in self.domains.iter() {
+            match entry.value().state {
+                CircuitState::Closed => closed += 1,
+                CircuitState::HalfOpen => half_open += 1,
+                CircuitState::Open => open += 1,
+            }
+        }
+        
+        (closed, half_open, open)
     }
 }
 
