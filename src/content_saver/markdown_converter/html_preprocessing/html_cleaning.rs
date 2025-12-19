@@ -4,7 +4,6 @@
 //! - `<script>` and `<style>` tags and their contents
 //! - Forms, iframes, and tracking elements
 //! - Social media widgets, cookie notices, and advertisements
-//! - Hidden elements (display:none, visibility:hidden)
 //! - HTML5 semantic elements without markdown equivalents
 //!
 //! Note: Event handler attributes and HTML comments are automatically ignored
@@ -39,18 +38,6 @@ use super::main_content_extraction::MAX_HTML_SIZE;
 // - src/content_saver/markdown_converter/htmd/element_handler/section.rs
 // - src/content_saver/markdown_converter/htmd/element_handler/aside.rs
 // These handlers use is_widget_element() from element_util.rs to filter widget elements.
-
-// Matches elements with display:none in style attribute (supports single/double quotes)
-static HIDDEN_DISPLAY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<[^>]+style\s*=\s*["'][^"']*display\s*:\s*none[^"']*["'][^>]*>.*?</[^>]+>"#)
-        .expect("HIDDEN_DISPLAY: hardcoded regex is valid")
-});
-
-// Matches elements with boolean hidden attribute
-static HIDDEN_ATTR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<[^>]+\shidden(?:\s|>)[^>]*>.*?</[^>]+>")
-        .expect("HIDDEN_ATTR: hardcoded regex is valid")
-});
 
 // Remove empty <code> and <pre> elements (whitespace-only content)
 // These are often styling placeholders that break markdown conversion
@@ -88,30 +75,7 @@ static SEMANTIC_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("SEMANTIC_RE: hardcoded regex is valid")
 });
 
-/// Matches img tags to extract and normalize their attributes
-/// Captures: (1) all attributes before src, (2) src value, (3) all attributes after src
-static IMG_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<img([^>]*?)\s+src="([^"]+)"([^>]*?)>"#)
-        .expect("IMG_TAG_RE: hardcoded regex is valid")
-});
 
-/// Matches img tags where src comes first, then other attributes
-static IMG_TAG_SRC_FIRST_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<img\s+src="([^"]+)"([^>]*?)>"#)
-        .expect("IMG_TAG_SRC_FIRST_RE: hardcoded regex is valid")
-});
-
-/// Extract alt text from img tag attributes
-static IMG_ALT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\s+alt="([^"]*)""#)
-        .expect("IMG_ALT_RE: hardcoded regex is valid")
-});
-
-/// Extract title attribute from img tag attributes
-static IMG_TITLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\s+title="([^"]*)""#)
-        .expect("IMG_TITLE_RE: hardcoded regex is valid")
-});
 
 // Special case: needs to be compiled for closure captures in details processing
 static SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -881,9 +845,6 @@ pub fn clean_html_content(html: &str) -> Result<String> {
 
     // Remove any remaining HTML5 semantic elements that don't have markdown equivalents
     let result = SEMANTIC_RE.replace_all(&result, "");
-
-    // Normalize image tags to remove HTML5 attributes that confuse html2md
-    let result = Cow::Owned(normalize_image_tags(&result));
 
     // ========================================================================
     // STAGE 2: DOM-based removal (handles complex selectors)
