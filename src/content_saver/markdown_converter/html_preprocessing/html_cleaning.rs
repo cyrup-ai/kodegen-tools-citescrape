@@ -39,31 +39,6 @@ use super::main_content_extraction::MAX_HTML_SIZE;
 // - src/content_saver/markdown_converter/htmd/element_handler/aside.rs
 // These handlers use is_widget_element() from element_util.rs to filter widget elements.
 
-// Remove empty <code> and <pre> elements (whitespace-only content)
-// These are often styling placeholders that break markdown conversion
-static EMPTY_CODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<code[^>]*>\s*</code>")
-        .expect("EMPTY_CODE: hardcoded regex is valid")
-});
-
-static EMPTY_PRE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<pre[^>]*>\s*</pre>")
-        .expect("EMPTY_PRE: hardcoded regex is valid")
-});
-
-static EMPTY_PRE_CODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<pre[^>]*>\s*<code[^>]*>\s*</code>\s*</pre>")
-        .expect("EMPTY_PRE_CODE: hardcoded regex is valid")
-});
-
-// Matches elements with visibility:hidden in style attribute
-static HIDDEN_VISIBILITY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?s)<[^>]+style\s*=\s*["'][^"']*visibility\s*:\s*hidden[^"']*["'][^>]*>.*?</[^>]+>"#,
-    )
-    .expect("HIDDEN_VISIBILITY: hardcoded regex is valid")
-});
-
 static DETAILS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<details[^>]*>(.*?)</details>").expect("DETAILS_RE: hardcoded regex is valid")
 });
@@ -725,7 +700,6 @@ pub fn normalize_html_structure(html: &str) -> Result<String> {
 /// - Removing `<script>` and `<style>` tags and their contents
 /// - Removing `<form>`, `<iframe>` elements
 /// - Removing social media widgets, cookie notices, and ads
-/// - Removing hidden elements (display:none, visibility:hidden)
 /// - Converting `<details>`/`<summary>` to markdown-friendly format
 /// - Removing semantic HTML5 elements without markdown equivalents
 /// - **Decoding HTML entities** (&amp; → &, &lt; → <, etc.)
@@ -799,17 +773,6 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     // by htmd element handlers (div.rs, section.rs, aside.rs) instead of regex.
     // See is_widget_element() in element_util.rs for the filtering logic.
 
-    // Remove hidden elements (multiple patterns for comprehensive matching)
-    let result = HIDDEN_DISPLAY.replace_all(&result, "");
-    let result = HIDDEN_ATTR.replace_all(&result, "");
-    let result = HIDDEN_VISIBILITY.replace_all(&result, "");
-
-    // Remove empty code/pre elements (prevents orphaned fence markers in markdown)
-    // These are often styling placeholders with no semantic content
-    let result = EMPTY_PRE_CODE.replace_all(&result, "");
-    let result = EMPTY_PRE.replace_all(&result, "");
-    let result = EMPTY_CODE.replace_all(&result, "");
-
     // Handle HTML5 details/summary elements by extracting their content
     // These don't convert well to markdown
     let result = Cow::Owned(
@@ -865,78 +828,6 @@ pub fn clean_html_content(html: &str) -> Result<String> {
 
     // Return decoded string
     Ok(decoded)
-}
-
-/// Normalize image tags by stripping modern HTML5 attributes that confuse html2md
-///
-/// Removes problematic attributes while preserving essential ones:
-/// - **Keep:** src, alt, title
-/// - **Remove:** decoding, fetchpriority, loading, width, height, class, style, id
-///
-/// This preprocessing step ensures html2md v0.2 can properly convert images.
-///
-/// # Arguments
-/// * `html` - HTML string containing img tags
-///
-/// # Returns
-/// * Normalized HTML with simplified img tags
-///
-/// # Example
-/// ```rust
-/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::html_cleaning::normalize_image_tags;
-/// let html = r#"<img alt="demo" decoding="async" src="/image.jpg" width="800">"#;
-/// let result = normalize_image_tags(html);
-/// assert_eq!(result, r#"<img src="/image.jpg" alt="demo">"#);
-/// ```
-pub fn normalize_image_tags(html: &str) -> String {
-    // Process images with src in middle/end
-    let result = IMG_TAG_RE.replace_all(html, |caps: &regex::Captures| {
-        let before_src = &caps[1];
-        let src = &caps[2];
-        let after_src = &caps[3];
-        
-        // Combine all attributes
-        let all_attrs = format!("{} {}", before_src, after_src);
-        
-        // Extract alt and title if present
-        let alt = IMG_ALT_RE
-            .captures(&all_attrs)
-            .and_then(|c| c.get(1))
-            .map(|m| format!(r#" alt="{}""#, m.as_str()))
-            .unwrap_or_default();
-        
-        let title = IMG_TITLE_RE
-            .captures(&all_attrs)
-            .and_then(|c| c.get(1))
-            .map(|m| format!(r#" title="{}""#, m.as_str()))
-            .unwrap_or_default();
-        
-        // Rebuild as simple img tag with only essential attributes
-        format!(r#"<img src="{}"{}{}>"#, src, alt, title)
-    });
-    
-    // Process images with src first
-    let result = IMG_TAG_SRC_FIRST_RE.replace_all(&result, |caps: &regex::Captures| {
-        let src = &caps[1];
-        let attrs = &caps[2];
-        
-        // Extract alt and title if present
-        let alt = IMG_ALT_RE
-            .captures(attrs)
-            .and_then(|c| c.get(1))
-            .map(|m| format!(r#" alt="{}""#, m.as_str()))
-            .unwrap_or_default();
-        
-        let title = IMG_TITLE_RE
-            .captures(attrs)
-            .and_then(|c| c.get(1))
-            .map(|m| format!(r#" title="{}""#, m.as_str()))
-            .unwrap_or_default();
-        
-        format!(r#"<img src="{}"{}{}>"#, src, alt, title)
-    });
-    
-    result.into_owned()
 }
 
 // ============================================================================
@@ -1012,15 +903,6 @@ mod tests {
         let result = clean_html_content(html)?;
         assert!(!result.contains("iframe"));
         assert!(result.contains("Content"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_removes_hidden_elements() -> Result<()> {
-        let html = r#"<div style="display:none">Hidden</div><p>Visible</p>"#;
-        let result = clean_html_content(html)?;
-        assert!(!result.contains("Hidden"));
-        assert!(result.contains("Visible"));
         Ok(())
     }
 
