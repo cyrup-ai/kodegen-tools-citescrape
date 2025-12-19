@@ -54,11 +54,6 @@ impl CrawlConfig {
     }
 
     #[must_use]
-    pub fn extract_main_content(&self) -> bool {
-        self.extract_main_content
-    }
-
-    #[must_use]
     pub fn save_markdown(&self) -> bool {
         self.save_markdown
     }

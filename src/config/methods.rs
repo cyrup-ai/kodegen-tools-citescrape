@@ -123,12 +123,6 @@ impl<State> CrawlConfigBuilder<State> {
     }
 
     #[must_use]
-    pub fn extract_main_content(mut self, extract: bool) -> Self {
-        self.extract_main_content = extract;
-        self
-    }
-
-    #[must_use]
     pub fn save_markdown(mut self, save: bool) -> Self {
         self.save_markdown = save;
         self

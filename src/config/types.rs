@@ -22,7 +22,6 @@ pub struct CrawlConfig {
     pub(crate) save_screenshots: bool,
     pub(crate) save_json: bool,
     pub(crate) save_raw_html: bool,
-    pub(crate) extract_main_content: bool,
     pub(crate) save_markdown: bool,
     pub(crate) headless: bool,
     pub(crate) content_selector: Option<String>,
@@ -213,7 +212,6 @@ impl Default for CrawlConfig {
             save_screenshots: true,
             save_json: true,
             save_raw_html: false,
-            extract_main_content: true,
             save_markdown: true,
             search_index_dir: None,
             search_memory_limit: None, // Set dynamically based on available memory, up to 4GB

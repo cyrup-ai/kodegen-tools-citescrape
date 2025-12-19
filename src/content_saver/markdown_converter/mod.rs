@@ -1,12 +1,11 @@
 //! HTML to Markdown conversion pipeline - The ONE canonical implementation
 //!
 //! This module provides the complete pipeline for converting HTML to clean, well-formatted markdown:
-//! 1. Extract main content using intelligent CSS selectors
-//! 2. Convert to markdown using htmd with DOM-based element handlers
-//! 3. Process markdown links (URL resolution)
+//! 1. Convert to Markdown using htmd with DOM-based element handlers (filtering happens here)
+//! 2. Process markdown links (optional, resolve relative URLs)
 //!
-//! Note: HTML cleaning (widget filtering, script/style removal) is handled by htmd element handlers
-//! during DOM traversal - no separate regex-based cleaning stage. See htmd/element_handler/ for details.
+//! Note: HTML filtering (widget removal, script/style removal, nav/header/footer removal)
+//! is handled by htmd element handlers during DOM traversal. See htmd/element_handler/ for details.
 //!
 //! # Usage
 //!
@@ -35,7 +34,6 @@
 //! # use kodegen_tools_citescrape::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
 //! # let html = "<html><body><h1>Title</h1></body></html>";
 //! let options = ConversionOptions {
-//!     extract_main_content: true,
 //!     clean_html: true,
 //!     preserve_tables: true,
 //!     preserve_links: true,
@@ -54,12 +52,9 @@ use std::sync::Arc;
 
 // Declare sub-modules
 pub mod htmd;
-pub mod html_preprocessing;
 pub mod html_to_markdown;
 
-
 // Re-export sub-modules for advanced usage
-pub use html_preprocessing::extract_main_content;
 pub use html_to_markdown::MarkdownConverter;
 
 
@@ -69,12 +64,6 @@ pub use html_to_markdown::MarkdownConverter;
 /// HTML cleaning, markdown formatting, and post-processing.
 #[derive(Debug, Clone)]
 pub struct ConversionOptions {
-    /// Extract main content using intelligent CSS selectors (default: true)
-    ///
-    /// When enabled, attempts to extract the primary content from the page,
-    /// removing navigation, sidebars, headers, footers, etc.
-    pub extract_main_content: bool,
-
     /// Clean HTML before conversion (default: true)
     ///
     /// Removes scripts, styles, ads, tracking pixels, social widgets,
@@ -123,7 +112,6 @@ pub struct ConversionOptions {
 impl Default for ConversionOptions {
     fn default() -> Self {
         Self {
-            extract_main_content: true,
             clean_html: true,
             preserve_tables: true,
             preserve_links: true,
@@ -150,7 +138,6 @@ impl ConversionOptions {
     #[must_use]
     pub fn minimal() -> Self {
         Self {
-            extract_main_content: false,
             clean_html: false,
             preserve_tables: true,
             preserve_links: true,
@@ -166,7 +153,6 @@ impl ConversionOptions {
     #[must_use]
     pub fn text_only() -> Self {
         Self {
-            extract_main_content: true,
             clean_html: true,
             preserve_tables: true,
             preserve_links: false,
@@ -182,21 +168,16 @@ impl ConversionOptions {
 /// Convert HTML to Markdown synchronously (blocking)
 ///
 /// This is the ONE canonical function for HTML→Markdown conversion.
-/// It orchestrates the complete 3-stage pipeline with built-in fallback handling.
+/// It orchestrates the complete 2-stage pipeline with built-in fallback handling.
 ///
 /// # Pipeline Stages
 ///
-/// 1. **Extract Main Content** (optional, controlled by `options.extract_main_content`)
-///    - Uses intelligent CSS selectors to find primary content
-///    - Falls back to full HTML if extraction fails
-///
-/// 2. **Convert to Markdown** (always performed)
+/// 1. **Convert to Markdown** (always performed)
 ///    - Uses htmd library with DOM-based element handlers
-///    - HTML cleaning (widget filtering, script/style removal) is handled during DOM traversal
+///    - HTML filtering (widgets, scripts, nav, footer) is handled during DOM traversal
 ///    - Custom handlers for expressive-code extraction, widget skipping, etc.
-///    - Built-in fallback to `htmd::convert` if post-processing fails
 ///
-/// 3. **Process Links** (optional, controlled by `options.base_url`)
+/// 2. **Process Links** (optional, controlled by `options.base_url`)
 ///    - Resolves relative URLs to absolute using base URL
 ///    - Preserves fragment-only and absolute URLs
 ///
@@ -231,31 +212,16 @@ impl ConversionOptions {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) -> Result<String> {
-    // Stage 1: Extract main content (with fallback to full HTML)
-    let main_html = if options.extract_main_content {
-        match extract_main_content(html) {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::debug!("Main content extraction failed: {}, using full HTML", e);
-                html.to_string()
-            }
-        }
-    } else {
-        html.to_string()
-    };
-
-    // Stage 2: Convert to Markdown
-    // HTML cleaning (widget filtering, script/style removal) is handled by htmd element handlers
-    // during DOM traversal - no separate regex-based cleaning stage needed
+    // HTML goes directly to htmd converter - element handlers filter non-content during DOM traversal
     let converter = MarkdownConverter::new()
         .with_preserve_tables(options.preserve_tables)
         .with_preserve_links(options.preserve_links)
         .with_preserve_images(options.preserve_images)
         .with_code_highlighting(options.code_highlighting);
 
-    let markdown = converter.convert_sync(&main_html)?;
+    let markdown = converter.convert_sync(html)?;
 
-    // Stage 3: Process markdown links (convert relative URLs to absolute)
+    // Stage 2: Process markdown links (convert relative URLs to absolute)
     // URL resolution for scraped content - all other normalization is handled by htmd handlers
     let markdown = if let Some(base_url) = &options.base_url {
         html_to_markdown::process_markdown_links(&markdown, base_url)
@@ -452,7 +418,6 @@ mod tests {
     #[test]
     fn test_custom_options() {
         let options = ConversionOptions {
-            extract_main_content: false,
             clean_html: false,
             preserve_tables: false,
             preserve_links: false,

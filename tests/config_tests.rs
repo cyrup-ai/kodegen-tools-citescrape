@@ -49,7 +49,6 @@ async fn test_builder_optional_fields_have_defaults() {
     assert!(config.headless());
     assert!(config.save_screenshots());
     assert!(config.save_markdown());
-    assert!(config.extract_main_content());
     assert!(!config.save_raw_html());
     assert_eq!(config.max_depth(), 3);
 }
@@ -69,7 +68,6 @@ async fn test_builder_with_all_optional_fields() {
         .headless(false)
         .save_screenshots(true)
         .save_raw_html(true)
-        .extract_main_content(false)
         .save_markdown(false)
         .max_depth(5)
         .screenshot_quality(95)
@@ -83,7 +81,6 @@ async fn test_builder_with_all_optional_fields() {
     assert!(!config.headless());
     assert!(config.save_screenshots());
     assert!(config.save_raw_html());
-    assert!(!config.extract_main_content());
     assert!(!config.save_markdown());
     assert_eq!(config.max_depth(), 5);
     assert_eq!(config.screenshot_quality(), 95);

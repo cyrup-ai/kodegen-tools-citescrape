@@ -49,11 +49,7 @@ fn test_pre_tag_preserves_whitespace() {
 Line 2
     Indented line 3</pre>"#;
 
-    // Disable extract_main_content since raw HTML snippets have no <body>/<main>/<article>
-    let options = ConversionOptions {
-        extract_main_content: false,
-        ..Default::default()
-    };
+    let options = ConversionOptions::default();
     let markdown = convert_html_to_markdown_sync(html, &options).unwrap();
 
     println!("Pre tag markdown output:\n{}", markdown);
@@ -73,11 +69,7 @@ Line 2
 /// This is for Task 019: Echo and Heredoc Shell Commands Mangled
 #[test]
 fn test_shell_commands_preserve_spaces() {
-    // Disable extract_main_content since raw HTML snippets have no <body>/<main>/<article>
-    let options = ConversionOptions {
-        extract_main_content: false,
-        ..Default::default()
-    };
+    let options = ConversionOptions::default();
     
     // Test 1: Basic echo with redirect
     let html1 = r#"<pre><code class="language-bash">echo 'Hello World' > output.txt</code></pre>"#;
