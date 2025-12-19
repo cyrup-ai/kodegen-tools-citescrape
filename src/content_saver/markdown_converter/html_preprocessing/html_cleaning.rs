@@ -2,12 +2,13 @@
 //!
 //! This module provides aggressive HTML sanitization by removing:
 //! - `<script>` and `<style>` tags and their contents
-//! - Inline event handlers (onclick, onload, etc.)
-//! - HTML comments
 //! - Forms, iframes, and tracking elements
 //! - Social media widgets, cookie notices, and advertisements
 //! - Hidden elements (display:none, visibility:hidden)
 //! - HTML5 semantic elements without markdown equivalents
+//!
+//! Note: Event handler attributes and HTML comments are automatically ignored
+//! by htmd's DOM-based text extraction and do not require explicit removal.
 
 use anyhow::{Context, Result};
 use ego_tree::NodeId;
@@ -32,29 +33,7 @@ use super::main_content_extraction::MAX_HTML_SIZE;
 // Compile regex patterns once at first use
 // These are hardcoded patterns that will never fail to compile
 
-static SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<script[^>]*>.*?</script>").expect("SCRIPT_RE: hardcoded regex is valid")
-});
-
-static STYLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<style[^>]*>.*?</style>").expect("STYLE_RE: hardcoded regex is valid")
-});
-
-static EVENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"on\w+="[^"]*""#).expect("EVENT_RE: hardcoded regex is valid"));
-
-static COMMENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<!--.*?-->").expect("COMMENT_RE: hardcoded regex is valid"));
-
-static FORM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<form[^>]*>.*?</form>").expect("FORM_RE: hardcoded regex is valid")
-});
-
-static IFRAME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<iframe[^>]*>.*?</iframe>").expect("IFRAME_RE: hardcoded regex is valid")
-});
-
-// NOTE: SOCIAL_RE, COOKIE_RE, AD_RE have been removed.
+// NOTE: FORM_RE, IFRAME_RE, SOCIAL_RE, COOKIE_RE, AD_RE have been removed.
 // Widget filtering (social, cookie notices, ads) is now handled by htmd element handlers:
 // - src/content_saver/markdown_converter/htmd/element_handler/div.rs
 // - src/content_saver/markdown_converter/htmd/element_handler/section.rs
@@ -780,8 +759,6 @@ pub fn normalize_html_structure(html: &str) -> Result<String> {
 ///
 /// This function performs aggressive cleaning including:
 /// - Removing `<script>` and `<style>` tags and their contents
-/// - Removing inline event handlers (onclick, onload, etc.)
-/// - Removing HTML comments  
 /// - Removing `<form>`, `<iframe>` elements
 /// - Removing social media widgets, cookie notices, and ads
 /// - Removing hidden elements (display:none, visibility:hidden)
@@ -837,14 +814,7 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     // Now that Expressive Code is converted to plain <pre><code>, we can safely
     // escape angle brackets to protect generic type parameters like Result<T>
     // from being interpreted as HTML tags by subsequent DOM parsers.
-    //
-    // Skip if we already have protected code blocks (indicated by placeholder prefix).
-    let html = if html.contains("<!--CITESCRAPE-PRE-") {
-        // Already protected at higher level - skip
-        html
-    } else {
-        escape_code_blocks(&html)
-    };
+    let html = escape_code_blocks(&html);
 
     // ============================================================================
     // STEP 1.5: Merge fragmented code blocks (uses DOM parsing)
@@ -856,33 +826,12 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     // Use Cow to avoid unnecessary allocations
     let result = Cow::Borrowed(html.as_str());
 
-    // Remove script tags and their contents
-    let result = SCRIPT_RE.replace_all(&result, "");
+    // NOTE: Script and style elements are now handled by htmd's script_style_handler
+    // in element_handler/mod.rs, which discards them entirely during conversion.
 
-    // Remove style tags and their contents
-    let result = STYLE_RE.replace_all(&result, "");
-
-    // Remove inline event handlers
-    let result = EVENT_RE.replace_all(&result, "");
-
-    // Remove comments (but preserve CITESCRAPE-PRE placeholders for code block protection)
-    let result = COMMENT_RE.replace_all(&result, |caps: &regex::Captures| {
-        let comment = &caps[0];
-        // Preserve CITESCRAPE-PRE placeholder comments - they protect code blocks from DOM parsing
-        if comment.starts_with("<!--CITESCRAPE-PRE-") {
-            comment.to_string()
-        } else {
-            String::new()
-        }
-    });
-
-    // Remove forms
-    let result = FORM_RE.replace_all(&result, "");
-
-    // Remove iframes
-    let result = IFRAME_RE.replace_all(&result, "");
-
-    // NOTE: Social media widgets, cookie notices, and ads are now filtered
+    // NOTE: Forms and iframes are now handled by htmd element handlers
+    // (see element_handler/mod.rs form/iframe skip handler).
+    // Social media widgets, cookie notices, and ads are now filtered
     // by htmd element handlers (div.rs, section.rs, aside.rs) instead of regex.
     // See is_widget_element() in element_util.rs for the filtering logic.
 

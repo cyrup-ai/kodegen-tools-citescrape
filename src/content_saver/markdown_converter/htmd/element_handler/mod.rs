@@ -256,6 +256,14 @@ impl ElementHandlers {
         // Must be registered AFTER block_handler to take priority
         handlers.add_handler(vec!["aside"], aside_handler);
 
+        // form, iframe - skip entirely (no markdown equivalent)
+        // Must be registered AFTER block_handler to take priority
+        handlers.add_handler(vec!["form", "iframe"], |_, _| Some("".into()));
+
+        // script, style - always discard (no markdown representation)
+        // Must be registered AFTER block_handler to take precedence
+        handlers.add_handler(vec!["script", "style"], script_style_handler);
+
         handlers
     }
 
@@ -407,4 +415,10 @@ fn bold_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResu
 
 fn italic_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
     emphasis_handler(handlers, element, "*")
+}
+
+/// Handler for script and style elements - discard entirely.
+/// These contain JavaScript/CSS that should never appear in markdown.
+fn script_style_handler(_handlers: &dyn Handlers, _element: Element) -> Option<HandlerResult> {
+    Some("".into())
 }
