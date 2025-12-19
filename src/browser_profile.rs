@@ -77,9 +77,21 @@ impl Drop for BrowserProfile {
 /// ownership to another cleanup mechanism.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```
+/// # use anyhow::Result;
+/// # fn main() -> Result<()> {
+/// use kodegen_tools_citescrape::browser_profile::create_unique_profile;
+/// 
+/// // Create a unique Chrome profile directory
 /// let profile = create_unique_profile()?;
-/// let (browser, handler, _) = launch_browser(true, Some(profile.into_path())).await?;
+/// 
+/// // Verify the profile directory was created
+/// assert!(profile.path().exists());
+/// assert!(profile.path().to_string_lossy().contains("kodegen_chrome_"));
+/// 
+/// // Profile is automatically cleaned up when dropped
+/// # Ok(())
+/// # }
 /// ```
 pub fn create_unique_profile() -> Result<BrowserProfile> {
     let uuid = Uuid::new_v4();

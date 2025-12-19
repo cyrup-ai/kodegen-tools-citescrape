@@ -122,18 +122,7 @@ pub fn extract_etag_from_headers(headers: &Headers) -> Option<String> {
 /// - Strips trailing slashes
 /// - Preserves scheme (http and https are treated as distinct URLs)
 /// - Case-insensitive host comparison
-///
-/// # Examples
-/// ```ignore
-/// // Same URL with variations - these ARE equal
-/// normalize_url("https://example.com/page/") == normalize_url("https://example.com/page")
-/// normalize_url("https://example.com/page#top") == normalize_url("https://example.com/page")
-/// normalize_url("https://example.com/page?utm=x") == normalize_url("https://example.com/page")
-///
-/// // Different schemes - these are NOT equal
-/// normalize_url("http://example.com/page") != normalize_url("https://example.com/page")
-/// ```
-fn normalize_url_for_cache_matching(url_str: &str) -> Option<String> {
+pub(crate) fn normalize_url_for_cache_matching(url_str: &str) -> Option<String> {
     let parsed = Url::parse(url_str).ok()?;
     
     let scheme = parsed.scheme();
@@ -241,4 +230,81 @@ pub async fn check_etag_from_events(
     .await;
 
     result.unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_url_same_with_trailing_slash_variations() {
+        let with_slash = normalize_url_for_cache_matching("https://example.com/page/");
+        let without_slash = normalize_url_for_cache_matching("https://example.com/page");
+        assert_eq!(with_slash, without_slash);
+        assert!(with_slash.is_some());
+    }
+
+    #[test]
+    fn normalize_url_removes_fragment() {
+        let with_fragment = normalize_url_for_cache_matching("https://example.com/page#top");
+        let without_fragment = normalize_url_for_cache_matching("https://example.com/page");
+        assert_eq!(with_fragment, without_fragment);
+    }
+
+    #[test]
+    fn normalize_url_removes_query_params() {
+        let with_query = normalize_url_for_cache_matching("https://example.com/page?utm=x");
+        let without_query = normalize_url_for_cache_matching("https://example.com/page");
+        assert_eq!(with_query, without_query);
+    }
+
+    #[test]
+    fn normalize_url_preserves_scheme_difference() {
+        let http = normalize_url_for_cache_matching("http://example.com/page");
+        let https = normalize_url_for_cache_matching("https://example.com/page");
+        assert_ne!(http, https);
+        assert!(http.is_some());
+        assert!(https.is_some());
+    }
+
+    #[test]
+    fn normalize_url_case_insensitive_host() {
+        let upper = normalize_url_for_cache_matching("https://EXAMPLE.COM/page");
+        let lower = normalize_url_for_cache_matching("https://example.com/page");
+        assert_eq!(upper, lower);
+        assert_eq!(upper, Some("https://example.com/page".to_string()));
+    }
+
+    #[test]
+    fn normalize_url_returns_some_for_valid_url() {
+        let result = normalize_url_for_cache_matching("https://example.com/page");
+        assert_eq!(result, Some("https://example.com/page".to_string()));
+    }
+
+    #[test]
+    fn normalize_url_handles_invalid_url() {
+        let result = normalize_url_for_cache_matching("not a valid url");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn normalize_url_handles_empty_string() {
+        let result = normalize_url_for_cache_matching("");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn normalize_url_handles_root_path() {
+        let result = normalize_url_for_cache_matching("https://example.com/");
+        assert_eq!(result, Some("https://example.com/".to_string()));
+    }
+
+    #[test]
+    fn normalize_url_complex_case() {
+        // Complex URL with everything
+        let complex = normalize_url_for_cache_matching("HTTPS://EXAMPLE.COM/path/to/page/?query=value&utm=source#section");
+        let simple = normalize_url_for_cache_matching("https://example.com/path/to/page");
+        assert_eq!(complex, simple);
+        assert_eq!(complex, Some("https://example.com/path/to/page".to_string()));
+    }
 }

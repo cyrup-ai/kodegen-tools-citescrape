@@ -5,11 +5,14 @@ mod br;
 mod button;
 mod caption;
 mod code;
+mod definition_list;
 mod details;
 mod dialog;
 mod div;
 mod element_util;
 mod input;
+mod keyboard;
+mod figure;
 mod footer;
 mod header;
 mod emphasis;
@@ -20,11 +23,18 @@ mod html;
 mod img;
 mod li;
 mod list;
+mod mark;
 mod nav;
 mod p;
 mod pre;
 mod section;
 mod span;
+mod strikethrough;
+mod media;
+mod technical;
+mod semantic;
+mod subscript_superscript;
+mod ruby;
 mod table;
 mod tbody;
 mod td_th;
@@ -48,12 +58,15 @@ use blockquote::blockquote_handler;
 use br::br_handler;
 use caption::caption_handler;
 use code::code_handler;
+use definition_list::{dd_handler, dl_handler, dt_handler};
 use details::{details_handler, summary_handler};
 use button::button_handler;
 use dialog::dialog_handler;
 use div::div_handler;
 use input::input_handler;
+use keyboard::kbd_handler;
 use emphasis::emphasis_handler;
+use figure::{figcaption_handler, figure_handler};
 use footer::footer_handler;
 use head_body::head_body_handler;
 use header::header_handler;
@@ -64,12 +77,19 @@ use html5ever::Attribute;
 use img::img_handler;
 use li::list_item_handler;
 use list::list_handler;
+use mark::mark_handler;
 use markup5ever_rcdom::Node;
 use nav::nav_handler;
 use p::p_handler;
 use pre::pre_handler;
 use section::section_handler;
 use span::span_handler;
+use strikethrough::strikethrough_handler;
+use media::{video_handler, audio_handler, source_handler, track_handler};
+use technical::{samp_handler, var_handler, output_handler};
+use semantic::{abbr_handler, cite_handler, time_handler, dfn_handler, address_handler};
+use subscript_superscript::{sub_handler, sup_handler};
+use ruby::{rp_handler, rt_handler, ruby_handler};
 use std::{collections::HashMap, rc::Rc};
 use table::table_handler;
 use tbody::tbody_handler;
@@ -162,6 +182,31 @@ impl ElementHandlers {
         // italic
         handlers.add_handler(vec!["i", "em"], italic_handler);
 
+        // strikethrough: <del>, <s>, <strike> -> ~~text~~
+        handlers.add_handler(vec!["del", "s", "strike"], strikethrough_handler);
+
+        // kbd (keyboard input) -> `inline code`
+        handlers.add_handler(vec!["kbd"], kbd_handler);
+
+        // mark (highlighted text) -> **bold** (fallback)
+        handlers.add_handler(vec!["mark"], mark_handler);
+
+        // media elements
+        handlers.add_handler(vec!["video"], video_handler);
+        handlers.add_handler(vec!["audio"], audio_handler);
+        handlers.add_handler(vec!["source"], source_handler);
+
+        // semantic inline elements
+        handlers.add_handler(vec!["abbr"], abbr_handler);
+        handlers.add_handler(vec!["cite"], cite_handler);
+        handlers.add_handler(vec!["time"], time_handler);
+        handlers.add_handler(vec!["dfn"], dfn_handler);
+
+        // technical inline elements -> inline code
+        handlers.add_handler(vec!["samp"], samp_handler);
+        handlers.add_handler(vec!["var"], var_handler);
+        handlers.add_handler(vec!["output"], output_handler);
+
         // headings
         handlers.add_handler(vec!["h1", "h2", "h3", "h4", "h5", "h6"], headings_handler);
 
@@ -252,6 +297,14 @@ impl ElementHandlers {
             block_handler,
         );
 
+        // track - discard metadata content
+        // Must be registered AFTER block_handler to override it
+        handlers.add_handler(vec!["track"], track_handler);
+
+        // address - semantic block content  
+        // Must be registered AFTER block_handler to override it
+        handlers.add_handler(vec!["address"], address_handler);
+
         // details/summary - collapsible sections converted to markdown
         handlers.add_handler(vec!["details"], details_handler);
         handlers.add_handler(vec!["summary"], summary_handler);
@@ -296,9 +349,33 @@ impl ElementHandlers {
         // Must be registered AFTER block_handler to take priority
         handlers.add_handler(vec!["dialog"], dialog_handler);
 
+        // definition list - semantic definition list to markdown conversion
+        // Must be registered AFTER block_handler to take priority
+        handlers.add_handler(vec!["dl"], dl_handler);
+        handlers.add_handler(vec!["dt"], dt_handler);
+        handlers.add_handler(vec!["dd"], dd_handler);
+
+        // figure - image with caption support
+        // Must be registered AFTER block_handler to take priority
+        handlers.add_handler(vec!["figure"], figure_handler);
+        handlers.add_handler(vec!["figcaption"], figcaption_handler);
+
         // script, style - always discard (no markdown representation)
         // Must be registered AFTER block_handler to take precedence
         handlers.add_handler(vec!["script", "style"], script_style_handler);
+
+        // ========================================================================
+        // HTMD_4: Subscript/Superscript and Ruby Annotations
+        // ========================================================================
+
+        // Subscript/superscript -> HTML passthrough (no markdown equivalent)
+        handlers.add_handler(vec!["sub"], sub_handler);
+        handlers.add_handler(vec!["sup"], sup_handler);
+
+        // Ruby annotations for CJK text -> base(annotation) format
+        handlers.add_handler(vec!["ruby"], ruby_handler);
+        handlers.add_handler(vec!["rt"], rt_handler);
+        handlers.add_handler(vec!["rp"], rp_handler);
 
         handlers
     }

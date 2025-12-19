@@ -17,26 +17,6 @@
 //! - `stats` - Lock-free statistics tracking
 //! - `sender` - Public API for sending indexing messages
 //! - `service` - Background worker loop with batching and deduplication
-//!
-//! # Example
-//!
-//! ```ignore
-//! use crate::search::engine::SearchEngine;
-//! use crate::search::incremental::{IncrementalIndexingService, MessagePriority};
-//!
-//! let engine = SearchEngine::new(index_path).await?;
-//! let (_service, sender) = IncrementalIndexingService::start(engine).await?;
-//!
-//! // Add document to index
-//! sender.add_or_update(
-//!     url.into(),
-//!     file_path,
-//!     MessagePriority::Normal,
-//!     |result| {
-//!         // Handle completion
-//!     }
-//! ).await?;
-//! ```
 
 mod types;
 mod stats;

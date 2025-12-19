@@ -225,16 +225,6 @@ pub struct PageProcessorContext {
 /// 1. Logs warning with URL and error details
 /// 2. Records failure in circuit breaker (if available) for domain
 /// 3. Propagates error to caller for handling
-///
-/// # Example
-/// ```ignore
-/// navigate_to_page(
-///     &page,
-///     "https://example.com",
-///     30,
-///     &ctx.circuit_breaker
-/// ).await?;
-/// ```
 async fn navigate_to_page(
     page: &Page,
     url: &str,

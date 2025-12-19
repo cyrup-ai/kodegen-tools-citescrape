@@ -160,8 +160,25 @@ impl SearchEngine {
     /// * `Err(SearchError)` - Failed after all retry attempts or non-transient error
     ///
     /// # Example
-    /// ```ignore
-    /// let writer = engine.writer_with_retry(Some(100_000_000)).await?;
+    /// ```rust
+    /// use kodegen_tools_citescrape::search::engine::SearchEngine;
+    /// use kodegen_tools_citescrape::config::CrawlConfig;
+    /// use tempfile::TempDir;
+    ///
+    /// # tokio_test::block_on(async {
+    /// # let temp_dir = TempDir::new().unwrap();
+    /// # let config = CrawlConfig::builder()
+    /// #     .storage_dir(temp_dir.path())
+    /// #     .start_url("https://example.com")
+    /// #     .build()
+    /// #     .unwrap();
+    /// #
+    /// // Create search engine with temporary index
+    /// let engine = SearchEngine::create(&config).await.unwrap();
+    ///
+    /// // Acquire index writer with 100MB memory limit and automatic retry on transient failures
+    /// let writer = engine.writer_with_retry(Some(100_000_000)).await.unwrap();
+    /// # })
     /// ```
     pub async fn writer_with_retry(
         &self,

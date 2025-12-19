@@ -18,16 +18,8 @@ pub use channel::*;
 //
 // DO NOT USE THIS MACRO IN NEW CODE!
 //
-// Migration pattern:
-// ```ignore
-// // OLD - BLOCKING (DO NOT USE)
-// let (tx, rx) = std::sync::mpsc::channel();
-// recv_async!(rx, "error message")?;
-//
-// // NEW - ASYNC (USE THIS)
-// let (tx, rx) = tokio::sync::oneshot::channel();
-// rx.await.map_err(|_| anyhow::anyhow!("error message"))?;
-// ```
+// Migration: OLD pattern used `recv_async!(rx, "msg")?` with `std::sync::mpsc::channel()`.
+// NEW pattern uses `rx.await.map_err(|_| anyhow::anyhow!("msg"))?` with `tokio::sync::oneshot::channel()`.
 //
 // This macro is commented out to prevent new usage. If you need it for legacy code,
 // uncomment it, but plan to migrate away from it as soon as possible.

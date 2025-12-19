@@ -14,19 +14,21 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
-//! use kodegen_tools_citescrape::inline_css::downloaders::*;
-//! use reqwest::Client;
+//! ```
+//! use kodegen_tools_citescrape::inline_css::downloaders::InlineConfig;
+//! use std::time::Duration;
 //!
-//! let client = Client::new();
-//! let config = InlineConfig::default();
+//! // Create configuration with custom user agent
+//! let mut config = InlineConfig::new("Mozilla/5.0 (Windows NT 10.0; Win64; x64)".to_string());
 //!
-//! // Simple async download
-//! let css = download_css_async(
-//!     "https://example.com/style.css".to_string(),
-//!     client,
-//!     &config
-//! ).await?;
+//! // Verify default values
+//! assert_eq!(config.css_timeout, Duration::from_secs(30));
+//! assert_eq!(config.max_css_size, 2 * 1024 * 1024); // 2MB
+//! assert_eq!(config.max_image_size, 5 * 1024 * 1024); // 5MB
+//!
+//! // Customize timeouts and limits as needed
+//! config.css_timeout = Duration::from_secs(15);
+//! config.max_image_size = 3 * 1024 * 1024; // Reduce to 3MB
 //! ```
 
 use anyhow::{Context, Result};

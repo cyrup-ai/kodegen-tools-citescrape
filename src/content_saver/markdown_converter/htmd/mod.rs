@@ -19,13 +19,14 @@ use self::element_handler::Handlers;
 
 /// Convert HTML to Markdown.
 ///
-/// Example:
+/// # Example
 ///
-/// ```ignore
-/// use htmd::convert;
+/// ```
+/// use kodegen_tools_citescrape::content_saver::markdown_converter::htmd::convert;
 ///
-/// let md = convert("<h1>Hello</h1>").unwrap();
-/// assert_eq!("# Hello", md);
+/// let html = "<h1>Hello</h1>";
+/// let md = convert(html).unwrap();
+/// assert_eq!("# Hello", md.trim());
 /// ```
 pub fn convert(html: &str) -> Result<String, std::io::Error> {
     HtmlToMarkdown::new().convert(html)
@@ -56,8 +57,8 @@ pub struct Element<'a> {
 /// The html-to-markdown converter.
 ///
 /// # Example
-/// ```ignore
-/// use htmd::{Element, HtmlToMarkdown};
+/// ```
+/// use kodegen_tools_citescrape::content_saver::markdown_converter::htmd::HtmlToMarkdown;
 ///
 /// // One-liner
 /// let md = HtmlToMarkdown::new().convert("<h1>Hello</h1>").unwrap();
@@ -204,18 +205,30 @@ impl HtmlToMarkdownBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use htmd::{Element, HtmlToMarkdownBuilder, element_handler::Handlers};
+    /// ```
+    /// use kodegen_tools_citescrape::content_saver::markdown_converter::htmd::{
+    ///     HtmlToMarkdownBuilder, Element, element_handler::Handlers
+    /// };
     ///
-    /// let mut handlers = HtmlToMarkdownBuilder::new()
-    ///    .add_handler(vec!["img"], |_handlers: &dyn Handlers, _: Element| {
-    ///        // Skip the img tag when converting.
-    ///        None
-    ///    })
-    ///    .add_handler(vec!["video"], |_handlers: &dyn Handlers, element: Element| {
-    ///        // Handle the video tag.
-    ///        todo!("Return some text to represent this video element.")
-    ///    });
+    /// // Build a converter with custom handlers
+    /// let converter = HtmlToMarkdownBuilder::new()
+    ///     .add_handler(vec!["img"], |_: &dyn Handlers, _: Element| {
+    ///         // Skip img tags entirely
+    ///         None
+    ///     })
+    ///     .add_handler(vec!["video"], |_: &dyn Handlers, _: Element| {
+    ///         // Replace video tags with placeholder text
+    ///         Some("[video]".into())
+    ///     })
+    ///     .build();
+    ///
+    /// // Test the custom handlers
+    /// let html = "<p>Text</p><img src='test.jpg'><video></video>";
+    /// let markdown = converter.convert(html).unwrap();
+    ///
+    /// assert!(markdown.contains("Text"));
+    /// assert!(markdown.contains("[video]"));
+    /// assert!(!markdown.contains("img")); // img was skipped
     /// ```
     pub fn add_handler<Handler>(mut self, tags: Vec<&'static str>, handler: Handler) -> Self
     where
