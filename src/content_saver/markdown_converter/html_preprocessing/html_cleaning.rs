@@ -840,41 +840,67 @@ mod tests {
 
     #[test]
     fn test_removes_scripts() -> Result<()> {
+        // Test script removal through the FULL markdown pipeline
+        // Scripts are handled by htmd's script_style_handler which discards them entirely
+        use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+        
         let html = r#"<div><script>alert('xss')</script><p>Content</p></div>"#;
-        let result = clean_html_content(html)?;
-        assert!(!result.contains("script"));
-        assert!(!result.contains("alert"));
-        assert!(result.contains("Content"));
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default())?;
+        
+        // Script tags and content should be removed
+        assert!(!result.contains("script"), "script tag should be removed");
+        assert!(!result.contains("alert"), "script content should be removed");
+        // Content should be preserved
+        assert!(result.contains("Content"), "paragraph content should be preserved");
         Ok(())
     }
 
     #[test]
     fn test_removes_styles() -> Result<()> {
+        // Test style removal through the FULL markdown pipeline
+        // Styles are handled by htmd's script_style_handler which discards them entirely
+        use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+        
         let html = r#"<div><style>.test { color: red; }</style><p>Content</p></div>"#;
-        let result = clean_html_content(html)?;
-        assert!(!result.contains("style"));
-        assert!(!result.contains("color: red"));
-        assert!(result.contains("Content"));
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default())?;
+        
+        // Style tags and content should be removed
+        assert!(!result.contains("style"), "style tag should be removed");
+        assert!(!result.contains("color: red"), "style content should be removed");
+        // Content should be preserved
+        assert!(result.contains("Content"), "paragraph content should be preserved");
         Ok(())
     }
 
     #[test]
     fn test_removes_event_handlers() -> Result<()> {
-        // Test that event handlers are removed (via regex cleaning)
-        // Note: Buttons are also removed entirely by DOM-based interactive element removal
+        // Test event handler removal through the FULL markdown pipeline
+        // Event handlers are automatically ignored by htmd's DOM-based text extraction
+        use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+        
         let html = r#"<div onclick="alert('click')">Click me</div>"#;
-        let result = clean_html_content(html)?;
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default())?;
+        
+        // Event handler attributes should not appear in markdown output
         assert!(!result.contains("onclick"), "Event handler should be removed");
+        // Content should be preserved
         assert!(result.contains("Click me"), "Content should remain when element is not interactive");
         Ok(())
     }
 
     #[test]
     fn test_removes_comments() -> Result<()> {
+        // Test HTML comment removal through the FULL markdown pipeline
+        // Comments are automatically ignored by htmd's DOM-based text extraction
+        use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+        
         let html = r"<div><!-- This is a comment --><p>Content</p></div>";
-        let result = clean_html_content(html)?;
-        assert!(!result.contains("This is a comment"));
-        assert!(result.contains("Content"));
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default())?;
+        
+        // HTML comments should not appear in markdown output
+        assert!(!result.contains("This is a comment"), "HTML comment should be removed");
+        // Content should be preserved
+        assert!(result.contains("Content"), "paragraph content should be preserved");
         Ok(())
     }
 
@@ -889,31 +915,59 @@ mod tests {
 
     #[test]
     fn test_removes_forms() -> Result<()> {
+        // Test form removal through the FULL markdown pipeline
+        // Forms are handled by htmd element handlers which skip them entirely
+        use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+        
         let html = r#"<div><form><input type="text"></form><p>Content</p></div>"#;
-        let result = clean_html_content(html)?;
-        assert!(!result.contains("form"));
-        assert!(!result.contains("input"));
-        assert!(result.contains("Content"));
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default())?;
+        
+        // Form tags and content should be removed
+        assert!(!result.contains("form"), "form tag should be removed");
+        assert!(!result.contains("input"), "input element should be removed");
+        // Content should be preserved
+        assert!(result.contains("Content"), "paragraph content should be preserved");
         Ok(())
     }
 
     #[test]
     fn test_removes_iframes() -> Result<()> {
+        // Test iframe removal through the FULL markdown pipeline
+        // Iframes are handled by htmd element handlers which skip them entirely
+        use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+        
         let html = r#"<div><iframe src="ads.html"></iframe><p>Content</p></div>"#;
-        let result = clean_html_content(html)?;
-        assert!(!result.contains("iframe"));
-        assert!(result.contains("Content"));
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default())?;
+        
+        // Iframe tags should be removed
+        assert!(!result.contains("iframe"), "iframe tag should be removed");
+        // Content should be preserved
+        assert!(result.contains("Content"), "paragraph content should be preserved");
         Ok(())
     }
 
     #[test]
     fn test_converts_details_summary() -> Result<()> {
+        // Test details/summary conversion through the FULL markdown pipeline
+        // The htmd element handler (details.rs) converts:
+        // - <summary> content to a level 3 heading (### Summary Text)
+        // - Remaining content as normal markdown blocks
+        use crate::content_saver::markdown_converter::{convert_html_to_markdown_sync, ConversionOptions};
+        
         let html = r"<details><summary>Click to expand</summary>Hidden content</details>";
-        let result = clean_html_content(html)?;
-        assert!(!result.contains("<details>"));
-        assert!(!result.contains("<summary>"));
-        assert!(result.contains("Click to expand"));
-        assert!(result.contains("Hidden content"));
+        let result = convert_html_to_markdown_sync(html, &ConversionOptions::default())?;
+        
+        // Verify HTML tags are converted (not present as raw HTML)
+        assert!(!result.contains("<details>"), "details tag should be converted");
+        assert!(!result.contains("<summary>"), "summary tag should be converted");
+        
+        // Verify content is preserved in markdown output
+        assert!(result.contains("Click to expand"), "summary text should be preserved");
+        assert!(result.contains("Hidden content"), "details content should be preserved");
+        
+        // Verify the summary becomes a heading (per htmd handler behavior)
+        assert!(result.contains("### Click to expand"), "summary should become h3 heading");
+        
         Ok(())
     }
 

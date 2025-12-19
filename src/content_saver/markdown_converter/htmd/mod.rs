@@ -140,7 +140,12 @@ impl HtmlToMarkdown {
         }
 
         // Trim trailing newlines in-place
-        let end = buffer.rfind(|c: char| c != '\n').map(|i| i + 1).unwrap_or(buffer.len());
+        let end = buffer
+            .char_indices()
+            .rev()
+            .find(|(_, c)| *c != '\n')
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(buffer.len());
         if end < buffer.len() {
             buffer.truncate(end);
         }

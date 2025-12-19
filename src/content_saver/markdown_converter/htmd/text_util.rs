@@ -265,8 +265,10 @@ pub(crate) fn is_markdown_atx_heading(text: &str) -> bool {
 pub(crate) fn index_of_markdown_ordered_item_dot(text: &str) -> Option<usize> {
     let mut is_prev_ch_numeric = false;
     let mut is_prev_ch_dot = false;
-    for (index, ch) in text.chars().enumerate() {
-        if ch.is_numeric() {
+    let mut dot_byte_index = 0;
+
+    for (byte_index, ch) in text.char_indices() {
+        if ch.is_ascii_digit() {
             if is_prev_ch_dot {
                 return None;
             }
@@ -276,9 +278,10 @@ pub(crate) fn index_of_markdown_ordered_item_dot(text: &str) -> Option<usize> {
                 return None;
             }
             is_prev_ch_dot = true;
+            dot_byte_index = byte_index;
         } else if ch == ' ' {
             if is_prev_ch_dot {
-                return Some(index - 1);
+                return Some(dot_byte_index);
             } else {
                 return None;
             }

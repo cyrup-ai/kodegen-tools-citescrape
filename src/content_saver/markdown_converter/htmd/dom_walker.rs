@@ -303,10 +303,13 @@ fn normalize_content_for_buffer(
 
 fn trim_buffer_end(buffer: &mut String) {
     // Find the position where document whitespace ends
-    let end = buffer.rfind(|c: char| !matches!(c, '\n' | '\t' | ' '))
-        .map(|i| i + 1)
+    let end = buffer
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !matches!(c, '\n' | '\t' | ' '))
+        .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
-    
+
     if end < buffer.len() {
         buffer.truncate(end);
     }
@@ -314,10 +317,13 @@ fn trim_buffer_end(buffer: &mut String) {
 
 fn trim_buffer_end_spaces(buffer: &mut String) {
     // Find the position where trailing spaces end
-    let end = buffer.rfind(|c: char| c != ' ')
-        .map(|i| i + 1)
+    let end = buffer
+        .char_indices()
+        .rev()
+        .find(|(_, c)| *c != ' ')
+        .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
-    
+
     if end < buffer.len() {
         buffer.truncate(end);
     }
