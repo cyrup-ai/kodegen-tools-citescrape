@@ -397,21 +397,42 @@ fn escape_if_needed(text: Cow<'_, str>) -> Cow<'_, str> {
     super::html_escape::escape_html(escaped.into())
 }
 
+/// Escapes code fence characters at the start of any line within pre text.
+/// 
 /// Cases:
-/// '```' -> '\```' // code fence
-/// '~~~' -> '\~~~' // code fence
+/// '```'        -> '\```'      // fence at start of text
+/// 'Line\n```'  -> 'Line\n\```' // fence at start of line
+/// 'inline ```' -> 'inline ```' // NOT escaped (mid-line)
 fn escape_pre_text_if_needed(text: String) -> String {
-    let Some(first) = text.chars().next() else {
+    if text.is_empty() {
         return text;
-    };
-    match first {
-        '`' | '~' => {
-            let mut text = text;
-            text.insert(0, '\\');
-            text
-        }
-        _ => text,
     }
+    
+    // Fast-path: check if any escaping is needed
+    // This avoids allocation when no fence chars appear at line starts
+    let needs_escape = text.starts_with('`') 
+        || text.starts_with('~')
+        || text.contains("\n`")
+        || text.contains("\n~");
+    
+    if !needs_escape {
+        return text;
+    }
+    
+    // Allocate with ~5% overhead estimate for escape characters
+    let mut result = String::with_capacity(text.len() + text.len() / 20);
+    let mut at_line_start = true;
+    
+    for c in text.chars() {
+        if at_line_start && (c == '`' || c == '~') {
+            // Escape fence-starting characters at line start
+            result.push('\\');
+        }
+        result.push(c);
+        at_line_start = c == '\n';
+    }
+    
+    result
 }
 
 // This is taken from the

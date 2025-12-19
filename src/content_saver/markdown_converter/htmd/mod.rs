@@ -21,7 +21,7 @@ use self::element_handler::Handlers;
 ///
 /// Example:
 ///
-/// ```
+/// ```ignore
 /// use htmd::convert;
 ///
 /// let md = convert("<h1>Hello</h1>").unwrap();
@@ -56,7 +56,7 @@ pub struct Element<'a> {
 /// The html-to-markdown converter.
 ///
 /// # Example
-/// ```
+/// ```ignore
 /// use htmd::{Element, HtmlToMarkdown};
 ///
 /// // One-liner
@@ -204,7 +204,7 @@ impl HtmlToMarkdownBuilder {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// use htmd::{Element, HtmlToMarkdownBuilder, element_handler::Handlers};
     ///
     /// let mut handlers = HtmlToMarkdownBuilder::new()

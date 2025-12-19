@@ -714,10 +714,11 @@ pub fn normalize_html_structure(html: &str) -> Result<String> {
 /// # Example
 /// ```rust
 /// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::clean_html_content;
-/// let html = r#"<div><script>alert('xss')</script><p>Hello &amp; goodbye</p></div>"#;
+/// // clean_html_content decodes HTML entities and removes interactive elements.
+/// // Note: Script/style removal is handled by htmd during conversion, not here.
+/// let html = r#"<p>Hello &amp; goodbye</p>"#;
 /// let clean = clean_html_content(html)?;
-/// assert!(clean.contains("<p>Hello"));
-/// assert!(!clean.contains("<script>"));
+/// assert!(clean.contains("Hello & goodbye")); // HTML entities decoded
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn clean_html_content(html: &str) -> Result<String> {
