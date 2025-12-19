@@ -437,18 +437,28 @@ pub(super) fn get_attr(attrs: &[Attribute], name: &str) -> Option<String> {
         .filter(|v| !v.trim().is_empty())
 }
 
-/// Check if element has widget-like class or id that should be skipped
+/// Check if element has widget-like class, id, or data attributes that should be skipped
 ///
-/// This filters out common widget elements like:
-/// - Social media sharing buttons (class contains "social", "share", "follow")
-/// - Cookie consent notices (class/id contains "cookie", "popup", "modal", "overlay")
-/// - Advertisement containers (class/id contains "ad-", "ads-", "advertisement")
+/// This filters out common widget/interactive elements including:
+/// - Social media sharing buttons
+/// - Cookie consent notices  
+/// - Advertisement containers
+/// - Copy buttons and clipboard widgets
+/// - Code block toolbars and action buttons
+/// - Theme toggles and UI chrome
+/// - Documentation framework action buttons
+/// - Screen reader only elements (contain UI instructions, not content)
+/// - AI assistance buttons
 ///
-/// Returns `true` if the element should be skipped (not converted to markdown).
+/// Patterns sourced from html_cleaning.rs remove_interactive_elements_from_dom()
 pub(super) fn is_widget_element(attrs: &[Attribute]) -> bool {
     // Check class attribute
     if let Some(class) = get_attr(attrs, "class") {
         let class_lower = class.to_lowercase();
+        
+        // ========================================================================
+        // ORIGINAL WIDGET PATTERNS (from existing is_widget_element)
+        // ========================================================================
         if class_lower.contains("social")
             || class_lower.contains("share")
             || class_lower.contains("follow")
@@ -459,6 +469,81 @@ pub(super) fn is_widget_element(attrs: &[Attribute]) -> bool {
             || class_lower.contains("ad-")
             || class_lower.contains("ads-")
             || class_lower.contains("advertisement")
+        {
+            return true;
+        }
+        
+        // ========================================================================
+        // CLIPBOARD/COPY PATTERNS (from remove_interactive_elements_from_dom)
+        // ========================================================================
+        if class_lower.contains("copy")
+            || class_lower.contains("clipboard")
+        {
+            return true;
+        }
+        
+        // ========================================================================
+        // TOOLBAR PATTERNS
+        // ========================================================================
+        if class_lower.contains("toolbar")
+            || class_lower.contains("code-actions")
+            || class_lower.contains("code-header")
+        {
+            return true;
+        }
+        
+        // ========================================================================
+        // UI CHROME PATTERNS
+        // ========================================================================
+        if class_lower.contains("theme-toggle")
+            || class_lower.contains("mobile-menu")
+            || class_lower.contains("hamburger")
+            || class_lower.contains("menu-toggle")
+            || class_lower.contains("search-button")
+        {
+            return true;
+        }
+        
+        // ========================================================================
+        // DOCUMENTATION FRAMEWORK PATTERNS
+        // ========================================================================
+        if class_lower.contains("sl-copy")           // Starlight (Astro)
+            || class_lower.contains("vp-copy")       // VitePress
+            || class_lower.contains("nextra-copy")   // Nextra
+            || class_lower.contains("docusaurus")    // Docusaurus
+            || class_lower.contains("edit-page")
+            || class_lower.contains("share-page")
+            || class_lower.contains("print-button")
+        {
+            return true;
+        }
+        
+        // ========================================================================
+        // SCREEN READER / VISUALLY HIDDEN (contains UI instructions, not content)
+        // ========================================================================
+        if class_lower.contains("sr-only")
+            || class_lower.contains("screen-reader-only")
+            || class_lower.contains("visually-hidden")
+        {
+            return true;
+        }
+        
+        // ========================================================================
+        // AI ASSISTANCE PATTERNS
+        // ========================================================================
+        if class_lower.contains("ai-assist")
+            || class_lower.contains("ai-button")
+            || class_lower.contains("ask-ai")
+        {
+            return true;
+        }
+        
+        // ========================================================================
+        // SYNTAX HIGHLIGHTER TOOLBARS
+        // ========================================================================
+        if class_lower.contains("shiki-toolbar")
+            || class_lower.contains("prism-toolbar")
+            || class_lower.contains("hljs-toolbar")
         {
             return true;
         }
@@ -473,6 +558,38 @@ pub(super) fn is_widget_element(attrs: &[Attribute]) -> bool {
             || id_lower.contains("overlay")
             || id_lower.contains("ad-")
             || id_lower.contains("ads-")
+            || id_lower.contains("toolbar")
+            || id_lower.contains("actions")
+            || id_lower.contains("controls")
+        {
+            return true;
+        }
+    }
+    
+    // ========================================================================
+    // DATA-* ATTRIBUTE PATTERNS
+    // ========================================================================
+    for attr in attrs {
+        let name = attr.name.local.as_ref();
+        if let Some(data_name) = name.strip_prefix("data-")
+            && (data_name.contains("clipboard")
+                || data_name.contains("copy")
+                || data_name == "action"
+                || data_name == "command"
+                || data_name.contains("theme"))
+        {
+            return true;
+        }
+    }
+    
+    // ========================================================================
+    // ARIA-LABEL PATTERNS (interactive element labels)
+    // ========================================================================
+    if let Some(aria_label) = get_attr(attrs, "aria-label") {
+        let label_lower = aria_label.to_lowercase();
+        if label_lower.contains("copy")
+            || label_lower.contains("print")
+            || label_lower.contains("ai")
         {
             return true;
         }

@@ -1,17 +1,14 @@
 //! Main content extraction from HTML documents.
 //!
-//! This module intelligently extracts the primary content from HTML pages by:
+//! This module extracts the primary content container from HTML pages by:
 //! 1. Looking for semantic containers in priority order: `<main>`, `<article>`, content-specific divs
-//! 2. Removing navigation, headers, footers, sidebars, and other non-content elements
-//! 3. Falling back to `<body>` tag if no semantic containers are found
-//! 4. Preserving HTML structure, attributes, and element nesting
+//! 2. Falling back to `<body>` tag if no semantic containers are found
+//!
+//! Element filtering (nav, header, footer, sidebars, etc.) is handled by htmd handlers.
 
 use anyhow::Result;
-use ego_tree::NodeId;
-use scraper::{ElementRef, Html, Selector};
-use std::collections::HashSet;
+use scraper::{Html, Selector};
 use std::sync::LazyLock;
-use tracing;
 
 /// Maximum HTML input size to prevent memory exhaustion attacks (10 MB)
 ///
@@ -21,34 +18,6 @@ use tracing;
 /// - Blog posts: 100-500 KB
 /// - 99.9% of real HTML is under 10 MB
 pub(super) const MAX_HTML_SIZE: usize = 10 * 1024 * 1024; // 10 MB
-
-/// Maximum HTML nesting depth to prevent stack overflow
-///
-/// This limit is based on browser engine implementations and empirical analysis:
-///
-/// # Browser Standards
-/// - Chromium/Chrome: ~11,000 recursion limit
-/// - Firefox: ~26,000 recursion limit  
-/// - Safari: ~45,000 recursion limit
-/// - Industry consensus: 10,000 safe across all engines
-///
-/// # Reference
-/// Chromium Issue #40087608: "Many layout algorithms are recursive, so when the DOM 
-/// tree is nested too deeply, this causes stack overflow crashes. We should consider 
-/// restricting the maximum depth of the layout tree: Firefox appears to do this."
-///
-/// # Rationale for 100
-/// - **Legitimate HTML**: 99.9% of web pages have < 20 levels of nesting
-/// - **Complex SPAs**: Modern single-page apps typically use 30-50 levels
-/// - **Safety margin**: 100 provides generous headroom for edge cases
-/// - **Stack safety**: 100 * 200 bytes/frame ≈ 20KB (< 1% of typical 2MB stack)
-/// - **Fail-safe**: Prevents DoS while accommodating all legitimate use cases
-///
-/// # Graceful Degradation
-/// When depth is exceeded, content is truncated at the limit with a warning logged.
-/// This preserves the first 100 levels of nesting, which is more than sufficient for
-/// extracting meaningful content.
-const MAX_HTML_NESTING_DEPTH: usize = 100;
 
 // ============================================================================
 // CSS Selectors for main content extraction
@@ -117,215 +86,22 @@ static BODY_SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
 });
 
 // ============================================================================
-// Element Removal Utilities
-// ============================================================================
-
-/// Efficiently remove elements matching selectors from an element's subtree.
-///
-/// This function:
-/// 1. Parses all selectors once (O(s) where s = number of selectors)
-/// 2. Builds a `HashSet` of element pointers to remove (O(n) where n = number of elements)
-/// 3. Serializes the DOM tree once, skipping removed elements - O(n)
-///
-/// Overall complexity: O(s + n) instead of O(s × n²) from naive string replacement
-///
-/// Note: This preserves HTML structure (tags, attributes, nesting) while removing
-/// unwanted elements, as required by downstream processors (`clean_html_content`, `MarkdownConverter`).
-///
-/// Works directly with the element's node tree, avoiding redundant serialization and re-parsing.
-fn remove_elements_from_html(element: &ElementRef, remove_selectors: &[&str]) -> String {
-    // Parse all selectors upfront - O(s)
-    let parsed_selectors: Vec<Selector> = remove_selectors
-        .iter()
-        .map(|&sel_str| match Selector::parse(sel_str) {
-            Ok(s) => s,
-            Err(e) => panic!("Invalid hardcoded selector '{sel_str}': {e}"),
-        })
-        .collect();
-
-    // Build HashSet of all elements to remove (using NodeId for O(1) lookup) - O(n)
-    let mut to_remove: HashSet<NodeId> = HashSet::new();
-    for sel in &parsed_selectors {
-        for elem in element.select(sel) {
-            // Store NodeId for identity comparison
-            to_remove.insert(elem.id());
-        }
-    }
-
-    // Serialize HTML while skipping removed elements - O(n)
-    let mut result = String::new();
-    serialize_html_excluding(element, &to_remove, &mut result);
-    result
-}
-
-/// Recursively serialize an element and its descendants to HTML,
-/// skipping elements in the removal set.
-///
-/// This preserves the full HTML structure (tags, attributes, nesting) while
-/// excluding unwanted elements and their children.
-///
-/// # Stack Safety
-/// This function enforces a maximum nesting depth of [`MAX_HTML_NESTING_DEPTH`]
-/// to prevent stack overflow from maliciously crafted or malformed HTML.
-fn serialize_html_excluding(
-    element: &ElementRef,
-    to_remove: &HashSet<NodeId>,
-    output: &mut String,
-) {
-    serialize_html_excluding_depth(element, to_remove, output, 0);
-}
-
-/// Internal implementation of HTML serialization with depth tracking.
-///
-/// # Arguments
-/// * `element` - Element to serialize
-/// * `to_remove` - Set of element IDs to exclude from output
-/// * `output` - String buffer to write serialized HTML
-/// * `depth` - Current nesting depth (starts at 0)
-///
-/// # Depth Limiting
-/// Recursion is limited to [`MAX_HTML_NESTING_DEPTH`] to prevent stack overflow.
-/// When exceeded, a warning is logged and processing stops for that branch.
-fn serialize_html_excluding_depth(
-    element: &ElementRef,
-    to_remove: &HashSet<NodeId>,
-    output: &mut String,
-    depth: usize,
-) {
-    // ============================================================================
-    // DEPTH LIMIT CHECK - Prevent Stack Overflow
-    // ============================================================================
-    if depth > MAX_HTML_NESTING_DEPTH {
-        tracing::warn!(
-            element = element.value().name(),
-            depth = depth,
-            limit = MAX_HTML_NESTING_DEPTH,
-            "Maximum HTML nesting depth exceeded - truncating output at depth {}. \
-             Element: <{}>. This prevents stack overflow from deeply nested HTML. \
-             Content up to depth {} has been preserved.",
-            MAX_HTML_NESTING_DEPTH,
-            element.value().name(),
-            MAX_HTML_NESTING_DEPTH
-        );
-        return;
-    }
-
-    // Check if this element should be removed
-    if to_remove.contains(&element.id()) {
-        return; // Skip this element and all its children
-    }
-
-    // Serialize this element's children (we're at the root or an allowed element)
-    for child in element.children() {
-        use scraper::node::Node;
-
-        match child.value() {
-            Node::Text(text) => {
-                // Escape HTML special characters in text content
-                for ch in text.chars() {
-                    match ch {
-                        '<' => output.push_str("&lt;"),
-                        '>' => output.push_str("&gt;"),
-                        '&' => output.push_str("&amp;"),
-                        '"' => output.push_str("&quot;"),
-                        c => output.push(c),
-                    }
-                }
-            }
-            Node::Element(_) => {
-                // Element node - check if it should be removed
-                if let Some(child_elem) = ElementRef::wrap(child) {
-                    if to_remove.contains(&child_elem.id()) {
-                        // Skip this element and its children
-                        continue;
-                    }
-
-                    // Serialize the element with its tags and attributes
-                    let elem_name = child_elem.value().name();
-                    output.push('<');
-                    output.push_str(elem_name);
-
-                    // Serialize attributes
-                    for (name, value) in child_elem.value().attrs() {
-                        output.push(' ');
-                        output.push_str(name);
-                        output.push_str("=\"");
-                        // Escape attribute value
-                        for ch in value.chars() {
-                            match ch {
-                                '"' => output.push_str("&quot;"),
-                                '&' => output.push_str("&amp;"),
-                                '<' => output.push_str("&lt;"),
-                                '>' => output.push_str("&gt;"),
-                                c => output.push(c),
-                            }
-                        }
-                        output.push('"');
-                    }
-                    output.push('>');
-
-                    // Check if this is a void element (self-closing)
-                    const VOID_ELEMENTS: &[&str] = &[
-                        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
-                        "param", "source", "track", "wbr",
-                    ];
-
-                    if VOID_ELEMENTS.contains(&elem_name) {
-                        // Void element - no closing tag needed
-                        continue;
-                    }
-
-                    // ============================================================================
-                    // RECURSIVE CALL - Depth incremented to track nesting level
-                    // ============================================================================
-                    serialize_html_excluding_depth(&child_elem, to_remove, output, depth + 1);
-
-                    // Closing tag (only for non-void elements)
-                    output.push_str("</");
-                    output.push_str(elem_name);
-                    output.push('>');
-                }
-            }
-            Node::Comment(comment) => {
-                // Preserve comments
-                output.push_str("<!--");
-                output.push_str(comment);
-                output.push_str("-->");
-            }
-            _ => {
-                // Other node types (Document, Doctype, ProcessingInstruction) - skip
-            }
-        }
-    }
-}
-
-// ============================================================================
 // Main Content Extraction
 // ============================================================================
 
-/// Extract main content from HTML by identifying semantic containers
+/// Extract main content container from HTML by identifying semantic containers
 ///
-/// This function intelligently extracts the primary content from an HTML page by:
+/// This function extracts the primary content container from an HTML page by:
 /// 1. Looking for semantic containers in priority order: `<main>`, `<article>`, content-specific divs
-/// 2. Removing navigation, headers, footers, sidebars, and other non-content elements
-/// 3. Falling back to `<body>` tag if no semantic containers are found
-/// 4. Preserving HTML structure, attributes, and element nesting via scraper serialization
+/// 2. Falling back to `<body>` tag if no semantic containers are found
+/// 3. Returning the raw HTML of the container (element filtering is handled by htmd handlers)
 ///
 /// # Arguments
 /// * `html` - Raw HTML string to process
 ///
 /// # Returns
-/// * `Ok(String)` - Extracted HTML with main content preserved and non-content elements removed
-/// * `Err` - If HTML parsing fails
-///
-/// # Example
-/// ```rust
-/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::extract_main_content;
-/// let html = r#"<html><body><nav>Menu</nav><main><p>Content</p></main></body></html>"#;
-/// let content = extract_main_content(html)?;
-/// assert!(content.contains("<p>Content</p>"));
-/// # Ok::<(), anyhow::Error>(())
-/// ```
+/// * `Ok(String)` - HTML of the main content container
+/// * `Err` - If HTML input exceeds size limit
 pub fn extract_main_content(html: &str) -> Result<String> {
     // Validate input size to prevent memory exhaustion
     if html.len() > MAX_HTML_SIZE {
@@ -340,40 +116,6 @@ pub fn extract_main_content(html: &str) -> Result<String> {
     }
 
     let document = Html::parse_document(html);
-
-    // First, remove common non-content elements
-    // IMPORTANT: Use specific selectors to avoid removing content lists
-    // - Don't use ".menu" or ".navigation" (too broad - matches content lists)
-    // - Instead, target specific navigation patterns (nav.menu, ul.nav-menu, etc.)
-    let remove_selectors = [
-        "nav",
-        "header",
-        "footer",
-        "aside",
-        ".sidebar",
-        "#sidebar",
-        ".header",
-        ".footer",
-        // Navigation-specific selectors (preserve content lists):
-        // Only remove lists explicitly marked as navigation/menu/breadcrumbs
-        "ul.nav",
-        "ul.navbar",
-        "ul.nav-menu",
-        "ul.navigation",
-        "ul.breadcrumb",
-        "ul.breadcrumbs",
-        "ol.breadcrumb",
-        "ol.breadcrumbs",
-        ".ads",
-        ".advertisement",
-        ".social-share",
-        ".comments",
-        "#comments",
-        ".related-posts",
-        ".cookie-notice",
-        ".popup",
-        ".modal",
-    ];
 
     // Try to find main content in common containers (parsed once, cached forever)
     let content_selectors = [
@@ -394,21 +136,14 @@ pub fn extract_main_content(html: &str) -> Result<String> {
     // First try to find a specific content container
     for selector in content_selectors {
         if let Some(element) = document.select(selector).next() {
-            // Efficiently remove unwanted elements within the content
-            // Works directly with element's node tree - no serialize-parse roundtrip
-            let cleaned_html = remove_elements_from_html(&element, &remove_selectors);
-
-            return Ok(cleaned_html);
+            // Return the container's HTML - element filtering is handled by htmd handlers
+            return Ok(element.html());
         }
     }
 
-    // If no main content container found, try to extract body and remove non-content elements
+    // If no main content container found, try to extract body
     if let Some(body) = document.select(&BODY_SELECTOR).next() {
-        // Efficiently remove non-content elements from body
-        // Works directly with element's node tree - no serialize-parse roundtrip
-        let cleaned_html = remove_elements_from_html(&body, &remove_selectors);
-
-        return Ok(cleaned_html);
+        return Ok(body.html());
     }
 
     // Last resort: return the whole HTML
@@ -424,113 +159,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_removes_navigation() -> Result<()> {
+    fn test_extracts_main_element() -> Result<()> {
         let html = r"
-            <article>
-                <p>Content</p>
-                <nav>Should be removed</nav>
-            </article>
+            <html>
+                <body>
+                    <nav>Navigation</nav>
+                    <main><p>Main content</p></main>
+                    <footer>Footer</footer>
+                </body>
+            </html>
         ";
         let result = extract_main_content(html)?;
-        assert!(!result.contains("Should be removed"));
-        assert!(result.contains("Content"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_preserves_nested_structure() -> Result<()> {
-        let html = r#"
-            <article>
-                <div class="content">
-                    <p>Nested <strong>content</strong></p>
-                </div>
-            </article>
-        "#;
-        let result = extract_main_content(html)?;
-        assert!(result.contains("<strong>content</strong>"));
-        assert!(result.contains("<p>"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_text_escaping() -> Result<()> {
-        let html = r"
-            <article>
-                <p>5 &lt; 10 &amp; 10 &gt; 5</p>
-            </article>
-        ";
-        let result = extract_main_content(html)?;
-        // Must preserve escaped characters
-        assert!(result.contains("&lt;") || result.contains('<'));
-        assert!(result.contains("&gt;") || result.contains('>'));
-        assert!(result.contains("&amp;") || result.contains('&'));
-        Ok(())
-    }
-
-    #[test]
-    fn test_self_closing_tags() -> Result<()> {
-        let html = r#"
-            <article>
-                <p>Image: <img src="test.jpg" alt="test" /></p>
-                <hr />
-                <p>Line break<br />here</p>
-            </article>
-        "#;
-        let result = extract_main_content(html)?;
-        assert!(result.contains("<img"));
-        assert!(result.contains("<hr"));
-        assert!(result.contains("<br"));
-        // Should NOT contain closing tags for void elements
-        assert!(!result.contains("</img>"));
-        assert!(!result.contains("</br>"));
-        assert!(!result.contains("</hr>"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_preserves_attributes() -> Result<()> {
-        let html = r#"
-            <article>
-                <div class="content" id="main" data-test="value">Content</div>
-            </article>
-        "#;
-        let result = extract_main_content(html)?;
-        assert!(result.contains("class=\"content\""));
-        assert!(result.contains("id=\"main\""));
-        assert!(result.contains("data-test=\"value\""));
-        Ok(())
-    }
-
-    #[test]
-    fn test_removes_multiple_unwanted_elements() -> Result<()> {
-        let html = r"
-            <article>
-                <header>Header</header>
-                <p>Main content</p>
-                <nav>Navigation</nav>
-                <footer>Footer</footer>
-                <aside>Sidebar</aside>
-            </article>
-        ";
-        let result = extract_main_content(html)?;
+        // Returns the <main> element HTML (element filtering done by htmd handlers)
+        assert!(result.contains("<main>"));
         assert!(result.contains("Main content"));
-        assert!(!result.contains("Header"));
-        assert!(!result.contains("Navigation"));
-        assert!(!result.contains("Footer"));
-        assert!(!result.contains("Sidebar"));
         Ok(())
     }
 
     #[test]
-    fn test_preserves_comments() -> Result<()> {
+    fn test_extracts_article_element() -> Result<()> {
         let html = r"
-            <article>
-                <!-- Important comment -->
-                <p>Content</p>
-            </article>
+            <html>
+                <body>
+                    <nav>Navigation</nav>
+                    <article><p>Article content</p></article>
+                </body>
+            </html>
         ";
         let result = extract_main_content(html)?;
-        assert!(result.contains("<!-- Important comment -->"));
+        assert!(result.contains("<article>"));
+        assert!(result.contains("Article content"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_main_takes_priority_over_article() -> Result<()> {
+        let html = r"
+            <html>
+                <body>
+                    <article><p>Article</p></article>
+                    <main><p>Main</p></main>
+                </body>
+            </html>
+        ";
+        let result = extract_main_content(html)?;
+        // <main> should be selected, not <article>
+        assert!(result.contains("<main>"));
+        assert!(result.contains("Main"));
         Ok(())
     }
 
@@ -539,19 +214,19 @@ mod tests {
         let html = r"
             <html>
                 <body>
-                    <nav>Navigation</nav>
-                    <p>Main content without article tag</p>
+                    <div>No semantic container</div>
+                    <p>Just body content</p>
                 </body>
             </html>
         ";
         let result = extract_main_content(html)?;
-        assert!(result.contains("Main content"));
-        assert!(!result.contains("Navigation"));
+        assert!(result.contains("<body>"));
+        assert!(result.contains("Just body content"));
         Ok(())
     }
 
     #[test]
-    fn test_malformed_html_fallback() -> Result<()> {
+    fn test_raw_html_fallback() -> Result<()> {
         let html = "<p>Malformed HTML without body</p>";
         let result = extract_main_content(html)?;
         assert_eq!(result, html);
@@ -559,95 +234,48 @@ mod tests {
     }
 
     #[test]
-    fn test_preserves_content_lists() -> Result<()> {
+    fn test_content_class_selector() -> Result<()> {
         let html = r#"
-            <article>
-                <h3>Launch Claude Code on the web</h3>
-                <p>This is useful for:</p>
-                <ul>
-                    <li>Long-running tasks</li>
-                    <li>Resource-intensive operations</li>
-                    <li>Accessing cloud-only features</li>
-                </ul>
-                <p>To start a web session from desktop, select a remote environment.</p>
-            </article>
+            <html>
+                <body>
+                    <div class="content"><p>Content div</p></div>
+                </body>
+            </html>
         "#;
         let result = extract_main_content(html)?;
-        
-        // Content list should be preserved
-        assert!(result.contains("<ul>"));
-        assert!(result.contains("Long-running tasks"));
-        assert!(result.contains("Resource-intensive operations"));
-        assert!(result.contains("Accessing cloud-only features"));
-        
-        // Verify the list is between the paragraphs (not removed)
-        assert!(result.contains("useful for"));
-        assert!(result.contains("To start a web session"));
-        
+        assert!(result.contains("Content div"));
         Ok(())
     }
 
     #[test]
-    fn test_removes_navigation_lists() -> Result<()> {
+    fn test_role_main_selector() -> Result<()> {
         let html = r#"
-            <article>
-                <p>Main content</p>
-                <ul class="nav-menu">
-                    <li>Nav Item 1</li>
-                    <li>Nav Item 2</li>
-                </ul>
-                <ul class="breadcrumb">
-                    <li>Home</li>
-                    <li>Docs</li>
-                </ul>
-            </article>
+            <html>
+                <body>
+                    <div role="main"><p>Role main content</p></div>
+                </body>
+            </html>
         "#;
         let result = extract_main_content(html)?;
-        
-        // Navigation lists should be removed
-        assert!(!result.contains("Nav Item 1"));
-        assert!(!result.contains("Nav Item 2"));
-        assert!(!result.contains("Home"));
-        assert!(!result.contains("breadcrumb"));
-        
-        // Main content should be preserved
-        assert!(result.contains("Main content"));
-        
+        assert!(result.contains("Role main content"));
         Ok(())
     }
 
     #[test]
-    fn test_preserves_plain_lists_removes_nav_lists() -> Result<()> {
-        let html = r#"
+    fn test_preserves_all_elements_in_container() -> Result<()> {
+        // This module no longer filters elements - htmd handlers do that
+        let html = r"
             <article>
-                <h2>Features</h2>
-                <ul>
-                    <li>Feature 1</li>
-                    <li>Feature 2</li>
-                </ul>
-                <nav>
-                    <ul>
-                        <li>Nav 1</li>
-                        <li>Nav 2</li>
-                    </ul>
-                </nav>
-                <ul class="navigation">
-                    <li>Menu Item</li>
-                </ul>
+                <nav>Navigation</nav>
+                <p>Content</p>
+                <footer>Footer</footer>
             </article>
-        "#;
+        ";
         let result = extract_main_content(html)?;
-        
-        // Plain content list should be preserved
-        assert!(result.contains("Feature 1"));
-        assert!(result.contains("Feature 2"));
-        
-        // Navigation lists should be removed
-        assert!(!result.contains("Nav 1"));
-        assert!(!result.contains("Nav 2"));
-        assert!(!result.contains("Menu Item"));
-        
+        // All elements are preserved - filtering is done by htmd handlers
+        assert!(result.contains("Navigation"));
+        assert!(result.contains("Content"));
+        assert!(result.contains("Footer"));
         Ok(())
     }
-
 }

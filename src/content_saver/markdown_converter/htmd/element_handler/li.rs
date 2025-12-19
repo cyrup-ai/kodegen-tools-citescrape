@@ -18,19 +18,19 @@ pub(super) fn list_item_handler(
         .trim_start_document_whitespace()
         .to_string();
 
-    let ul_li = || {
+    let ul_li = |content: &str| {
         let marker = if handlers.options().bullet_list_marker == BulletListMarker::Asterisk {
             "*"
         } else {
             "-"
         };
         let spacing = " ".repeat(handlers.options().ul_bullet_spacing.into());
-        let content = indent_text_except_first_line(&content, marker.len() + spacing.len(), true);
+        let indented = indent_text_except_first_line(content, marker.len() + spacing.len(), true);
 
-        Some(concat_strings!("\n", marker, spacing, content).into())
+        Some(concat_strings!("\n", marker, spacing, indented).into())
     };
 
-    let ol_li = || {
+    let ol_li = |content: &str| {
         // Marker will be added in the ol handler
         Some(concat_strings!("\n", content, "\n").into())
     };
@@ -39,8 +39,8 @@ pub(super) fn list_item_handler(
         && let Some(parent_tag_name) = get_node_tag_name(&parent)
         && parent_tag_name == "ol"
     {
-        ol_li()
+        ol_li(&content)
     } else {
-        ul_li()
+        ul_li(&content)
     }
 }

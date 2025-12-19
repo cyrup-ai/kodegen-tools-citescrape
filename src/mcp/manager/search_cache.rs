@@ -7,7 +7,7 @@ use super::timestamp_utils::{instant_to_nanos, nanos_to_instant};
 use crate::config::CrawlConfig;
 use crate::search::{IndexingSender, SearchEngine};
 use kodegen_mcp_schema::McpError;
-use log;
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -134,7 +134,7 @@ impl SearchEngineCache {
 
             if let Some(evict_key) = oldest_key {
                 engines.remove(&evict_key);
-                log::debug!(
+                debug!(
                     "Evicted LRU engine {:?} to make room for {:?} (limit: {})",
                     evict_key,
                     output_dir,
@@ -156,13 +156,13 @@ impl SearchEngineCache {
         let indexing_sender =
             match crate::search::IncrementalIndexingService::start(engine_for_indexing).await {
                 Ok((_service, sender)) => {
-                    log::debug!(
+                    debug!(
                         "Incremental indexing service started for output_dir: {output_dir:?}"
                     );
                     Some(Arc::new(sender))
                 }
                 Err(e) => {
-                    log::error!("Failed to start incremental indexing service: {e}");
+                    error!("Failed to start incremental indexing service: {e}");
                     None
                 }
             };
@@ -230,7 +230,7 @@ impl SearchEngineCache {
     /// }
     /// ```
     pub async fn shutdown(&self) {
-        log::info!("Shutting down search engine cache");
+        info!("Shutting down search engine cache");
 
         let mut engines = self.engines.lock().await;
         let count = engines.len();
@@ -238,13 +238,13 @@ impl SearchEngineCache {
         // Drain all engines and explicitly drop them
         // drain() takes ownership, removing from HashMap
         for (key, engine) in engines.drain() {
-            log::debug!("Releasing search engine: {key:?}");
+            debug!("Releasing search engine: {key:?}");
             // Explicit drop ensures immediate cleanup
             // (though implicit drop would also work)
             drop(engine);
         }
 
-        log::info!("Search engine cache shutdown complete: {count} engines");
+        info!("Search engine cache shutdown complete: {count} engines");
     }
 
     /// Get number of cached engines (for monitoring)
@@ -297,7 +297,7 @@ impl SearchEngineCache {
             let should_keep = age < cutoff;
 
             if !should_keep {
-                log::debug!("Evicting idle search engine: {path:?} (idle: {age:?})");
+                debug!("Evicting idle search engine: {path:?} (idle: {age:?})");
             }
 
             should_keep
@@ -321,7 +321,7 @@ impl SearchEngineCache {
 
             if let Some(key) = oldest_key {
                 engines.remove(&key);
-                log::debug!("LRU eviction: {:?} (cache size: {})", key, engines.len());
+                debug!("LRU eviction: {:?} (cache size: {})", key, engines.len());
             } else {
                 // This should never happen now (no lock contention)
                 break;
@@ -330,7 +330,7 @@ impl SearchEngineCache {
 
         let cleaned = initial_count.saturating_sub(engines.len());
         if cleaned > 0 {
-            log::debug!(
+            debug!(
                 "Cleaned up {} search engines (current size: {})",
                 cleaned,
                 engines.len()

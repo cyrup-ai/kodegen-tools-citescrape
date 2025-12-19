@@ -2,9 +2,11 @@
 //!
 //! This module provides the complete pipeline for converting HTML to clean, well-formatted markdown:
 //! 1. Extract main content using intelligent CSS selectors
-//! 2. Clean HTML (remove scripts, styles, ads, tracking, etc.)
-//! 3. Convert to markdown using html2md with custom post-processing
-//! 4. Normalize markdown headings and handle edge cases
+//! 2. Convert to markdown using htmd with DOM-based element handlers
+//! 3. Process markdown links (URL resolution)
+//!
+//! Note: HTML cleaning (widget filtering, script/style removal) is handled by htmd element handlers
+//! during DOM traversal - no separate regex-based cleaning stage. See htmd/element_handler/ for details.
 //!
 //! # Usage
 //!
@@ -57,7 +59,7 @@ pub mod html_to_markdown;
 
 
 // Re-export sub-modules for advanced usage
-pub use html_preprocessing::{clean_html_content, extract_main_content};
+pub use html_preprocessing::extract_main_content;
 pub use html_to_markdown::MarkdownConverter;
 
 
@@ -180,7 +182,7 @@ impl ConversionOptions {
 /// Convert HTML to Markdown synchronously (blocking)
 ///
 /// This is the ONE canonical function for HTML→Markdown conversion.
-/// It orchestrates the complete 4-stage pipeline with built-in fallback handling.
+/// It orchestrates the complete 3-stage pipeline with built-in fallback handling.
 ///
 /// # Pipeline Stages
 ///
@@ -188,20 +190,15 @@ impl ConversionOptions {
 ///    - Uses intelligent CSS selectors to find primary content
 ///    - Falls back to full HTML if extraction fails
 ///
-/// 2. **Clean HTML** (optional, controlled by `options.clean_html`)
-///    - Removes scripts, styles, ads, tracking, social widgets
-///    - Cleans up problematic HTML structures
-///
-/// 3. **Convert to Markdown** (always performed)
-///    - Uses htmd library as base converter
-///    - Applies custom post-processing (tables, lists, headings, code blocks)
+/// 2. **Convert to Markdown** (always performed)
+///    - Uses htmd library with DOM-based element handlers
+///    - HTML cleaning (widget filtering, script/style removal) is handled during DOM traversal
+///    - Custom handlers for expressive-code extraction, widget skipping, etc.
 ///    - Built-in fallback to `htmd::convert` if post-processing fails
 ///
-/// 4. **Process Headings** (optional, controlled by `options.process_headings`)
-///    - Normalizes heading levels
-///    - Converts setext→ATX style
-///    - Removes closing hashes
-///    - Handles code fences properly (including bug fixes `HTML_CLEANER_15`, `HTML_CLEANER_17`)
+/// 3. **Process Links** (optional, controlled by `options.base_url`)
+///    - Resolves relative URLs to absolute using base URL
+///    - Preserves fragment-only and absolute URLs
 ///
 /// # Arguments
 ///
@@ -234,57 +231,32 @@ impl ConversionOptions {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) -> Result<String> {
-    // Stage 0: Normalize HTML structure (PREVENTIVE - Layer 3 defense against HTML leakage)
-    let normalized_html = match html_preprocessing::normalize_html_structure(html) {
-        Ok(normalized) => normalized,
-        Err(e) => {
-            tracing::debug!("HTML normalization failed: {}, using original HTML", e);
-            html.to_string()
-        }
-    };
-
     // Stage 1: Extract main content (with fallback to full HTML)
     let main_html = if options.extract_main_content {
-        match extract_main_content(&normalized_html) {
+        match extract_main_content(html) {
             Ok(content) => content,
             Err(e) => {
                 tracing::debug!("Main content extraction failed: {}, using full HTML", e);
-                normalized_html.clone()
+                html.to_string()
             }
         }
     } else {
-        normalized_html
+        html.to_string()
     };
 
-    // Stage 2: Clean HTML (with passthrough if disabled)
-    let clean_html = if options.clean_html {
-        match clean_html_content(&main_html) {
-            Ok(cleaned) => cleaned,
-            Err(e) => {
-                tracing::warn!("HTML cleaning failed: {}, using uncleaned HTML", e);
-                main_html
-            }
-        }
-    } else {
-        main_html
-    };
-
-    // Stage 3: Convert to Markdown
-    // The MarkdownConverter uses htmd with custom handlers
-    // and has built-in fallback for robustness
+    // Stage 2: Convert to Markdown
+    // HTML cleaning (widget filtering, script/style removal) is handled by htmd element handlers
+    // during DOM traversal - no separate regex-based cleaning stage needed
     let converter = MarkdownConverter::new()
         .with_preserve_tables(options.preserve_tables)
         .with_preserve_links(options.preserve_links)
         .with_preserve_images(options.preserve_images)
         .with_code_highlighting(options.code_highlighting);
 
-    let markdown = converter.convert_sync(&clean_html)?;
+    let markdown = converter.convert_sync(&main_html)?;
 
-    // Stage 4: Process markdown links (convert relative URLs to absolute)
-    // This is the ONLY postprocessing needed - URL resolution for scraped content
-    // All other normalization is handled by:
-    // - htmd element handlers (HTMD_1-4) for correct markdown output
-    // - MarkdownNormalizer in convert_sync() for streaming normalization
+    // Stage 3: Process markdown links (convert relative URLs to absolute)
+    // URL resolution for scraped content - all other normalization is handled by htmd handlers
     let markdown = if let Some(base_url) = &options.base_url {
         html_to_markdown::process_markdown_links(&markdown, base_url)
     } else {

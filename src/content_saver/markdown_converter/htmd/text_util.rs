@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 pub(crate) trait TrimDocumentWhitespace {
     fn trim_document_whitespace(&self) -> &str;
 
@@ -107,7 +109,16 @@ where
             return String::new();
         };
         let separator = separator.as_ref();
-        let mut result = String::from(first.as_ref());
+        let first_str = first.as_ref();
+
+        // Estimate capacity using size_hint and first item length as average estimate
+        let (lower_bound, _) = self.size_hint();
+        let estimated_capacity = first_str.len()
+            + lower_bound * (first_str.len() + separator.len());
+
+        let mut result = String::with_capacity(estimated_capacity);
+        result.push_str(first_str);
+
         for next in self {
             result.push_str(separator);
             result.push_str(next.as_ref());
@@ -119,8 +130,10 @@ where
 /// Join text clips, inspired by:
 /// https://github.com/mixmark-io/turndown/blob/cc73387fb707e5fb5e1083e94078d08f38f3abc8/src/turndown.js#L221
 pub(crate) fn join_blocks(contents: &[String]) -> String {
-    // Pre-allocate capacity to avoid multiple re-allocations.
-    let capacity = contents.iter().map(String::len).sum();
+    // Pre-allocate capacity including worst-case separators (2 newlines per join point).
+    let content_len: usize = contents.iter().map(String::len).sum();
+    let separator_capacity = contents.len().saturating_sub(1) * 2;
+    let capacity = content_len + separator_capacity;
     let mut result = String::with_capacity(capacity);
 
     for content in contents {
@@ -163,7 +176,7 @@ pub(crate) fn compress_whitespace(input: &str) -> Cow<'_, str> {
 
     // Use char_indices to get byte indices for slicing the input.
     for (byte_index, c) in input.char_indices() {
-        if c.is_ascii_whitespace() {
+        if c.is_whitespace() {
             if in_whitespace {
                 // Consecutive whitespace: skip this character.
                 if result.is_none() {
@@ -221,14 +234,20 @@ pub(crate) fn indent_text_except_first_line(
     indent: usize,
     trim_line_end: bool,
 ) -> String {
-    if indent == 0 {
+    // Only skip processing if BOTH indent is 0 AND we don't need to trim line ends
+    if indent == 0 && !trim_line_end {
         return text.to_string();
     }
+
+    // Preserve trailing newline information BEFORE lines() strips it
+    let has_trailing_newline = text.ends_with('\n');
+
     // Estimate capacity: assume ~80 chars per line average
     let estimated_lines = (text.len() / 80).max(1);
     let estimated_capacity = text.len() + estimated_lines * indent;
     let mut result = String::with_capacity(estimated_capacity);
     let indent_text = " ".repeat(indent);
+
     for (idx, line) in text.lines().enumerate() {
         let line = if trim_line_end {
             line.trim_end_matches(is_document_whitespace)
@@ -241,11 +260,16 @@ pub(crate) fn indent_text_except_first_line(
         if idx == 0 || line.is_empty() {
             result.push_str(line);
         } else {
-            // Direct push - no intermediate allocation
             result.push_str(&indent_text);
             result.push_str(line);
         }
     }
+
+    // Restore trailing newline if it was present in the input
+    if has_trailing_newline {
+        result.push('\n');
+    }
+
     result
 }
 
@@ -293,20 +317,22 @@ pub(crate) fn index_of_markdown_ordered_item_dot(text: &str) -> Option<usize> {
     None
 }
 
+/// Concatenates multiple string-like values with pre-allocated capacity.
+///
+/// Each expression is evaluated exactly once. Accepts `String` (moved),
+/// `&str` (borrowed), or `&String` (borrowed via deref coercion).
+/// To borrow an owned String instead of moving, pass `&my_string`.
 macro_rules! concat_strings {
-    ($($x:expr),*) => {{
-        let mut len = 0;
-        $(
-            len += &$x.len();
-        )*
+    ($($x:expr),* $(,)?) => {{
+        let parts: &[::std::borrow::Cow<'_, str>] = &[$(::std::borrow::Cow::from($x)),*];
+        let len: usize = parts.iter().map(|s| s.len()).sum();
         let mut result = String::with_capacity(len);
-        $(
-            result.push_str(&$x);
-        )*
+        for s in parts {
+            result.push_str(s);
+        }
         result
     }};
 }
-use std::borrow::Cow;
 
 pub(crate) use concat_strings;
 

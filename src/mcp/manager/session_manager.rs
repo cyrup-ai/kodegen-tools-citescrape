@@ -3,7 +3,7 @@
 //! Provides thread-safe session tracking with automatic cleanup of completed/failed sessions.
 
 use super::types::{ActiveCrawlSession, CrawlStatus};
-use log;
+use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -107,7 +107,7 @@ impl CrawlSessionManager {
             let should_keep = !is_terminal || age.to_std().unwrap_or(Duration::ZERO) < cutoff;
 
             if !should_keep {
-                log::debug!(
+                debug!(
                     "Removing old crawl session {}: {:?} (age: {:?})",
                     crawl_id,
                     session.status,
@@ -123,7 +123,7 @@ impl CrawlSessionManager {
 
         let cleaned = initial_count - sessions.len();
         if cleaned > 0 {
-            log::debug!("Cleaned up {cleaned} crawl sessions");
+            debug!("Cleaned up {cleaned} crawl sessions");
         }
     }
 

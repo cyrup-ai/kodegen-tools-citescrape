@@ -47,12 +47,13 @@ pub(super) fn img_handler(handlers: &dyn Handlers, element: Element) -> Option<H
     let has_spaces_in_link = src.as_ref().is_some_and(|link| link.contains(' '));
 
     // Build markdown image syntax: ![alt](src "title")
+    let empty_string = String::new();
     let md = concat_strings!(
         "![",
-        alt.as_ref().unwrap_or(&String::new()),
+        alt.as_ref().unwrap_or(&empty_string),
         "](",
         if has_spaces_in_link { "<" } else { "" },
-        src.as_ref().unwrap_or(&String::new()),
+        src.as_ref().unwrap_or(&empty_string),
         title
             .as_ref()
             .map_or(String::new(), |t| concat_strings!(" \"", t, "\"")),

@@ -1,5 +1,5 @@
 use html5ever::tendril::{Tendril, fmt::UTF8};
-use log;
+use log::warn;
 use markup5ever_rcdom::{Node, NodeData};
 use phf::phf_set;
 use std::{borrow::Cow, rc::Rc};
@@ -31,34 +31,33 @@ pub(crate) fn walk_node(
         }
 
         NodeData::Text { ref contents } => {
-            // Append the text in this node to the buffer.
-            let text = contents.borrow().to_string();
-            if is_pre {
-                // Handle pre and code
-                let text = if parent_tag.is_some_and(|t| t == "pre") {
-                    escape_pre_text_if_needed(text)
-                } else {
-                    text
-                };
-                buffer.push_str(&text);
-            } else {
-                // Handle other elements or texts
-                let text = escape_if_needed(Cow::Owned(text));
-                let text = compress_whitespace(text.as_ref());
+            // Zero-copy borrow from Tendril - no allocation
+            let borrowed = contents.borrow();
+            let text: &str = borrowed.as_ref();
 
-                let to_add = if trim_leading_spaces
-                    || (text.chars().next().is_some_and(|ch| ch == ' ')
-                        && buffer.chars().last().is_some_and(|ch| ch == ' '))
-                {
-                    // We can't compress spaces between two text blocks/elements, so we
-                    // compress them here by trimming the leading space of current text
-                    // content.
-                    text.trim_start_matches(' ').to_string()
+            if is_pre {
+                // Handle pre and code blocks
+                let result = if parent_tag.is_some_and(|t| t == "pre") {
+                    escape_pre_text_if_needed(Cow::Borrowed(text))
                 } else {
-                    text.into_owned()
+                    Cow::Borrowed(text)
                 };
-                if !to_add.is_empty() {
-                    buffer.push_str(&to_add);
+                buffer.push_str(&result);
+            } else {
+                // Handle other elements - start with borrowed, allocate only if needed
+                let text = escape_if_needed(Cow::Borrowed(text));
+                let text = compress_whitespace(&text);
+
+                // Use starts_with/ends_with instead of iterator methods
+                if trim_leading_spaces || (text.starts_with(' ') && buffer.ends_with(' ')) {
+                    // Trim returns &str slice, push directly to buffer
+                    let trimmed = text.trim_start_matches(' ');
+                    if !trimmed.is_empty() {
+                        buffer.push_str(trimmed);
+                    }
+                } else if !text.is_empty() {
+                    // Cow derefs to &str, no allocation needed
+                    buffer.push_str(&text);
                 }
             }
         }
@@ -98,61 +97,46 @@ pub(crate) fn walk_node(
             }
         }
         NodeData::Doctype { .. } => {}
-        NodeData::ProcessingInstruction { .. } => unreachable!(),
+        NodeData::ProcessingInstruction { ref target, ref contents } => {
+            // Processing instructions are rare in HTML5 but can occur in XHTML.
+            // In Faithful mode, preserve as HTML-safe representation.
+            // In Pure mode, skip silently (no markdown equivalent).
+            if handlers.options.translation_mode == TranslationMode::Faithful {
+                buffer.push_str(&format!("<!--?{} {}?-->", target, contents));
+            }
+        }
     }
 
     markdown_translated
 }
 
-pub(crate) fn walk_children(
-    node: &Rc<Node>,
-    buffer: &mut String,
-    handlers: &ElementHandlers,
-    is_parent_block_element: bool,
-    is_pre: bool,
-    // Return value: `markdown_translated`.
-) -> bool {
-    // Combine similar adjacent blocks using two-pointer compaction.
-    // This is O(n) instead of O(n²) because we avoid Vec::remove().
+/// Combines similar adjacent inline elements in-place using two-pointer compaction.
+/// This is O(n) instead of O(n^2) because we avoid Vec::remove().
+///
+/// The mutable borrow of `node.children` is released when this function returns,
+/// making subsequent immutable borrows in the caller safe.
+fn combine_similar_children(node: &Rc<Node>) {
     let mut children = node.children.borrow_mut();
-    
+
     if children.len() <= 1 {
-        // Early exit if 0 or 1 children - nothing to combine
-        drop(children);
-    } else {
-        let original_len = children.len();
-        let mut write_idx = 0; // Position of last kept element
-        
-        // Process each element starting from index 1
-        for read_idx in 1..original_len {
-            // Check if current element can combine with last kept element
-            if let Some(text_to_append) = can_combine(&children[write_idx], &children[read_idx]) {
-                // Directly modify the write_idx node's text content
-                let node_at_write = &children[write_idx];
-                let children_of_write = node_at_write.children.borrow();
-                
-                if let Some(first_child) = children_of_write.first() {
-                    if let NodeData::Text { contents } = &first_child.data {
-                        // Directly modify the original node's RefCell
-                        let mut current_text = contents.borrow_mut();
-                        current_text.push_tendril(&text_to_append);
-                        // write_idx stays the same for next iteration (node absorbed read_idx's text)
-                    } else {
-                        // Invariant violation: can_combine said OK but first child isn't Text
-                        log::warn!(
-                            "DOM walker: can_combine invariant violation at write index {}: first child is not Text node. Skipping combination.",
-                            write_idx
-                        );
-                        drop(children_of_write);
-                        write_idx += 1;
-                        if write_idx != read_idx {
-                            children.swap(write_idx, read_idx);
-                        }
-                    }
+        return; // Nothing to combine
+    }
+
+    let original_len = children.len();
+    let mut write_idx = 0;
+
+    for read_idx in 1..original_len {
+        if let Some(text_to_append) = can_combine(&children[write_idx], &children[read_idx]) {
+            let node_at_write = &children[write_idx];
+            let children_of_write = node_at_write.children.borrow();
+
+            if let Some(first_child) = children_of_write.first() {
+                if let NodeData::Text { contents } = &first_child.data {
+                    let mut current_text = contents.borrow_mut();
+                    current_text.push_tendril(&text_to_append);
                 } else {
-                    // Invariant violation: can_combine said OK but no children
-                    log::warn!(
-                        "DOM walker: can_combine returned Some but node at write index {} has no children. Skipping combination.",
+                    warn!(
+                        "DOM walker: can_combine invariant violation at write index {}: first child is not Text node. Skipping combination.",
                         write_idx
                     );
                     drop(children_of_write);
@@ -162,30 +146,48 @@ pub(crate) fn walk_children(
                     }
                 }
             } else {
-                // Can't combine: keep this element by moving it to write position
+                warn!(
+                    "DOM walker: can_combine returned Some but node at write index {} has no children. Skipping combination.",
+                    write_idx
+                );
+                drop(children_of_write);
                 write_idx += 1;
-                
-                // Swap only if positions are different (optimization)
                 if write_idx != read_idx {
                     children.swap(write_idx, read_idx);
                 }
             }
+        } else {
+            write_idx += 1;
+            if write_idx != read_idx {
+                children.swap(write_idx, read_idx);
+            }
         }
-        
-        // Truncate to final size (write_idx + 1 elements kept)
-        children.truncate(write_idx + 1);
-        drop(children);
     }
 
-    // Trim leading spaces of the first element/text in block elements (except pre/code)
+    children.truncate(write_idx + 1);
+    // Mutable borrow of node.children released here when function returns
+}
+
+pub(crate) fn walk_children(
+    node: &Rc<Node>,
+    buffer: &mut String,
+    handlers: &ElementHandlers,
+    is_parent_block_element: bool,
+    is_pre: bool,
+) -> bool {
+    // Combine similar adjacent inline elements first.
+    // Mutable borrow is contained within this function call and released on return.
+    combine_similar_children(node);
+
+    // Safe to take immutable borrow - no explicit drop() needed
     let mut trim_leading_spaces = !is_pre && is_parent_block_element;
     let tag = get_node_tag_name(node);
     let mut markdown_translated = true;
+
     for child in node.children.borrow().iter() {
         let is_block = get_node_tag_name(child).is_some_and(is_block_element);
 
         if is_block {
-            // Trim trailing spaces for the previous element
             trim_buffer_end_spaces(buffer);
         }
 
@@ -194,7 +196,6 @@ pub(crate) fn walk_children(
         markdown_translated &= walk_node(child, buffer, handlers, tag, trim_leading_spaces, is_pre);
 
         if buffer.len() > buffer_len {
-            // Something was appended, update the flag
             trim_leading_spaces = is_block;
         }
     }
@@ -258,8 +259,8 @@ fn can_combine(n1: &Node, n2: &Node) -> Option<Tendril<UTF8>> {
         && attrs1 == attrs2
         && mathml_annotation_xml_integration_point1 == mathml_annotation_xml_integration_point2
     {
-        // Clone the Tendril CONTENTS, not the RefCell
-        Some(contents2.borrow().clone())
+        // Take the Tendril value (zero-copy) since n2 is being discarded
+        Some(contents2.take())
     } else {
         None
     }
@@ -268,6 +269,9 @@ fn can_combine(n1: &Node, n2: &Node) -> Option<Tendril<UTF8>> {
 /// Normalizes content before adding to buffer by:
 /// 1. Collapsing excessive newlines (max 2 consecutive newlines)
 /// 2. Collapsing adjacent spaces between inline elements (when not in pre context)
+///
+/// Uses O(k) byte operations where k is the number of trailing/leading newlines,
+/// instead of O(n) character iteration over the entire buffer.
 fn normalize_content_for_buffer(
     buffer: &str,
     mut content: String,
@@ -277,23 +281,38 @@ fn normalize_content_for_buffer(
         return content;
     }
 
-    // Check trailing newlines in the buffer directly
-    let last_newlines = buffer.chars().rev().take_while(|c| *c == '\n').count();
-    let content_newlines = content.chars().take_while(|c| *c == '\n').count();
+    // O(k) where k is number of trailing newlines - typically 0-3
+    // Safe: '\n' is ASCII (0x0A), single byte in UTF-8
+    let last_newlines = buffer
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\n')
+        .count();
+
+    // O(k) where k is number of leading newlines
+    let content_newlines = content
+        .as_bytes()
+        .iter()
+        .take_while(|&&b| b == b'\n')
+        .count();
+
     let total_newlines = last_newlines + content_newlines;
 
     // Collapse excessive newlines (max 2)
     if total_newlines > 2 {
         let to_remove = std::cmp::min(total_newlines - 2, content_newlines);
+        // Safe: we're removing ASCII newlines which are 1 byte each
         content.drain(..to_remove);
     }
 
     // Collapse adjacent spaces between inline elements (not in pre context)
+    // O(1) byte access instead of O(n) char iteration
     if !is_pre
         && last_newlines == 0
         && content_newlines == 0
-        && buffer.chars().last().is_some_and(|c| c == ' ')
-        && content.chars().next().is_some_and(|c| c == ' ')
+        && buffer.as_bytes().last() == Some(&b' ')
+        && content.as_bytes().first() == Some(&b' ')
     {
         content.remove(0);
     }
@@ -329,72 +348,140 @@ fn trim_buffer_end_spaces(buffer: &mut String) {
     }
 }
 
-/// Cases:
-/// '\'        -> '\\'
-/// '==='      -> '\==='      // h1
-/// '---'      -> '\---'      // h2
-/// '```'      -> '\```'       // code fence
-/// '~~~'      -> '\~~~'       // code fence
-/// '# Not h1' -> '\\# Not h1' // markdown heading in html
-/// '1. Item'  -> '1\\. Item'  // ordered list item
-/// '- Item'   -> '\\- Item'   // unordered list item
-/// '+ Item'   -> '\\+ Item'   // unordered list item
-/// '> Quote'  -> '\\> Quote'  // quote
+/// Lookup table for body escape characters: \ * _ ` [ ]
+/// All are ASCII, so byte-level indexing is safe.
+const BODY_ESCAPE_LUT: [bool; 256] = {
+    let mut lut = [false; 256];
+    lut[b'\\' as usize] = true;
+    lut[b'*' as usize] = true;
+    lut[b'_' as usize] = true;
+    lut[b'`' as usize] = true;
+    lut[b'[' as usize] = true;
+    lut[b']' as usize] = true;
+    lut
+};
+
+/// Lookup table for line-start escape characters: = ~ > - + # 0-9
+const LINE_START_LUT: [bool; 256] = {
+    let mut lut = [false; 256];
+    lut[b'=' as usize] = true;
+    lut[b'~' as usize] = true;
+    lut[b'>' as usize] = true;
+    lut[b'-' as usize] = true;
+    lut[b'+' as usize] = true;
+    lut[b'#' as usize] = true;
+    // Digits 0-9
+    lut[b'0' as usize] = true;
+    lut[b'1' as usize] = true;
+    lut[b'2' as usize] = true;
+    lut[b'3' as usize] = true;
+    lut[b'4' as usize] = true;
+    lut[b'5' as usize] = true;
+    lut[b'6' as usize] = true;
+    lut[b'7' as usize] = true;
+    lut[b'8' as usize] = true;
+    lut[b'9' as usize] = true;
+    lut
+};
+
+/// Escapes markdown special characters in text content.
+///
+/// Cases handled:
+/// - Body escapes: `\` `*` `_` `` ` `` `[` `]` -> backslash-prefixed
+/// - Line-start `=` `~` `>` -> backslash-prefixed (prevents h1/h2/blockquote)
+/// - Line-start `-` `+` followed by space -> backslash-prefixed (prevents list)
+/// - Line-start `#` followed by space -> backslash-prefixed (prevents heading)
+/// - Line-start `N.` followed by space -> escaped dot (prevents ordered list)
 fn escape_if_needed(text: Cow<'_, str>) -> Cow<'_, str> {
-    let Some(first) = text.chars().next() else {
+    if text.is_empty() {
         return text;
-    };
-
-    let mut need_escape = matches!(first, '=' | '~' | '>' | '-' | '+' | '#' | '0'..='9');
-
-    if !need_escape {
-        need_escape = text
-            .chars()
-            .any(|c| c == '\\' || c == '*' || c == '_' || c == '`' || c == '[' || c == ']');
     }
 
-    if !need_escape {
+    let bytes = text.as_bytes();
+    let first_byte = bytes[0];
+
+    // O(1) checks using lookup tables
+    let needs_line_start_escape = LINE_START_LUT[first_byte as usize];
+    let needs_body_escape = bytes.iter().any(|&b| BODY_ESCAPE_LUT[b as usize]);
+
+    // Fast path: no escaping needed at all
+    if !needs_body_escape && !needs_line_start_escape {
         return super::html_escape::escape_html(text);
     }
 
-    let mut escaped = String::with_capacity(text.len() * 2);
-    for ch in text.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '*' => escaped.push_str("\\*"),
-            '_' => escaped.push_str("\\_"),
-            '`' => escaped.push_str("\\`"),
-            '[' => escaped.push_str("\\["),
-            ']' => escaped.push_str("\\]"),
-            _ => escaped.push(ch),
+    // Slow path: need to escape something
+    // Use lazy allocation pattern from compress_whitespace
+    let mut result: Option<String> = None;
+    let mut last_copy_idx = 0;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let escape_str = match ch {
+            '\\' => Some("\\\\"),
+            '*' => Some("\\*"),
+            '_' => Some("\\_"),
+            '`' => Some("\\`"),
+            '[' => Some("\\["),
+            ']' => Some("\\]"),
+            _ => None,
+        };
+
+        if let Some(escaped) = escape_str {
+            // Lazy allocation on first escape using get_or_insert_with
+            // Modest allocation: original size + small buffer for escapes
+            let r = result.get_or_insert_with(|| String::with_capacity(text.len() + 16));
+            // Bulk copy unchanged portion
+            r.push_str(&text[last_copy_idx..byte_idx]);
+            r.push_str(escaped);
+            last_copy_idx = byte_idx + ch.len_utf8();
         }
     }
 
-    match first {
-        '=' | '~' | '>' => {
+    // Finalize the escaped string
+    let mut escaped = if let Some(mut r) = result {
+        // Copy remaining tail
+        r.push_str(&text[last_copy_idx..]);
+        r
+    } else {
+        // No body escapes found, but we may need line-start escape
+        text.into_owned()
+    };
+
+    // Handle line-start escaping with O(1) byte access
+    escaped = handle_line_start_escaping(escaped, first_byte);
+
+    super::html_escape::escape_html(escaped.into())
+}
+
+/// Handles line-start markdown escaping using O(1) byte access.
+#[inline]
+fn handle_line_start_escaping(mut escaped: String, first_byte: u8) -> String {
+    match first_byte {
+        b'=' | b'~' | b'>' => {
+            // Always escape these at line start (prevents h1/h2/blockquote)
             escaped.insert(0, '\\');
         }
-        '-' | '+' => {
-            if escaped.chars().nth(1).is_some_and(|ch| ch == ' ') {
+        b'-' | b'+' => {
+            // Only escape if followed by space (prevents unordered list)
+            // O(1) byte access instead of O(n) chars().nth(1)
+            if escaped.as_bytes().get(1) == Some(&b' ') {
                 escaped.insert(0, '\\');
             }
         }
-        '#' => {
+        b'#' => {
+            // Escape if it's a valid ATX heading pattern
             if is_markdown_atx_heading(&escaped) {
                 escaped.insert(0, '\\');
             }
         }
-        '0'..='9' => {
+        b'0'..=b'9' => {
+            // Escape the dot in ordered list patterns like "1. "
             if let Some(dot_idx) = index_of_markdown_ordered_item_dot(&escaped) {
                 escaped.replace_range(dot_idx..(dot_idx + 1), "\\.");
             }
         }
         _ => {}
     }
-
-    // Perform the HTML escape after the other escapes, so that the \\
-    // characters inserted here don't get escaped again.
-    super::html_escape::escape_html(escaped.into())
+    escaped
 }
 
 /// Escapes code fence characters at the start of any line within pre text.
@@ -403,7 +490,7 @@ fn escape_if_needed(text: Cow<'_, str>) -> Cow<'_, str> {
 /// '```'        -> '\```'      // fence at start of text
 /// 'Line\n```'  -> 'Line\n\```' // fence at start of line
 /// 'inline ```' -> 'inline ```' // NOT escaped (mid-line)
-fn escape_pre_text_if_needed(text: String) -> String {
+fn escape_pre_text_if_needed<'a>(text: Cow<'a, str>) -> Cow<'a, str> {
     if text.is_empty() {
         return text;
     }
@@ -416,6 +503,7 @@ fn escape_pre_text_if_needed(text: String) -> String {
         || text.contains("\n~");
     
     if !needs_escape {
+        // Zero-copy: return unchanged Cow (may be borrowed or owned)
         return text;
     }
     
@@ -432,7 +520,7 @@ fn escape_pre_text_if_needed(text: String) -> String {
         at_line_start = c == '\n';
     }
     
-    result
+    Cow::Owned(result)
 }
 
 // This is taken from the

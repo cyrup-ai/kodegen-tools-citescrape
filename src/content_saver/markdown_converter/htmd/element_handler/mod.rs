@@ -2,11 +2,16 @@ mod anchor;
 mod aside;
 mod blockquote;
 mod br;
+mod button;
 mod caption;
 mod code;
 mod details;
+mod dialog;
 mod div;
 mod element_util;
+mod input;
+mod footer;
+mod header;
 mod emphasis;
 mod head_body;
 mod headings;
@@ -15,6 +20,7 @@ mod html;
 mod img;
 mod li;
 mod list;
+mod nav;
 mod p;
 mod pre;
 mod section;
@@ -43,9 +49,14 @@ use br::br_handler;
 use caption::caption_handler;
 use code::code_handler;
 use details::{details_handler, summary_handler};
+use button::button_handler;
+use dialog::dialog_handler;
 use div::div_handler;
+use input::input_handler;
 use emphasis::emphasis_handler;
+use footer::footer_handler;
 use head_body::head_body_handler;
+use header::header_handler;
 use headings::headings_handler;
 use hr::hr_handler;
 use html::html_handler;
@@ -54,6 +65,7 @@ use img::img_handler;
 use li::list_item_handler;
 use list::list_handler;
 use markup5ever_rcdom::Node;
+use nav::nav_handler;
 use p::p_handler;
 use pre::pre_handler;
 use section::section_handler;
@@ -256,9 +268,33 @@ impl ElementHandlers {
         // Must be registered AFTER block_handler to take priority
         handlers.add_handler(vec!["aside"], aside_handler);
 
+        // nav - extract h1 only, discard navigation content
+        // Must be registered AFTER block_handler to override it
+        handlers.add_handler(vec!["nav"], nav_handler);
+
+        // header - extract h1 only, discard header chrome
+        // Must be registered AFTER block_handler to override it
+        handlers.add_handler(vec!["header"], header_handler);
+
+        // footer - discard all footer content
+        // Must be registered AFTER block_handler to override it
+        handlers.add_handler(vec!["footer"], footer_handler);
+
         // form, iframe - skip entirely (no markdown equivalent)
         // Must be registered AFTER block_handler to take priority
         handlers.add_handler(vec!["form", "iframe"], form_iframe_handler);
+
+        // button - skip entirely (no markdown equivalent)
+        // Must be registered AFTER block_handler to take priority
+        handlers.add_handler(vec!["button"], button_handler);
+
+        // input, select, textarea - form inputs, skip entirely
+        // Must be registered AFTER block_handler to take priority
+        handlers.add_handler(vec!["input", "select", "textarea"], input_handler);
+
+        // dialog - skip entirely (no markdown equivalent)
+        // Must be registered AFTER block_handler to take priority
+        handlers.add_handler(vec!["dialog"], dialog_handler);
 
         // script, style - always discard (no markdown representation)
         // Must be registered AFTER block_handler to take precedence
