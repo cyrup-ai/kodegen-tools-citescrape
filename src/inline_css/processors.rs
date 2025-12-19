@@ -175,7 +175,7 @@ pub async fn process_css_links_internal(
             }
             Err(e) => {
                 let error_msg = e.to_string();
-                log::warn!("Failed to download CSS from {css_url_for_error}: {error_msg}");
+                // Error already logged in domain_queue where it occurred
                 failures.push(InliningError {
                     url: css_url_for_error,
                     resource_type: ResourceType::Css,

@@ -143,7 +143,7 @@ impl DomainDownloadQueue {
             let cache_key = normalize_url_for_cache(&url);
             
             // DIAGNOSTIC: Log cache state and URL being checked
-            log::info!("[CACHE-DIAG] worker_loop checking URL: {} | Normalized: {} | Cache size: {} | Cache contains: {}", 
+            log::debug!("[CACHE-DIAG] worker_loop checking URL: {} | Normalized: {} | Cache size: {} | Cache contains: {}", 
                 url, cache_key, http_error_cache.len(), http_error_cache.contains_key(&cache_key));
             
             // Check cache HERE - this is the only serialization point where the check works
@@ -152,12 +152,12 @@ impl DomainDownloadQueue {
             if let Some(cached) = http_error_cache.get(&cache_key) {
                 match cached.value() {
                     CachedResponse::Success(bytes) => {
-                        log::info!("[CACHE-HIT] worker_loop Success: {} ({} bytes)", url, bytes.len());
+                        log::debug!("[CACHE-HIT] worker_loop Success: {} ({} bytes)", url, bytes.len());
                         let _ = request.response_tx.send(Ok(bytes.clone()));
                         continue;
                     }
                     CachedResponse::Error(status) => {
-                        log::info!("[CACHE-HIT] worker_loop Error (HTTP {}): {}", status, url);
+                        log::debug!("[CACHE-HIT] worker_loop Error (HTTP {}): {}", status, url);
                         let _ = request.response_tx.send(Err(DownloadError::HttpError {
                             url,
                             status: *status,
@@ -167,7 +167,7 @@ impl DomainDownloadQueue {
                 }
             }
             
-            log::info!("[CACHE-MISS] worker_loop will download: {}", url);
+            log::debug!("[CACHE-MISS] worker_loop will download: {}", url);
             
             // Check rate limit (single point of serialization)
             if let Some(rate) = rate_rps {
@@ -216,10 +216,8 @@ impl DomainDownloadQueue {
         if status.is_client_error() || status.is_server_error() {
             let url_string = url.to_string();
             let cache_key = normalize_url_for_cache(&url_string);
-            log::info!("[CACHE-INSERT] Caching HTTP {} error for URL: {} | Normalized: {} | Key length: {} bytes", 
-                status.as_u16(), url_string, cache_key, cache_key.len());
+            log::warn!("HTTP {} error: {}", status.as_u16(), url_string);
             http_error_cache.insert(cache_key, CachedResponse::Error(status.as_u16()));
-            log::info!("[CACHE-INSERT] Cache size after insert: {}", http_error_cache.len());
             
             return Err(DownloadError::HttpError {
                 url: url_string,
@@ -244,7 +242,7 @@ impl DomainDownloadQueue {
         // NEW: Cache successful downloads
         let cache_key = normalize_url_for_cache(url);
         let bytes_vec = bytes.to_vec();
-        log::info!("[CACHE-INSERT] Success: {} ({} bytes)", url, bytes_vec.len());
+        log::debug!("[CACHE-INSERT] Success: {} ({} bytes)", url, bytes_vec.len());
         http_error_cache.insert(cache_key, CachedResponse::Success(bytes_vec.clone()));
         
         Ok(bytes_vec)
@@ -300,18 +298,18 @@ impl DomainQueueManager {
         let cache_key = normalize_url_for_cache(&url);
         
         // DIAGNOSTIC: Log cache check at manager level
-        log::info!("[CACHE-DIAG] DomainQueueManager checking URL: {} | Normalized: {} | Cache size: {} | Contains: {}", 
+        log::debug!("[CACHE-DIAG] DomainQueueManager checking URL: {} | Normalized: {} | Cache size: {} | Contains: {}", 
             url, cache_key, self.http_error_cache.len(), self.http_error_cache.contains_key(&cache_key));
         
         // Check HTTP error cache first (before any expensive operations)
         if let Some(cached) = self.http_error_cache.get(&cache_key) {
             match cached.value() {
                 CachedResponse::Success(bytes) => {
-                    log::info!("[CACHE-HIT] DomainQueueManager Success: {} ({} bytes)", url, bytes.len());
+                    log::debug!("[CACHE-HIT] DomainQueueManager Success: {} ({} bytes)", url, bytes.len());
                     return Ok(bytes.clone());
                 }
                 CachedResponse::Error(status) => {
-                    log::info!("[CACHE-HIT] DomainQueueManager Error (HTTP {}): {}", status, url);
+                    log::debug!("[CACHE-HIT] DomainQueueManager Error (HTTP {}): {}", status, url);
                     return Err(DownloadError::HttpError {
                         url: url.clone(),
                         status: *status,
@@ -320,7 +318,7 @@ impl DomainQueueManager {
             }
         }
         
-        log::info!("[CACHE-MISS] DomainQueueManager will queue: {}", url);
+        log::debug!("[CACHE-MISS] DomainQueueManager will queue: {}", url);
         
         // Check if this URL is already being downloaded by another caller
         // If so, subscribe to the result instead of making a new request

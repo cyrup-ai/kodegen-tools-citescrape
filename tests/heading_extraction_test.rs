@@ -1,12 +1,10 @@
-//! Integration test for heading extraction and markdown H1 insertion
+//! Integration test for heading extraction
 //!
 //! This test verifies:
 //! 1. Headings are extracted with correct ordinal hierarchy
 //! 2. JSON output includes metadata.headings array
-//! 3. Markdown output starts with H1 (from extracted heading or title)
 
 use kodegen_tools_citescrape::page_extractor::schema::{HeadingElement, PageMetadata};
-use kodegen_tools_citescrape::content_saver::markdown_converter::ensure_h1_at_start;
 
 #[test]
 fn test_heading_element_structure() {
@@ -66,88 +64,6 @@ fn test_ordinal_hierarchy() {
     assert_eq!(headings[2].ordinal, vec![1, 1, 1]); // 1st H1 → 1st H2 → 1st H3
     assert_eq!(headings[3].ordinal, vec![1, 2]); // 1st H1 → 2nd H2
     assert_eq!(headings[4].ordinal, vec![2]); // 2nd H1
-}
-
-#[test]
-fn test_ensure_h1_at_start_with_existing_h1() {
-    // Test that existing H1 is preserved
-    let markdown = "# Existing H1\n\nContent here";
-    let headings = vec![
-        HeadingElement {
-            level: 1,
-            text: "Extracted H1".to_string(),
-            id: None,
-            ordinal: vec![1],
-        },
-    ];
-    let title = "Document Title";
-
-    let result = ensure_h1_at_start(markdown, &headings, title);
-    
-    // Should not modify markdown that already has H1
-    assert_eq!(result, markdown);
-}
-
-#[test]
-fn test_ensure_h1_at_start_without_h1_uses_extracted() {
-    // Test that extracted H1 is prepended when missing
-    let markdown = "## H2 First\n\nContent here";
-    let headings = vec![
-        HeadingElement {
-            level: 1,
-            text: "Extracted H1".to_string(),
-            id: None,
-            ordinal: vec![1],
-        },
-        HeadingElement {
-            level: 2,
-            text: "H2 First".to_string(),
-            id: None,
-            ordinal: vec![1, 1],
-        },
-    ];
-    let title = "Document Title";
-
-    let result = ensure_h1_at_start(markdown, &headings, title);
-    
-    // Should prepend extracted H1
-    assert!(result.starts_with("# Extracted H1\n\n"));
-    assert!(result.contains("## H2 First"));
-}
-
-#[test]
-fn test_ensure_h1_at_start_without_h1_uses_title_fallback() {
-    // Test that title is used when no H1 extracted
-    let markdown = "## H2 First\n\nContent here";
-    let headings = vec![
-        HeadingElement {
-            level: 2,
-            text: "H2 First".to_string(),
-            id: None,
-            ordinal: vec![1],
-        },
-    ];
-    let title = "Document Title";
-
-    let result = ensure_h1_at_start(markdown, &headings, title);
-    
-    // Should prepend title as H1
-    assert!(result.starts_with("# Document Title\n\n"));
-    assert!(result.contains("## H2 First"));
-}
-
-#[test]
-fn test_ensure_h1_at_start_with_empty_headings_uses_title() {
-    // Test that title is used when no headings extracted at all
-    let markdown = "Content without any headings";
-    let headings: Vec<HeadingElement> = vec![];
-    let title = "Document Title";
-
-    let result = ensure_h1_at_start(markdown, &headings, title);
-    
-    // Should prepend title as H1
-    assert!(result.starts_with("# Document Title\n\n"));
-    assert!(result.contains("Content without any headings"));
 }
 
 #[test]

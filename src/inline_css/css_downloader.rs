@@ -44,7 +44,7 @@ pub async fn download_all_css(
                 Ok(css_content) => Ok((href, css_content)),
                 Err(e) => {
                     let error_msg = e.to_string();
-                    log::warn!("Failed to download CSS from {css_url_for_error}: {error_msg}");
+                    // Error already logged in domain_queue where it occurred
                     Err(InliningError {
                         url: css_url_for_error,
                         resource_type: ResourceType::Css,

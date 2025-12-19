@@ -23,7 +23,7 @@ use std::fmt::Write;
 use std::sync::{Arc, LazyLock};
 use url::Url;
 
-use super::custom_handlers::create_converter;
+use super::htmd::HtmlToMarkdown;
 // Note: Link card transformation removed - it was site-specific (assumed "card" in class names)
 
 // =============================================================================
@@ -508,8 +508,8 @@ impl MarkdownConverter {
         // Note: Link card transformation removed - it was site-specific (assumed "card" in class names)
         // Note: Tab transformation removed - site-specific patterns conflict with generic crawler mission
         
-        // Stage 1: htmd conversion with custom handlers
-        let converter = create_converter();
+        // Stage 1: htmd conversion
+        let converter = HtmlToMarkdown::new();
         let raw_markdown = converter.convert(html)?;
 
         // Stage 2: Streaming normalization (single pass)

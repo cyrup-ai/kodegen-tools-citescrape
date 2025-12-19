@@ -24,7 +24,7 @@
 
 use std::rc::Rc;
 use markup5ever_rcdom::{Node, NodeData};
-use htmd::element_handler::Handlers;
+use super::Handlers;
 
 // ============================================================================
 // Data Structures

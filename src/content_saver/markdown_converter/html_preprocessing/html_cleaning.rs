@@ -739,236 +739,6 @@ fn preprocess_expressive_code(html: &str) -> Result<String> {
         .context("Failed to convert HTML bytes to UTF-8 after Expressive Code preprocessing")
 }
 
-/// Extract language from class attribute (e.g., "language-rust", "lang-python")
-fn extract_language_from_class_attr(class: &str) -> Option<String> {
-    for token in class.split_whitespace() {
-        if let Some(lang) = token.strip_prefix("language-") {
-            return Some(lang.to_string());
-        }
-        if let Some(lang) = token.strip_prefix("lang-") {
-            return Some(lang.to_string());
-        }
-    }
-    None
-}
-
-/// Extract language from element attributes
-/// 
-/// Checks <pre> element attributes and child <code> element attributes
-/// for language hints (class="language-X", data-language="X")
-fn extract_language_from_element(node: &kuchiki::NodeRef) -> Option<String> {
-    use kuchiki::NodeData;
-    
-    // Check if this is an element node
-    if let NodeData::Element(elem_data) = node.data() {
-        let attrs = elem_data.attributes.borrow();
-        
-        // Check class attribute
-        if let Some(class) = attrs.get("class")
-            && let Some(lang) = extract_language_from_class_attr(class)
-        {
-            return Some(lang);
-        }
-        
-        // Check data-language attribute
-        if let Some(lang) = attrs.get("data-language") {
-            return Some(lang.to_string());
-        }
-    }
-    
-    // Check child <code> elements
-    if let Ok(code_iter) = node.select("code") {
-        for code_elem in code_iter {
-            let attrs = code_elem.attributes.borrow();
-            if let Some(class) = attrs.get("class")
-                && let Some(lang) = extract_language_from_class_attr(class)
-            {
-                return Some(lang);
-            }
-        }
-    }
-    
-    None
-}
-
-/// Check if two nodes are adjacent code elements that should be merged
-///
-/// Returns true if node2 is the next non-whitespace sibling of node1.
-/// Whitespace-only text nodes between elements are allowed and ignored.
-fn is_adjacent_code_element(node1: &kuchiki::NodeRef, node2: &kuchiki::NodeRef) -> bool {
-    use kuchiki::NodeData;
-    
-    // Get next sibling of node1
-    let mut current = node1.next_sibling();
-    
-    while let Some(sibling) = current {
-        match sibling.data() {
-            NodeData::Element(_) => {
-                // Found an element - is it node2?
-                // Compare by pointer equality (sibling is already a NodeRef)
-                return std::ptr::eq(&sibling as *const _, node2 as *const _);
-            }
-            NodeData::Text(text) => {
-                // Allow whitespace-only text nodes between code blocks
-                if !text.borrow().trim().is_empty() {
-                    // Non-whitespace content - not adjacent
-                    return false;
-                }
-                // Continue checking
-                current = sibling.next_sibling();
-            }
-            _ => {
-                // Comments, processing instructions - continue
-                current = sibling.next_sibling();
-            }
-        }
-    }
-    
-    false
-}
-
-/// Merge a group of adjacent <pre> elements into one
-///
-/// Extracts language from first element and combines all text content
-/// with newlines between fragments.
-fn merge_code_elements(group: &[kuchiki::NodeRef]) -> Result<kuchiki::NodeRef> {
-    if group.is_empty() {
-        return Err(anyhow::anyhow!("Cannot merge empty group"));
-    }
-    
-    // Extract language from first element (most reliable)
-    let language = extract_language_from_element(&group[0]);
-    
-    // Collect text content from all elements
-    let mut merged_content = String::new();
-    
-    for node in group {
-        let text = node.text_contents();
-        if !merged_content.is_empty() && !text.starts_with('\n') {
-            merged_content.push('\n'); // Ensure line break between fragments
-        }
-        merged_content.push_str(&text);
-    }
-    
-    // HTML-escape the code text
-    let escaped_code = html_escape::encode_text(&merged_content).to_string();
-    
-    // Create new merged element
-    let new_html = if let Some(lang) = language {
-        format!(
-            "<pre><code class=\"language-{}\">{}</code></pre>",
-            lang,
-            escaped_code
-        )
-    } else {
-        format!(
-            "<pre><code>{}</code></pre>",
-            escaped_code
-        )
-    };
-    
-    let new_node = kuchiki::parse_html().one(new_html);
-    Ok(new_node)
-}
-
-/// Preprocess code blocks by merging adjacent <pre> elements that should be one block
-///
-/// This fixes syntax highlighter output that splits single code blocks across
-/// multiple DOM elements, causing incorrect fence boundaries in markdown.
-///
-/// # Strategy
-///
-/// 1. Parse HTML to DOM using kuchiki
-/// 2. Identify adjacent <pre> elements
-/// 3. Merge if they represent fragments of the same code block:
-///    - No intervening non-whitespace content
-/// 4. Consolidate into single <pre><code> element
-/// 5. Serialize back to HTML for htmd processing
-///
-/// # Arguments
-///
-/// * `html` - HTML string potentially containing fragmented code blocks
-///
-/// # Returns
-///
-/// * `Ok(String)` - HTML with merged code blocks
-/// * `Err(anyhow::Error)` - If HTML parsing fails
-fn preprocess_code_blocks(html: &str) -> Result<String> {
-    // Parse HTML into mutable DOM
-    let document = kuchiki::parse_html().one(html.to_string());
-    
-    // Select all <pre> elements
-    let selector = "pre";
-    let matches: Vec<_> = document
-        .select(selector)
-        .map_err(|()| anyhow::anyhow!("Invalid CSS selector: {}", selector))?
-        .collect();
-    
-    if matches.is_empty() {
-        return Ok(html.to_string());
-    }
-    
-    // Group adjacent <pre> elements
-    let mut merge_groups: Vec<Vec<kuchiki::NodeRef>> = Vec::new();
-    let mut current_group: Vec<kuchiki::NodeRef> = Vec::new();
-    
-    for pre_elem in matches.iter() {
-        let node = pre_elem.as_node().clone();
-        
-        if current_group.is_empty() {
-            current_group.push(node);
-            continue;
-        }
-        
-        // Check if this element is adjacent to previous
-        if let Some(prev_node) = current_group.last() {
-            if is_adjacent_code_element(prev_node, &node) {
-                // Same group
-                current_group.push(node);
-            } else {
-                // New group - save current and start fresh
-                if current_group.len() > 1 {
-                    merge_groups.push(current_group.clone());
-                }
-                current_group = vec![node];
-            }
-        }
-    }
-    
-    // Don't forget the last group
-    if current_group.len() > 1 {
-        merge_groups.push(current_group);
-    }
-    
-    // For each merge group, create merged element and replace
-    for group in merge_groups {
-        if group.len() < 2 {
-            continue; // Nothing to merge
-        }
-        
-        let merged_node = merge_code_elements(&group)?;
-        
-        // Insert merged node before first element
-        if let Some(first_child) = merged_node.first_child() {
-            group[0].insert_before(first_child);
-        }
-        
-        // Remove all original elements in group
-        for node in group {
-            node.detach();
-        }
-    }
-    
-    // Serialize back to HTML
-    let mut output = Vec::new();
-    document
-        .serialize(&mut output)
-        .context("Failed to serialize HTML after code block merging")?;
-    
-    String::from_utf8(output)
-        .context("Failed to convert HTML bytes to UTF-8 after code block merging")
-}
-
 /// Pre-escape angle brackets in code blocks to protect from HTML parser
 ///
 /// This must run BEFORE any DOM parsing to prevent angle brackets being
@@ -1037,184 +807,6 @@ fn escape_code_blocks(html: &str) -> String {
     result.into_owned()
 }
 
-/// Helper: Check if a node is a code element (<pre> or <code>)
-fn is_code_element(node: &kuchiki::NodeRef) -> bool {
-    use kuchiki::NodeData;
-    
-    if let NodeData::Element(element) = node.data() {
-        let tag_name = &*element.name.local;
-        tag_name == "pre" || tag_name == "code"
-    } else {
-        false
-    }
-}
-
-/// Helper: Check if nodes contain non-whitespace content
-fn has_non_whitespace_content(nodes: &[kuchiki::NodeRef]) -> bool {
-    use kuchiki::NodeData;
-    
-    for node in nodes {
-        match node.data() {
-            NodeData::Text(text) => {
-                if !text.borrow().trim().is_empty() {
-                    return true;
-                }
-            }
-            NodeData::Element(_) => {
-                return true; // Element nodes count as content
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Helper: Create a new element node by parsing HTML
-fn create_element(tag_name: &str) -> kuchiki::NodeRef {
-    // Create element by parsing minimal HTML
-    // This avoids needing to import markup5ever directly
-    let html = format!("<{0}></{0}>", tag_name);
-    let doc = kuchiki::parse_html().one(html);
-    
-    // Extract the first child element from the parsed document
-    if let Some(child) = doc.first_child() {
-        child
-    } else {
-        // Fallback: return the document itself (should never happen)
-        doc
-    }
-}
-
-/// Fix bold/strong tags that span code blocks by restructuring the HTML
-///
-/// This prevents htmd from emitting `**` markers around code fences, which
-/// causes trailing asterisks after closing fences.
-///
-/// # Transformation
-///
-/// Before:
-/// ```html
-/// <strong>Text <pre><code>code</code></pre> more text</strong>
-/// ```
-///
-/// After:
-/// ```html
-/// <strong>Text </strong><pre><code>code</code></pre><strong> more text</strong>
-/// ```
-///
-/// This ensures htmd emits clean markdown without bold spanning code blocks.
-///
-/// # Example
-/// ```rust
-/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::html_cleaning::fix_bold_spanning_code_blocks;
-/// let html = r#"<strong>Text<code>code</code>more text</strong>"#;
-/// let fixed = fix_bold_spanning_code_blocks(html)?;
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-pub fn fix_bold_spanning_code_blocks(html: &str) -> Result<String> {
-    use kuchiki::traits::*;
-    
-    // Parse HTML to mutable DOM
-    let document = kuchiki::parse_html().one(html.to_string());
-    
-    // Find all <strong> and <b> elements
-    let bold_selectors = vec!["strong", "b"];
-    
-    for selector_str in &bold_selectors {
-        // Must collect before iteration because we'll detach/restructure nodes
-        let matches: Vec<_> = match document.select(selector_str) {
-            Ok(iter) => iter.collect(),
-            Err(_) => {
-                // This should never fail for simple selectors, but handle gracefully
-                log::warn!("Failed to parse selector '{}', skipping", selector_str);
-                continue;
-            }
-        };
-        
-        for bold_elem in matches {
-            let node = bold_elem.as_node();
-            
-            // Check if this bold element contains <pre> or <code> descendants
-            let has_code_descendant = node
-                .select("pre, code")
-                .map(|mut iter| iter.next().is_some())
-                .unwrap_or(false);
-            
-            if !has_code_descendant {
-                continue; // This bold element is fine
-            }
-            
-            // Strategy: Split the bold element into segments:
-            // 1. Text before code block (wrapped in bold)
-            // 2. Code block (NOT wrapped in bold)
-            // 3. Text after code block (wrapped in bold)
-            
-            let tag_name = bold_elem.name.local.to_string();
-            let mut before_code = Vec::new();
-            let mut code_blocks = Vec::new();
-            let mut current_after: Option<Vec<kuchiki::NodeRef>> = None;
-            
-            // Traverse children and categorize them
-            for child in node.children() {
-                if is_code_element(&child) {
-                    // This is a code block - add it to code_blocks
-                    code_blocks.push(child.clone());
-                    // Start collecting "after" content
-                    current_after = Some(Vec::new());
-                } else if let Some(ref mut after) = current_after {
-                    // We're after a code block
-                    after.push(child.clone());
-                } else {
-                    // We're before any code blocks
-                    before_code.push(child.clone());
-                }
-            }
-            
-            // Build replacement structure
-            let mut replacements = Vec::new();
-            
-            // Add "before" content wrapped in bold (if non-empty)
-            if !before_code.is_empty() && has_non_whitespace_content(&before_code) {
-                let before_bold = create_element(&tag_name);
-                for child in before_code {
-                    before_bold.append(child);
-                }
-                replacements.push(before_bold);
-            }
-            
-            // Add code blocks unwrapped
-            for code_block in code_blocks {
-                replacements.push(code_block);
-            }
-            
-            // Add "after" content wrapped in bold (if non-empty)
-            if let Some(after_nodes) = current_after
-                && !after_nodes.is_empty() && has_non_whitespace_content(&after_nodes) {
-                let after_bold = create_element(&tag_name);
-                for child in after_nodes {
-                    after_bold.append(child);
-                }
-                replacements.push(after_bold);
-            }
-            
-            // Insert replacements before original, then detach original
-            for replacement in replacements {
-                node.insert_before(replacement);
-            }
-            node.detach();
-        }
-    }
-    
-    // Serialize back to HTML
-    let mut output = Vec::new();
-    document
-        .serialize(&mut output)
-        .context("Failed to serialize HTML after fixing bold spanning code blocks")?;
-    
-    String::from_utf8(output)
-        .context("Failed to convert HTML bytes to UTF-8 after fixing bold tags")
-}
-
 /// Normalize problematic HTML structures before conversion
 ///
 /// Handles edge cases that can cause htmd to fail:
@@ -1246,144 +838,7 @@ pub fn normalize_html_structure(html: &str) -> Result<String> {
     Ok(html.to_string())
 }
 
-// ============================================================================
-// Syntax Highlighting Span Removal
-// ============================================================================
 
-/// Regex to match <pre> blocks
-static PRE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<pre([^>]*)>(.*?)</pre>")
-        .expect("PRE_BLOCK_RE: hardcoded regex is valid")
-});
-
-/// Regex to match <code> tags with attributes
-static CODE_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<code([^>]*)>(.*?)</code>")
-        .expect("CODE_TAG_RE: hardcoded regex is valid")
-});
-
-/// Strip syntax highlighting span tags from code blocks
-///
-/// Removes `<span>` tags with inline styles (syntax highlighting) from `<pre>` and `<code>` blocks.
-/// This preprocessing step must run BEFORE code block protection to ensure clean code text.
-///
-/// # Patterns Handled
-///
-/// 1. **Style attribute spans**: `<span style="--0:#COLOR;--1:#COLOR">text</span>` → `text`
-/// 2. **Indent class spans**: `<span class="indent">    </span>` → `    `
-/// 3. **Nested spans**: Recursively extracts text from all levels
-/// 4. **HTML entities**: Properly decodes entities in extracted text
-///
-/// # Arguments
-///
-/// * `html` - Raw HTML string potentially containing styled code blocks
-///
-/// # Returns
-///
-/// * `Ok(String)` - HTML with code blocks cleaned of span tags
-/// * `Err(anyhow::Error)` - If HTML parsing fails
-///
-/// # Example
-/// ```rust
-/// # use kodegen_tools_citescrape::content_saver::markdown_converter::html_preprocessing::html_cleaning::strip_syntax_highlighting_spans;
-/// let html = r#"<pre><code><span style="--0:#C792EA">pub</span> <span style="--0:#C792EA">fn</span> main()</code></pre>"#;
-/// let clean = strip_syntax_highlighting_spans(html)?;
-/// assert!(clean.contains("pub fn main()"));
-/// assert!(!clean.contains("<span"));
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-pub fn strip_syntax_highlighting_spans(html: &str) -> Result<String> {
-    // Fast path: skip if no span tags in code blocks
-    if !html.contains("<pre") || !html.contains("<span") {
-        return Ok(html.to_string());
-    }
-    
-    let result = PRE_BLOCK_RE.replace_all(html, |caps: &regex::Captures| {
-        let pre_attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        let inner_html = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-        
-        // Check if this pre block contains span tags
-        if !inner_html.contains("<span") {
-            // No spans - return unchanged
-            return caps[0].to_string();
-        }
-        
-        // STEP 1: Extract language attribute from <code> tag BEFORE cleaning
-        // This must happen before extract_text_from_spans destroys the HTML structure
-        let code_attrs = extract_code_lang_attribute(inner_html);
-        
-        // STEP 2: Extract clean text by stripping all HTML tags (spans, code, etc.)
-        let clean_text = extract_text_from_spans(inner_html);
-        
-        // STEP 3: HTML-escape the clean text to prevent interpretation as HTML
-        let escaped_text = html_escape::encode_text(&clean_text).to_string();
-        
-        // STEP 4: Reconstruct clean pre block with preserved language attribute
-        if !code_attrs.is_empty() {
-            format!("<pre{}><code{}>{}</code></pre>", pre_attrs, code_attrs, escaped_text)
-        } else {
-            format!("<pre{}><code>{}</code></pre>", pre_attrs, escaped_text)
-        }
-    });
-    
-    Ok(result.to_string())
-}
-
-/// Extract text content from HTML with spans, stripping all span tags
-///
-/// Uses scraper to parse the HTML fragment and extract only text nodes,
-/// automatically handling nested spans and HTML entity decoding.
-///
-/// # Arguments
-/// * `html` - HTML fragment containing span tags
-///
-/// # Returns
-/// * Clean text with all span tags removed and entities decoded
-fn extract_text_from_spans(html: &str) -> String {
-    use scraper::node::Node;
-    
-    // Parse fragment
-    let fragment = Html::parse_fragment(html);
-    let mut result = String::new();
-    
-    // Recursively extract text from all nodes
-    for node in fragment.root_element().descendants() {
-        if let Node::Text(text) = node.value() {
-            result.push_str(text);
-        }
-    }
-    
-    result
-}
-
-/// Extract language attribute from <code> tag while preserving original HTML structure
-/// 
-/// This function extracts ONLY the attributes from the <code> tag without modifying
-/// the HTML structure. It looks for patterns like:
-/// - `class="language-rust"`
-/// - `class="lang-python"`
-/// - `data-lang="javascript"`
-///
-/// # Arguments
-/// * `html` - Original HTML fragment that may contain a <code> tag with language attribute
-///
-/// # Returns
-/// * Attribute string like ` class="language-rust"` (with leading space), or empty string
-fn extract_code_lang_attribute(html: &str) -> String {
-    if let Some(caps) = CODE_TAG_RE.captures(html) {
-        let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        
-        // Only return attributes if they contain language information
-        // This prevents returning empty or irrelevant attributes
-        if attrs.contains("language-") || attrs.contains("lang-") || attrs.contains("data-lang") {
-            attrs.to_string()
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    }
-}
 
 /// Clean HTML content by removing scripts, styles, ads, tracking, and other non-content elements
 ///
@@ -1428,39 +883,36 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     }
 
     // ============================================================================
-    // STEP 0: Pre-escape code blocks (CRITICAL - must be FIRST)
+    // STEP 0: Preprocess Expressive Code blocks FIRST (uses kuchiki DOM parsing)
     // ============================================================================
-    // Protect angle brackets in code from being interpreted as HTML tags
-    // by the DOM parser. This preserves generic type parameters like Result<T>.
-    let html = escape_code_blocks(html);
+    // CRITICAL: This MUST run BEFORE escape_code_blocks!
+    // Expressive Code blocks contain <div class="ec-line"> elements inside <pre><code>.
+    // If escape_code_blocks runs first, it escapes those divs into &lt;div&gt; text,
+    // which destroys the DOM structure needed to find .ec-line elements.
+    // 
+    // Order: preprocess_expressive_code -> escape_code_blocks
+    // This extracts code from .ec-line elements (preserving newlines), THEN
+    // escape_code_blocks protects the resulting plain text code.
+    let html = preprocess_expressive_code(html)?;
 
     // ============================================================================
-    // STEP 1: Preprocess Expressive Code blocks (uses kuchiki DOM parsing)
+    // STEP 1: Pre-escape code blocks (protect angle brackets)
     // ============================================================================
-    // IMPORTANT: Skip if we have protected code blocks (indicated by placeholder prefix).
-    // The kuchiki DOM parser strips unknown elements like <citescrape-code-block>,
-    // which would destroy our protected placeholders.
-    // NOTE: Code block protection is now handled at a higher level in convert()
-    // to protect blocks BEFORE extract_main_content is called.
+    // Now that Expressive Code is converted to plain <pre><code>, we can safely
+    // escape angle brackets to protect generic type parameters like Result<T>
+    // from being interpreted as HTML tags by subsequent DOM parsers.
+    //
+    // Skip if we already have protected code blocks (indicated by placeholder prefix).
     let html = if html.contains("<!--CITESCRAPE-PRE-") {
-        // Already protected at higher level - skip DOM parsing
+        // Already protected at higher level - skip
         html
     } else {
-        preprocess_expressive_code(&html)?
+        escape_code_blocks(&html)
     };
 
     // ============================================================================
     // STEP 1.5: Merge fragmented code blocks (uses DOM parsing)
-    // ============================================================================
-    // IMPORTANT: Skip if we have protected code blocks (indicated by placeholder prefix).
-    // The kuchiki DOM parser strips unknown elements like <citescrape-code-block>,
-    // which would destroy our protected placeholders.
-    let html = if html.contains("<!--CITESCRAPE-PRE-") {
-        // Already protected at higher level - skip DOM parsing
-        html
-    } else {
-        preprocess_code_blocks(&html)?
-    };
+    // REMOVED: preprocess_code_blocks() - kuchiki serialization stripped inline formatting tags
 
     // ============================================================================
     // STEP 2: Regex-based cleaning (existing code)
@@ -1577,13 +1029,7 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     // Remove interactive elements (buttons, inputs, data attributes, etc.)
     let result: Cow<str> = Cow::Owned(remove_interactive_elements_from_dom(&result));
 
-    // ========================================================================
-    // STAGE 3: Fix bold tags spanning code blocks
-    // ========================================================================
-    let result: Cow<str> = Cow::Owned(fix_bold_spanning_code_blocks(&result)?);
-
-    // NOTE: Code block restoration is handled at a higher level in convert()
-    // after clean_html_content returns.
+    // REMOVED: fix_bold_spanning_code_blocks() - kuchiki serialization stripped inline formatting tags
 
     // ========================================================================
     // FINAL STEP: Decode HTML entities
@@ -1976,6 +1422,162 @@ mod tests {
             !result.contains("<button"),
             "Button was not removed! Got: {}",
             result
+        );
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_preprocess_expressive_code_newlines() -> Result<()> {
+        // Test fixture HTML with ec-line elements
+        let html = r#"<div class="expressive-code">
+<pre data-language="rust"><code><div class="ec-line"><div class="code">pub fn main() -&gt; io::Result&lt;()&gt; {</div></div>
+<div class="ec-line"><div class="code">    init_panic_hook();</div></div>
+<div class="ec-line"><div class="code">    let mut tui = init_tui()?;</div></div>
+<div class="ec-line"><div class="code">    panic!("This is a panic!");</div></div>
+<div class="ec-line"><div class="code">}</div></div></code></pre>
+<div class="copy"><button data-code="pub fn main() -&gt; io::Result&lt;()&gt; {    init_panic_hook();    let mut tui = init_tui()?;    panic!(&quot;This is a panic!&quot;);}"></button></div>
+</div>"#;
+
+        println!("=== INPUT HTML ===");
+        println!("{}", html);
+        
+        let result = preprocess_expressive_code(html)?;
+        
+        println!("\n=== AFTER preprocess_expressive_code ===");
+        println!("{}", result);
+        
+        // Should have replaced the expressive-code div with a clean pre/code block
+        assert!(result.contains("<pre><code"), "Should have pre/code element");
+        
+        // The code should have newlines between lines, not spaces
+        // Each ec-line element should become a separate line
+        assert!(
+            result.contains("{\n    init_panic_hook();"),
+            "Code should have newlines preserved from ec-line extraction. Got: {:?}",
+            result
+        );
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_full_clean_html_content_preserves_newlines() -> Result<()> {
+        // Test full clean_html_content function
+        let html = r#"<div class="expressive-code">
+<pre data-language="rust"><code><div class="ec-line"><div class="code">pub fn main() -&gt; io::Result&lt;()&gt; {</div></div>
+<div class="ec-line"><div class="code">    init_panic_hook();</div></div>
+<div class="ec-line"><div class="code">    let mut tui = init_tui()?;</div></div>
+<div class="ec-line"><div class="code">    panic!("This is a panic!");</div></div>
+<div class="ec-line"><div class="code">}</div></div></code></pre>
+<div class="copy"><button data-code="pub fn main() -&gt; io::Result&lt;()&gt; {    init_panic_hook();    let mut tui = init_tui()?;    panic!(&quot;This is a panic!&quot;);}"></button></div>
+</div>"#;
+
+        println!("=== INPUT HTML ===");
+        println!("{}", html);
+        
+        let result = clean_html_content(html)?;
+        
+        println!("\n=== AFTER clean_html_content ===");
+        println!("{}", result);
+        
+        // The code should still have newlines after full cleaning
+        assert!(
+            result.contains("{\n    init_panic_hook();"),
+            "Code should have newlines preserved after clean_html_content. Got: {:?}",
+            result
+        );
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_dom_parsing_preserves_pre_code_newlines() -> Result<()> {
+        // Test if scraper's DOM parsing preserves newlines in pre/code
+        let html = r#"<pre><code class="language-rust">pub fn main() {
+    init_panic_hook();
+    test();
+}</code></pre>"#;
+
+        println!("=== INPUT HTML ===");
+        println!("{:?}", html);
+        
+        let result = remove_interactive_elements_from_dom(html);
+        
+        println!("\n=== AFTER remove_interactive_elements_from_dom ===");
+        println!("{:?}", result);
+        
+        // Newlines should be preserved inside pre/code
+        assert!(
+            result.contains("{\n    init_panic_hook();"),
+            "Pre/code newlines should be preserved by DOM parsing. Got: {:?}",
+            result
+        );
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_preprocess_then_dom_preserves_newlines() -> Result<()> {
+        // Test the exact flow: preprocess_expressive_code -> remove_interactive_elements_from_dom
+        let html = r#"<div class="expressive-code">
+<pre data-language="rust"><code><div class="ec-line"><div class="code">pub fn main() {</div></div>
+<div class="ec-line"><div class="code">    init();</div></div>
+<div class="ec-line"><div class="code">}</div></div></code></pre>
+</div>"#;
+
+        println!("=== INPUT HTML ===");
+        println!("{}", html);
+        
+        let after_preprocess = preprocess_expressive_code(html)?;
+        println!("\n=== AFTER preprocess_expressive_code ===");
+        println!("{}", after_preprocess);
+        println!("Contains newline after brace: {}", after_preprocess.contains("{\n    init();"));
+        
+        let after_dom = remove_interactive_elements_from_dom(&after_preprocess);
+        println!("\n=== AFTER remove_interactive_elements_from_dom ===");
+        println!("{}", after_dom);
+        println!("Contains newline after brace: {}", after_dom.contains("{\n    init();"));
+        
+        // Newlines should still be preserved
+        assert!(
+            after_dom.contains("{\n    init();"),
+            "Newlines should be preserved through both steps. Got: {:?}",
+            after_dom
+        );
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_correct_order_preprocess_then_escape() -> Result<()> {
+        // Test the CORRECT order: preprocess_expressive_code FIRST, then escape_code_blocks
+        // This is how clean_html_content now works after the fix.
+        let html = r#"<div class="expressive-code">
+<pre data-language="rust"><code><div class="ec-line"><div class="code">pub fn main() -&gt; io::Result&lt;()&gt; {</div></div>
+<div class="ec-line"><div class="code">    init();</div></div>
+<div class="ec-line"><div class="code">}</div></div></code></pre>
+</div>"#;
+
+        println!("=== INPUT HTML ===");
+        println!("{}", html);
+        
+        // CORRECT ORDER: preprocess first to extract .ec-line content
+        let after_preprocess = preprocess_expressive_code(html)?;
+        println!("\n=== AFTER preprocess_expressive_code ===");
+        println!("{}", after_preprocess);
+        println!("Contains newline: {}", after_preprocess.contains("{\n    init();"));
+        
+        // Now escape_code_blocks can safely protect angle brackets
+        let after_escape = escape_code_blocks(&after_preprocess);
+        println!("\n=== AFTER escape_code_blocks ===");
+        println!("{}", after_escape);
+        
+        // Newlines should be preserved through the correct order
+        assert!(
+            after_preprocess.contains("{\n    init();"),
+            "Correct order should preserve newlines. Got: {:?}",
+            after_preprocess
         );
         
         Ok(())

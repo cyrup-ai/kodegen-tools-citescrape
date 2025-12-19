@@ -1,0 +1,143 @@
+use parking_lot::Mutex;
+
+use super::super::{
+    Element,
+    options::{LinkReferenceStyle, LinkStyle},
+    text_util::{JoinOnStringIterator, StripWhitespace, TrimDocumentWhitespace, concat_strings},
+};
+use super::{ElementHandler, HandlerResult, Handlers};
+use crate::serialize_if_faithful;
+
+pub(super) struct AnchorElementHandler {
+    links: Mutex<Vec<String>>,
+}
+
+impl ElementHandler for AnchorElementHandler {
+    fn append(&self) -> Option<String> {
+        let mut links = self.links.lock();
+        if links.is_empty() {
+            return None;
+        }
+        let result = concat_strings!("\n\n", links.join("\n"), "\n\n");
+        links.clear();
+        Some(result)
+    }
+
+    fn handle(&self, handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+        let mut link: Option<String> = None;
+        let mut title: Option<String> = None;
+        for attr in element.attrs.iter() {
+            let name = &attr.name.local;
+            if name == "href" {
+                link = Some(attr.value.to_string())
+            } else if name == "title" {
+                title = Some(attr.value.to_string());
+            } else {
+                // This is an attribute which can't be translated to Markdown.
+                serialize_if_faithful!(handlers, element, 0);
+            }
+        }
+
+        let Some(link) = link else {
+            return Some(handlers.walk_children(element.node, element.is_pre));
+        };
+
+        let process_title = |text: String| {
+            text.lines()
+                .map(|line| line.trim_document_whitespace().replace('"', "\\\""))
+                .filter(|line| !line.is_empty())
+                .join("\n")
+        };
+
+        // Handle new lines in title
+        let title = title.map(process_title);
+
+        let link = link.replace('(', "\\(").replace(')', "\\)");
+
+        let content = handlers.walk_children(element.node, element.is_pre).content;
+        let md = match handlers.options().link_style {
+            LinkStyle::Inlined => self.build_inlined_anchor(&content, link, title, false),
+            LinkStyle::InlinedPreferAutolinks => {
+                self.build_inlined_anchor(&content, link, title, true)
+            }
+            LinkStyle::Referenced => self.build_referenced_anchor(
+                &content,
+                link,
+                title,
+                &handlers.options().link_reference_style,
+            ),
+        };
+
+        Some(md.into())
+    }
+}
+
+impl AnchorElementHandler {
+    pub(super) fn new() -> Self {
+        Self {
+            links: Mutex::new(Vec::new())
+        }
+    }
+
+    fn build_inlined_anchor(
+        &self,
+        content: &str,
+        link: String,
+        title: Option<String>,
+        prefer_autolinks: bool,
+    ) -> String {
+        if prefer_autolinks && content == link {
+            return concat_strings!("<", link, ">");
+        }
+
+        let has_spaces_in_link = link.contains(' ');
+        let (content, _) = content.strip_leading_document_whitespace();
+        let (content, trailing_whitespace) = content.strip_trailing_document_whitespace();
+        concat_strings!(
+            "[",
+            content,
+            "](",
+            if has_spaces_in_link { "<" } else { "" },
+            link,
+            title
+                .as_ref()
+                .map_or(String::new(), |t| concat_strings!(" \"", t, "\"")),
+            if has_spaces_in_link { ">" } else { "" },
+            ")",
+            trailing_whitespace.unwrap_or("")
+        )
+    }
+
+    fn build_referenced_anchor(
+        &self,
+        content: &str,
+        link: String,
+        title: Option<String>,
+        style: &LinkReferenceStyle,
+    ) -> String {
+        let title = title.map_or(String::new(), |t| concat_strings!(" \"", t, "\""));
+        
+        let mut links = self.links.lock();
+        
+        let (current, append) = match style {
+            LinkReferenceStyle::Full => {
+                let index = links.len() + 1;
+                (
+                    concat_strings!("[", content, "][", index.to_string(), "]"),
+                    concat_strings!("[", index.to_string(), "]: ", link, title),
+                )
+            }
+            LinkReferenceStyle::Collapsed => (
+                concat_strings!("[", content, "][]"),
+                concat_strings!("[", content, "]: ", link, title),
+            ),
+            LinkReferenceStyle::Shortcut => (
+                concat_strings!("[", content, "]"),
+                concat_strings!("[", content, "]: ", link, title),
+            ),
+        };
+        
+        links.push(append);
+        current
+    }
+}

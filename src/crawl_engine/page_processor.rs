@@ -33,7 +33,7 @@ use super::page_timeout::with_page_timeout;
 use crate::config::CrawlConfig;
 use crate::content_saver;
 use crate::content_saver::{read_cached_etag, check_etag_from_events};
-use crate::content_saver::markdown_converter::{ConversionOptions, convert_html_to_markdown, ensure_h1_at_start};
+use crate::content_saver::markdown_converter::{ConversionOptions, convert_html_to_markdown};
 use crate::crawl_events::{CrawlEventBus, types::{CrawlEvent, PageCrawlMetadata}};
 use crate::link_rewriter::LinkRewriter;
 use crate::page_extractor;
@@ -710,7 +710,7 @@ pub async fn process_single_page(
                     item.url,
                     e
                 );
-                htmd::convert(&extracted_data.content).unwrap_or_default()
+                crate::content_saver::markdown_converter::htmd::convert(&extracted_data.content).unwrap_or_default()
             }
         };
 
@@ -810,12 +810,7 @@ pub async fn process_single_page(
         }
     };
 
-    // Ensure markdown starts with H1 (using extracted headings or title as fallback)
-    let processed_markdown = ensure_h1_at_start(
-        &processed_markdown,
-        &page_data.metadata.headings,
-        &page_data.title,
-    );
+    // NOTE: ensure_h1_at_start removed - htmd element handlers now produce correct headings
 
     let html_size = page_data.content.len();
 

@@ -115,6 +115,7 @@ pub async fn inline_all_resources(
 ///
 /// Returns `InliningResult` containing the processed HTML along with success/failure metrics.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub async fn inline_resources_from_info(
     html_content: String,
     base_url: String,
