@@ -11,7 +11,7 @@
 use anyhow::Result;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::Page;
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams,
     EventResponseReceived,
@@ -195,6 +195,10 @@ pub struct PageProcessorContext {
     pub visited: Arc<DashSet<String>>,
     /// User-Agent string extracted from browser (used for HTTP requests during resource inlining)
     pub user_agent: String,
+    /// Shared cache for HTTP error responses (enables cross-page caching of failed static asset URLs)
+    pub http_error_cache: Arc<DashMap<String, u16>>,
+    /// Shared domain download queues (enables cross-page worker sharing for static assets)
+    pub domain_queues: Arc<DashMap<String, Arc<crate::inline_css::domain_queue::DomainDownloadQueue>>>,
 }
 
 /// Navigate to a URL with timeout and circuit breaker error handling
@@ -639,6 +643,8 @@ pub async fn process_single_page(
         save_html: ctx.config.save_raw_html(),
         compression_threshold_bytes: ctx.config.compression_threshold_bytes(),
         user_agent: ctx.user_agent.clone(),
+        http_error_cache: Arc::clone(&ctx.http_error_cache),
+        domain_queues: Arc::clone(&ctx.domain_queues),
     };
 
     for attempt in 0..MAX_RETRIES {

@@ -13,6 +13,7 @@ pub mod html_cleaning;
 mod table_preprocessing;
 mod expressive_code;
 pub mod code_block_protection;
+mod preformatted_detection;
 
 // Re-export public API
 pub use main_content_extraction::extract_main_content;
@@ -24,3 +25,4 @@ pub use html_cleaning::strip_syntax_highlighting_spans;
 pub use table_preprocessing::{preprocess_tables, fix_pre_table_text, inject_preceding_headers};
 pub use expressive_code::{preprocess_expressive_code, convert_br_to_newlines_in_code};
 pub use code_block_protection::CodeBlockProtector;
+pub use preformatted_detection::preprocess_preformatted_elements;

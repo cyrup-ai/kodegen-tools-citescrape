@@ -60,8 +60,8 @@ pub mod custom_handlers;
 pub use html_preprocessing::{clean_html_content, extract_main_content};
 pub use html_to_markdown::MarkdownConverter;
 pub use markdown_postprocessing::{
-    ensure_h1_at_start, extract_heading_level, normalize_heading_level, normalize_inline_formatting_spacing, 
-    normalize_whitespace, process_markdown_headings,
+    ensure_h1_at_start, extract_heading_level, filter_system_messages, normalize_heading_level, 
+    normalize_inline_formatting_spacing, normalize_whitespace, process_markdown_headings,
 };
 
 /// Configuration options for HTML to Markdown conversion
@@ -258,16 +258,37 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     };
 
     // ============================================================================
+    // Stage 0.52: Detect and normalize CSS-styled preformatted elements
+    // ============================================================================
+    // CRITICAL: Must run AFTER expressive-code (Stage 0.5) and BEFORE syntax
+    // highlighting span stripping (Stage 0.55).
+    //
+    // Converts elements with:
+    // - CSS styles: white-space:pre, font-family:monospace
+    // - Class names: .ascii, .diagram, .terminal, .console, etc.
+    // - Content patterns: box-drawing characters, ASCII art
+    //
+    // to <pre> tags for proper code block conversion. This ensures CSS-styled
+    // diagrams and ASCII art are preserved in the final markdown output.
+    let preformatted_normalized = match html_preprocessing::preprocess_preformatted_elements(&ec_preprocessed) {
+        Ok(processed) => processed,
+        Err(e) => {
+            tracing::warn!("Preformatted element preprocessing failed: {}, using unprocessed HTML", e);
+            ec_preprocessed
+        }
+    };
+
+    // ============================================================================
     // Stage 0.55: Strip syntax highlighting spans from code blocks
     // ============================================================================
     // CRITICAL: Must run BEFORE code block protection (Stage 0.6)
     // Removes <span style="..."> tags used for syntax highlighting that would
     // otherwise be protected and survive into final markdown output.
-    let spans_stripped = match html_preprocessing::strip_syntax_highlighting_spans(&ec_preprocessed) {
+    let spans_stripped = match html_preprocessing::strip_syntax_highlighting_spans(&preformatted_normalized) {
         Ok(cleaned) => cleaned,
         Err(e) => {
             tracing::warn!("Syntax highlighting span stripping failed: {}, using unprocessed HTML", e);
-            ec_preprocessed
+            preformatted_normalized
         }
     };
 
@@ -358,6 +379,22 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
 
     let markdown = converter.convert_sync(&preprocessed_html)?;
 
+    // ============================================================================
+    // Stage 3.1: Filter system messages (CRITICAL - Must be FIRST postprocessing)
+    // ============================================================================
+    // Removes MCP tool output contamination like "[Reading X lines from line Y...]"
+    // 
+    // This defensive filter catches fs_read_file notices that may have been embedded
+    // in source content during the crawling process. MUST run before other filters
+    // to prevent the contamination from being processed as valid markdown.
+    //
+    // WHY FIRST:
+    // - Prevents contamination from interfering with later pattern-matching filters
+    // - Removes noise before code fence normalization, heading extraction, etc.
+    // - Fast-path returns immediately for clean content (contains("[Reading ") check)
+    // - Defensive programming: catch contamination at earliest possible point
+    let markdown = markdown_postprocessing::filter_system_messages(&markdown);
+
     // Stage 3.2.5: Fix HTML tag spacing (Issue #013)
     // Removes spaces inserted by htmd in HTML tag syntax within code blocks
     // Fixes: style = \"...\" → style=\"...\", < /span > → </span>, \" > → \">
@@ -372,12 +409,27 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Ensures code fences always start on a new line (fixes "text```" → "text\n\n```")
     let markdown = markdown_postprocessing::fix_merged_code_fences(&markdown);
 
+    // Stage 3.4.5: Unescape orphan brackets
+    // Fixes \[text\] patterns that htmd escaped but are not actual markdown links.
+    // The htmd library escapes ALL brackets in text nodes to prevent them from
+    // being interpreted as links, but this causes issues when brackets are:
+    // - Part of broken/empty anchor tags that our link_handler converted to plain text
+    // - Legitimate bracket text that should remain as plain brackets
+    // Pattern: \[content\] NOT followed by (url) → [content]
+    let markdown = markdown_postprocessing::unescape_orphan_brackets(&markdown);
+
     // Stage 3.5: Process markdown links (convert relative URLs to absolute)
     let markdown = if let Some(base_url) = &options.base_url {
         html_to_markdown::process_markdown_links(&markdown, base_url)
     } else {
         markdown
     };
+
+    // Stage 3.5.5: Simplify URL-as-link-text patterns
+    // Converts [https://example.com](https://example.com) to just https://example.com
+    // Handles case-insensitive protocol matching (Https:// → https://)
+    // MUST run AFTER Stage 3.5 to work with normalized absolute URLs
+    let markdown = markdown_postprocessing::simplify_url_as_link_text(&markdown);
 
     // Stage 3.6: Filter collapsed code section indicators
     // Removes "X collapsed lines" UI artifacts from code viewer widgets
@@ -417,6 +469,12 @@ pub fn convert_html_to_markdown_sync(html: &str, options: &ConversionOptions) ->
     // Fixes spacing around shell operators (|, >, >>, <, &, &&, ||) in shell code blocks
     // Only processes code blocks with shell language tags (bash, sh, zsh, shell)
     let markdown = markdown_postprocessing::repair_shell_syntax(&markdown);
+
+    // Stage 3.11: Fix consecutive commas in code blocks
+    // Removes double comma patterns (`, ,`) left when HTML elements wrapping
+    // code tokens are stripped during HTML cleaning (e.g., <a> tags around trait names)
+    // Pattern: `,\s*,` → `,` (only inside code blocks)
+    let markdown = markdown_postprocessing::fix_consecutive_commas(&markdown);
 
     // Stage 4: Process markdown headings (with passthrough if disabled)
     let processed_markdown = if options.process_headings {

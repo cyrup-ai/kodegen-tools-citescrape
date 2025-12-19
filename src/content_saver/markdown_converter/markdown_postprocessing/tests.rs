@@ -491,3 +491,89 @@ command1 > file.txt
     // Running twice should produce same result (idempotent)
     assert_eq!(result1, result2, "Repair should be idempotent");
 }
+
+
+// =============================================================================
+// Bold Spacing Validation
+// =============================================================================
+
+#[test]
+fn test_fix_bold_internal_spacing_symmetric() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::fix_bold_internal_spacing;
+    
+    // Symmetric spacing: spaces on both sides
+    let input = "- ** Simplicity **: Without a persistent widget state...";
+    let expected = "- **Simplicity**: Without a persistent widget state...";
+    let result = fix_bold_internal_spacing(input);
+    assert_eq!(result, expected, "Should remove symmetric internal spacing");
+}
+
+#[test]
+fn test_fix_bold_internal_spacing_asymmetric() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::fix_bold_internal_spacing;
+    
+    // Asymmetric spacing: space only on one side
+    let input1 = "- ** Simplicity**: Without a persistent...";
+    let expected1 = "- **Simplicity**: Without a persistent...";
+    let result1 = fix_bold_internal_spacing(input1);
+    assert_eq!(result1, expected1, "Should remove leading space only");
+    
+    let input2 = "- **Simplicity **: Without a persistent...";
+    let expected2 = "- **Simplicity**: Without a persistent...";
+    let result2 = fix_bold_internal_spacing(input2);
+    assert_eq!(result2, expected2, "Should remove trailing space only");
+}
+
+#[test]
+fn test_fix_bold_internal_spacing_multiple_spaces() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::fix_bold_internal_spacing;
+    
+    // Multiple spaces
+    let input = "- **  Build features  **: Tell Claude what you want...";
+    let expected = "- **Build features**: Tell Claude what you want...";
+    let result = fix_bold_internal_spacing(input);
+    assert_eq!(result, expected, "Should remove multiple internal spaces");
+}
+
+#[test]
+fn test_fix_bold_internal_spacing_preserves_valid() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::fix_bold_internal_spacing;
+    
+    // Already valid bold formatting should be unchanged
+    let input = "- **Simplicity**: Without a persistent widget state...";
+    let result = fix_bold_internal_spacing(input);
+    assert_eq!(result, input, "Should preserve already-correct bold formatting");
+}
+
+#[test]
+fn test_fix_bold_internal_spacing_multi_word() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::fix_bold_internal_spacing;
+    
+    // Multi-word content with internal spaces should preserve content spaces
+    let input = "- ** Build features from descriptions **: Tell Claude...";
+    let expected = "- **Build features from descriptions**: Tell Claude...";
+    let result = fix_bold_internal_spacing(input);
+    assert_eq!(result, expected, "Should preserve spaces within content");
+}
+
+#[test]
+fn test_fix_bold_internal_spacing_space_before_colon() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::fix_bold_internal_spacing;
+    
+    // Space before punctuation after bold
+    let input = "- **Simplicity** : Without a persistent...";
+    let expected = "- **Simplicity**: Without a persistent...";
+    let result = fix_bold_internal_spacing(input);
+    assert_eq!(result, expected, "Should remove space before colon");
+}
+
+#[test]
+fn test_fix_bold_internal_spacing_idempotent() {
+    use crate::content_saver::markdown_converter::markdown_postprocessing::fix_bold_internal_spacing;
+    
+    // Running twice should produce same result
+    let input = "- ** Simplicity **: description";
+    let result1 = fix_bold_internal_spacing(input);
+    let result2 = fix_bold_internal_spacing(&result1);
+    assert_eq!(result1, result2, "Should be idempotent");
+}

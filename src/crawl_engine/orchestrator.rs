@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use chromiumoxide::Browser;
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use log::{debug, error, info, warn};
@@ -193,6 +193,16 @@ pub async fn crawl_pages<P: ProgressReporter>(
         .context("Failed to get user agent from browser")?;
     debug!("Browser user agent: {user_agent}");
 
+    // Session-level HTTP error cache for static asset downloads
+    // This cache persists across all pages in this crawl session, preventing
+    // repeated failed requests to the same broken URLs (404s, 400s, etc.)
+    let http_error_cache: Arc<DashMap<String, u16>> = Arc::new(DashMap::new());
+
+    // Session-level domain download queues for static asset downloads
+    // Sharing queues across pages ensures ONE worker per domain (serial downloads)
+    // which makes the http_error_cache effective (cache checked before each download)
+    let domain_queues: Arc<DashMap<String, Arc<crate::inline_css::domain_queue::DomainDownloadQueue>>> = Arc::new(DashMap::new());
+
     progress.report_browser_launched();
 
     // Browser is already Arc-wrapped (either from pool or fresh launch above)
@@ -276,6 +286,8 @@ pub async fn crawl_pages<P: ProgressReporter>(
             let indexing_sender = indexing_sender.clone();
             let visited = Arc::clone(&visited);
             let user_agent = user_agent.clone();
+            let http_error_cache = Arc::clone(&http_error_cache);
+            let domain_queues = Arc::clone(&domain_queues);
 
             // Spawn concurrent task
             let task = tokio::spawn(async move {
@@ -295,6 +307,8 @@ pub async fn crawl_pages<P: ProgressReporter>(
                     indexing_sender,
                     visited,
                     user_agent,
+                    http_error_cache,
+                    domain_queues,
                 };
 
                 process_single_page(browser, item, ctx).await

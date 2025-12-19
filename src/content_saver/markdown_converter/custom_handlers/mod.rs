@@ -464,28 +464,16 @@ fn strong_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerRe
     // Use handler pipeline to properly process nested elements (including links)
     let content = handlers.walk_children(element.node).content;
     
-    if content.is_empty() {
-        return None;
-    }
-    
-    // Calculate whitespace bounds to preserve spacing outside markers
-    // This matches htmd's emphasis_handler architecture
-    let leading_space = content.len() - content.trim_start().len();
-    let trailing_space = content.len() - content.trim_end().len();
+    // Trim ALL whitespace from the extracted content
+    // External whitespace is handled by parent block elements (p, li, etc.)
     let trimmed = content.trim();
     
     if trimmed.is_empty() {
         return None;
     }
     
-    // Reconstruct: leading_ws + ** + content + ** + trailing_ws
-    // Result: ` **content** ` (spaces OUTSIDE markers, not inside)
-    let result = format!(
-        "{}**{}**{}",
-        &content[..leading_space],
-        trimmed,
-        &content[content.len() - trailing_space..]
-    );
+    // Simple wrapping: **content** (no whitespace preservation)
+    let result = format!("**{}**", trimmed);
     
     Some(HandlerResult::from(result))
 }
@@ -494,14 +482,19 @@ fn strong_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerRe
 /// Uses walk_children to preserve nested elements like links
 fn em_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
     // Use handler pipeline to properly process nested elements (including links)
-    let result = handlers.walk_children(element.node);
-    let content = result.content.trim();
+    let content = handlers.walk_children(element.node).content;
     
-    if content.is_empty() {
+    // Trim ALL whitespace from the extracted content
+    let trimmed = content.trim();
+    
+    if trimmed.is_empty() {
         return None;
     }
     
-    Some(HandlerResult::from(format!("*{}*", content)))
+    // Simple wrapping: *content* (no whitespace preservation)
+    let result = format!("*{}*", trimmed);
+    
+    Some(HandlerResult::from(result))
 }
 
 /// Handle `<li>` elements - list items with deep content extraction

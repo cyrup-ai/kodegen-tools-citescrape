@@ -646,8 +646,9 @@ impl MarkdownConverter {
         // 1. Descriptive text in header cells without colspan detection
         // 2. htmd library generating inconsistent markdown
         // 
-        // Solution: Use majority voting (mode) to determine correct column count
-        // from data rows, then normalize all rows to match.
+        // Solution: Use header row as authoritative source for column count.
+        // Only fall back to majority voting (mode) from data rows if header is empty.
+        // This ensures separator always matches the header column count.
         // ============================================================================
 
         if table_lines.is_empty() {
@@ -677,18 +678,36 @@ impl MarkdownConverter {
             *column_count_freq.entry(*col_count).or_insert(0) += 1;
         }
 
-        // Determine correct column count: most common in data rows
-        let correct_col_count = column_count_freq
-            .into_iter()
-            .max_by_key(|(_, freq)| *freq)
-            .map(|(count, _)| count)
-            .unwrap_or_else(|| {
-                // Fallback: if no data rows, use header count
-                row_column_counts.first().map(|(_, count)| *count).unwrap_or(1)
-            });
+        // Step 2: Determine authoritative column count
+        // Priority: 1) Header row (authoritative), 2) Mode of data rows (fallback), 3) Default to 1
+        let header_col_count = Self::count_table_columns(table_lines[0]);
+
+        let correct_col_count = if header_col_count > 0 {
+            // Header is authoritative - use it as the correct column count
+            header_col_count
+        } else {
+            // Header is empty/malformed - fall back to data row mode
+            column_count_freq
+                .into_iter()
+                .max_by_key(|(_, freq)| *freq)
+                .map(|(count, _)| count)
+                .unwrap_or(1)
+        };
+
+        // Debug logging to track column count determination strategy
+        if header_col_count == 0 && correct_col_count > 0 {
+            log::debug!(
+                "Table has empty header, using data row mode: {} columns",
+                correct_col_count
+            );
+        } else if header_col_count > 0 {
+            log::debug!(
+                "Table using header as authoritative: {} columns",
+                correct_col_count
+            );
+        }
 
         // Step 3: Check if header row needs adjustment
-        let header_col_count = Self::count_table_columns(table_lines[0]);
         let header_needs_fix = header_col_count != correct_col_count;
 
         // Step 4: Extract descriptive text from header if it has extra columns

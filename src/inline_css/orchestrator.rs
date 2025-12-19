@@ -4,16 +4,18 @@
 //! downloading and inlining of CSS, image, and SVG resources.
 
 use super::css_downloader::download_all_css;
-use super::domain_queue::DomainQueueManager;
+use super::domain_queue::{DomainDownloadQueue, DomainQueueManager};
 use super::downloaders::InlineConfig;
 use super::image_downloader::download_all_images;
 use super::svg_downloader::download_all_svgs;
 use super::types::{InliningError, InliningResult, ResourceFuture, ResourceType};
 use crate::page_extractor::schema::ResourceInfo;
 use anyhow::Result;
+use dashmap::DashMap;
 use futures::future::join_all;
 use futures::join;
 use reqwest::Client;
+use std::sync::Arc;
 
 /// Inline all external resources with a single HTML parse
 ///
@@ -101,6 +103,16 @@ pub async fn inline_all_resources(
 /// Download and inline external resources using extracted resource information
 /// with concurrent downloads for maximum performance
 ///
+/// # Arguments
+/// * `html_content` - HTML content to process
+/// * `base_url` - Base URL for resolving relative URLs
+/// * `config` - Inline configuration with user agent
+/// * `resources` - Extracted resource information (stylesheets, images, etc.)
+/// * `max_inline_image_size_bytes` - Maximum image size to inline
+/// * `rate_rps` - Optional rate limit in requests per second
+/// * `http_error_cache` - Shared cache for HTTP error responses (enables cross-page caching)
+/// * `domain_queues` - Shared domain download queues (enables cross-page worker sharing)
+///
 /// Returns `InliningResult` containing the processed HTML along with success/failure metrics.
 #[inline]
 pub async fn inline_resources_from_info(
@@ -110,12 +122,15 @@ pub async fn inline_resources_from_info(
     resources: ResourceInfo,
     max_inline_image_size_bytes: Option<usize>,
     rate_rps: Option<f64>,
+    http_error_cache: Arc<DashMap<String, u16>>,
+    domain_queues: Arc<DashMap<String, Arc<DomainDownloadQueue>>>,
 ) -> Result<InliningResult> {
     let _config = config.clone();
     let client = Client::new();
     
     // Create domain queue manager for coordinated downloads
-    let queue_manager = DomainQueueManager::new(client.clone(), rate_rps, config.user_agent.clone());
+    // Uses shared http_error_cache and domain_queues for cross-page caching and worker sharing
+    let queue_manager = DomainQueueManager::new(client.clone(), rate_rps, config.user_agent.clone(), http_error_cache, domain_queues);
     
     let html = html_content;
 
@@ -157,7 +172,6 @@ pub async fn inline_resources_from_info(
                 let bytes = match queue_manager_clone.submit_download(css_url.clone()).await {
                     Ok(b) => b,
                     Err(e) => {
-                        log::warn!("Failed to download CSS from {css_url}: {e}");
                         return Err(InliningError {
                             url: css_url,
                             resource_type: ResourceType::Css,
@@ -214,7 +228,6 @@ pub async fn inline_resources_from_info(
                 let bytes = match queue_manager_clone.submit_download(svg_url.clone()).await {
                     Ok(b) => b,
                     Err(e) => {
-                        log::warn!("Failed to download SVG from {svg_url}: {e}");
                         return Err(InliningError {
                             url: svg_url,
                             resource_type: ResourceType::Svg,
@@ -271,7 +284,6 @@ pub async fn inline_resources_from_info(
                 let bytes = match queue_manager_clone.submit_download(image_url.clone()).await {
                     Ok(b) => b,
                     Err(e) => {
-                        log::warn!("Failed to download image from {image_url}: {e}");
                         return Err(InliningError {
                             url: image_url,
                             resource_type: ResourceType::Image,
@@ -335,7 +347,7 @@ pub async fn inline_resources_from_info(
                 }
             },
             Err(inlining_error) => {
-                log::error!(
+                log::warn!(
                     "Failed to download {} from {}: {}",
                     inlining_error.resource_type,
                     inlining_error.url,

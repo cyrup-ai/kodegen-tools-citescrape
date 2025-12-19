@@ -37,6 +37,31 @@ static SECTION_ANCHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("SECTION_ANCHOR_RE: hardcoded regex is valid")
 });
 
+/// Matches "Navigate to header" anchor links in markdown headings (safety net)
+/// Removes [Navigate to header](#anchor) patterns that escaped HTML preprocessing
+/// 
+/// Pattern: `(?m)^(#{1,6}\s+)\[Navigate to header\]\(#[^)]+\)(.*)`
+/// 
+/// Matches:
+/// - `## [Navigate to header](#section)Section Title` → `## Section Title`
+/// - `### [Navigate to header](#overview)Overview` → `### Overview`
+/// - `# [Navigate to header](#intro)Introduction` → `# Introduction`
+/// 
+/// Does NOT match:
+/// - `[Navigate to header](#section)` (not in a heading)
+/// - `## [Other link](#section)Title` (different link text)
+/// - `##[Navigate to header](#section)Title` (no space after hashes)
+/// 
+/// Capture groups:
+/// - Group 1: `(#{1,6}\s+)` - Heading prefix (1-6 hashes + required space)
+/// - Group 2: `(.*)` - Rest of heading text after the navigation link
+/// 
+/// Replacement: `$1$2` (heading prefix + remaining text, removes navigation link)
+static HEADING_NAV_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)^(#{1,6}\s+)\[Navigate to header\]\(#[^)]+\)(.*)"#)
+        .expect("HEADING_NAV_LINK_RE: hardcoded regex is valid")
+});
+
 /// Process markdown headings to normalize heading levels and handle different markdown styles
 pub fn process_markdown_headings(markdown: &str) -> String {
     // Safety net: Remove any remaining "## # " patterns from markdown
@@ -196,6 +221,10 @@ pub fn process_markdown_headings(markdown: &str) -> String {
 
     // Remove any remaining "Section titled" anchor patterns (safety net)
     let result = SECTION_ANCHOR_RE.replace_all(&result, "");
+
+    // Remove "Navigate to header" anchor patterns from headings (safety net)
+    // Transforms: ## [Navigate to header](#anchor)Header Text → ## Header Text
+    let result = HEADING_NAV_LINK_RE.replace_all(&result, "$1$2");
 
     result.to_string()
 }

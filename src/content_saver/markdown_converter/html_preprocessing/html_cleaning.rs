@@ -180,16 +180,26 @@ static HEADING_ANCHOR_MARKERS: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Matches accessibility navigation anchor links with "Navigate to header" text
 /// These appear in various documentation sites as screen-reader navigation aids
-/// Examples:
-///   <a href="#section">Navigate to header</a>
-///   <a href="#heading" class="skip-link">Navigate to header</a>
-///   <a aria-label="Navigate to header" href="#target">Navigate to header</a>
 /// 
-/// This pattern matches ANY anchor with this exact text, regardless of CSS classes
-/// or other attributes, because the text itself is the accessibility marker that
-/// should be removed.
+/// Pattern: `(?s)<a[^>]*>\s*Navigate\s+to\s+header\s*</a>`
+/// 
+/// Matches:
+/// - `<a href="#section">Navigate to header</a>`
+/// - `<a href="#heading"> Navigate to header </a>` (leading/trailing spaces)
+/// - `<a href="#target">\n  Navigate\n  to\n  header\n</a>` (newlines and indentation)
+/// - `<a href="#overview">Navigate  to  header</a>` (multiple spaces between words)
+/// 
+/// Does NOT match:
+/// - `<a href="#section">Navigate header</a>` (missing "to")
+/// - `<a href="#section">Navigate to</a>` (incomplete text)
+/// - `<a href="#section">Please navigate to header</a>` (extra prefix text)
+/// 
+/// Whitespace handling:
+/// - `\s*` at start/end: Matches zero or more whitespace (spaces, newlines, tabs)
+/// - `\s+` between words: Matches one or more whitespace characters
+/// - `(?s)` flag: Enables dot-matches-newline mode (though not using dot here)
 static HEADING_NAVIGATE_TO_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<a[^>]*>Navigate to header</a>"#)
+    Regex::new(r#"(?s)<a[^>]*>\s*Navigate\s+to\s+header\s*</a>"#)
         .expect("HEADING_NAVIGATE_TO_HEADER_RE: hardcoded regex is valid")
 });
 

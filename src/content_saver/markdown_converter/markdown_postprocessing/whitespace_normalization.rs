@@ -596,6 +596,115 @@ pub fn fix_html_tag_spacing(markdown: &str) -> String {
     result
 }
 
+/// Simplify redundant URL-as-link-text patterns
+///
+/// Converts markdown links where the link text IS the URL itself into plain URLs.
+/// This handles the common case where HTML like `<a href="url">url</a>` produces
+/// redundant markdown `[url](url)`.
+///
+/// This function is part of the markdown post-processing pipeline (Stage 3.5.5)
+/// and runs AFTER relative URLs have been converted to absolute URLs in Stage 3.5.
+///
+/// # Rules
+///
+/// 1. `[https://example.com](https://example.com)` → `https://example.com`
+/// 2. `[Https://example.com](https://example.com)` → `https://example.com` (case-insensitive match)
+/// 3. `[http://example.com](http://example.com)` → `http://example.com`
+/// 4. Preserves links where text differs from URL: `[Click here](https://example.com)` unchanged
+///
+/// # Performance
+///
+/// - Fast path: Returns immediately if markdown contains no links (no `](` pattern)
+/// - Bounded quantifiers prevent catastrophic backtracking (matches LINK_RE pattern)
+/// - Uses standard `regex::Regex` (no lookbehind needed, ~10x faster than fancy_regex)
+///
+/// # Arguments
+///
+/// * `markdown` - The markdown content to process
+///
+/// # Returns
+///
+/// Markdown with redundant URL links simplified to plain URLs
+///
+/// # Examples
+///
+/// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::simplify_url_as_link_text;
+/// let input = "[Https://example.com/path](https://example.com/path)";
+/// let result = simplify_url_as_link_text(input);
+/// assert_eq!(result, "https://example.com/path");
+/// ```
+pub fn simplify_url_as_link_text(markdown: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    // Fast path: no markdown links present
+    if !markdown.contains("](") {
+        return markdown.to_string();
+    }
+
+    // Pattern: Match markdown links [text](url)
+    // Group 1: link text (up to 2000 chars to match LINK_RE bounds)
+    // Group 2: URL (up to 2000 chars)
+    // Bounded quantifiers prevent catastrophic backtracking
+    static URL_LINK_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\[([^\]]{1,2000})\]\(([^)]{1,2000})\)")
+            .expect("URL_LINK_PATTERN: hardcoded regex is valid")
+    });
+
+    URL_LINK_PATTERN.replace_all(markdown, |caps: &regex::Captures| {
+        let link_text = &caps[1];
+        let url = &caps[2];
+
+        // Check if link text is a URL that matches the href
+        // Use case-insensitive comparison to handle "Https://..." vs "https://..."
+        if is_url_matching_link_text(link_text, url) {
+            // Return just the URL (use the href version which has correct casing)
+            url.to_string()
+        } else {
+            // Keep original link format - text differs from URL
+            format!("[{}]({})", link_text, url)
+        }
+    }).to_string()
+}
+
+/// Check if link text is a URL that matches the href URL
+///
+/// Performs case-insensitive comparison to handle protocol case variations
+/// like "Https://example.com" vs "https://example.com".
+///
+/// # Arguments
+///
+/// * `link_text` - The visible link text
+/// * `url` - The href URL
+///
+/// # Returns
+///
+/// `true` if link_text is the same URL as href (allowing protocol/domain case differences)
+///
+/// # Implementation Notes
+///
+/// URLs are case-insensitive for protocol and domain, but case-sensitive for path/query.
+/// However, if someone writes the same URL with different casing in the link text,
+/// it's still redundant and should be simplified. This function intentionally uses
+/// full lowercase comparison for simplicity and correctness.
+fn is_url_matching_link_text(link_text: &str, url: &str) -> bool {
+    let text_trimmed = link_text.trim();
+    let url_trimmed = url.trim();
+
+    // Must start with http:// or https:// (case-insensitive check)
+    let text_lower = text_trimmed.to_lowercase();
+    if !text_lower.starts_with("http://") && !text_lower.starts_with("https://") {
+        return false;
+    }
+
+    // Compare URLs case-insensitively
+    // This handles: [Https://Example.com](https://example.com) → matches
+    // Note: This is intentionally lenient - if someone wrote the same URL
+    // with different casing in text vs href, it's still redundant
+    text_lower == url_trimmed.to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

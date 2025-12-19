@@ -68,6 +68,48 @@ static CORRUPTED_SHEBANG_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("CORRUPTED_SHEBANG_RE: hardcoded regex is statically valid")
 });
 
+/// Known valid language identifiers for code fences
+/// Used to distinguish valid fence openings from malformed merged patterns
+/// 
+/// This is for simple name validation ("Is 'json' a valid language?"), 
+/// distinct from custom_handlers/language_patterns.rs which does sophisticated
+/// pattern-based language detection ("What language is this code written in?")
+static KNOWN_LANGUAGES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from([
+        // Common languages
+        "rust", "python", "javascript", "typescript", "java", "go", "ruby",
+        "c", "cpp", "csharp", "swift", "kotlin", "scala", "php", "perl",
+        // Shell/scripting
+        "bash", "shell", "sh", "zsh", "fish", "powershell", "ps1", "bat", "cmd",
+        // Web
+        "html", "css", "scss", "sass", "less", "xml", "svg",
+        // Data formats
+        "json", "yaml", "yml", "toml", "ini", "csv",
+        // Query languages
+        "sql", "graphql", "cypher",
+        // Markup/docs
+        "markdown", "md", "rst", "tex", "latex",
+        // Config/infra
+        "dockerfile", "docker", "nginx", "apache", "makefile", "cmake",
+        "terraform", "hcl", "ansible",
+        // Other
+        "diff", "patch", "text", "txt", "plain", "console", "output",
+        "asm", "wasm", "lua", "r", "matlab", "julia", "elixir", "erlang",
+        "haskell", "ocaml", "fsharp", "clojure", "lisp", "scheme", "racket",
+        "vim", "elisp", "nix", "zig", "odin", "v", "d", "nim", "crystal",
+        // JS ecosystem variants
+        "js", "ts", "jsx", "tsx", "mjs", "cjs", "vue", "svelte", "astro",
+    ])
+});
+
+/// Check if a string is a valid language identifier
+/// Performs case-insensitive matching for flexibility
+#[inline]
+fn is_valid_language(s: &str) -> bool {
+    let normalized = s.to_lowercase();
+    KNOWN_LANGUAGES.contains(normalized.as_str())
+}
+
 /// Filter out "X collapsed lines" text from code blocks
 ///
 /// This removes UI artifacts from code viewer widgets that get captured
@@ -689,19 +731,76 @@ pub fn fix_shebang_lines(markdown: &str) -> String {
 /// assert!(result.contains("```rust"));
 /// ```
 pub fn normalize_code_fences(markdown: &str) -> String {
-    let mut result = String::with_capacity(markdown.len() + 512); // Extra space for inserted newlines
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut result = String::with_capacity(markdown.len() + 512);
     let mut in_code_fence = false;
+    let mut i = 0;
     
-    for line in markdown.lines() {
+    while i < lines.len() {
+        let line = lines[i];
         let trimmed = line.trim_start();
+        let indent = &line[..line.len() - trimmed.len()];
         
-        // Detect opening fence (even malformed ones with 5+ backticks)
+        // === PATTERN 1 FIX: Merged Fence + Inline Code ===
+        // Detect: ```word` rest (fence marker merged with inline code)
+        // When NOT in a code fence, if line starts with ``` and the text after
+        // contains a backtick, this is NOT a valid opening fence - it's an
+        // orphaned fence marker merged with inline code text.
+        if !in_code_fence && trimmed.starts_with("```") && !trimmed.starts_with("`````") {
+            let after_fence = trimmed.strip_prefix("```").unwrap_or("");
+            
+            // Check if this looks like merged inline code (contains ` after the fence)
+            // Valid language identifiers do NOT contain backticks
+            if after_fence.contains('`') {
+                // This is malformed: orphaned fence + inline code merged
+                // Fix: Remove the leading ```, preserve the inline code + text
+                result.push_str(indent);
+                result.push_str(after_fence);
+                result.push('\n');
+                
+                tracing::debug!(
+                    "Fixed merged fence + inline code: '{}' -> '{}{}'",
+                    trimmed,
+                    indent,
+                    after_fence
+                );
+                
+                i += 1;
+                continue;
+            }
+        }
+        
+        // === Existing: Detect opening fence ===
         if trimmed.starts_with("`````") || (trimmed.starts_with("```") && !in_code_fence) {
-            // Extract language identifier (everything after backticks)
             let lang = trimmed.trim_start_matches('`').trim_start();
             
-            // Write normalized opening fence (exactly 3 backticks)
-            let indent = &line[..line.len() - trimmed.len()];
+            // === PATTERN 2 FIX: Separated Language Identifier ===
+            // If opening fence has no language, check if next line is language-only
+            if lang.is_empty() && i + 1 < lines.len() {
+                let next_line = lines[i + 1].trim();
+                
+                // Check if next line is ONLY a valid language identifier
+                if is_valid_language(next_line) {
+                    // Merge: write fence with language from next line
+                    result.push_str(indent);
+                    result.push_str("```");
+                    result.push_str(next_line);
+                    result.push('\n');
+                    
+                    in_code_fence = true;
+                    i += 2; // Skip both fence line and language line
+                    
+                    tracing::debug!(
+                        "Merged separated language: '{}' + '{}' -> '```{}'",
+                        trimmed,
+                        next_line,
+                        next_line
+                    );
+                    continue;
+                }
+            }
+            
+            // Normal opening fence handling (existing logic)
             result.push_str(indent);
             result.push_str("```");
             if !lang.is_empty() {
@@ -712,31 +811,31 @@ pub fn normalize_code_fences(markdown: &str) -> String {
             in_code_fence = true;
             
             tracing::debug!(
-                "Normalized opening fence: {} backticks → 3 backticks (lang: '{}')",
+                "Normalized opening fence: {} backticks -> 3 backticks (lang: '{}')",
                 trimmed.chars().take_while(|&c| c == '`').count(),
                 lang
             );
+            
+            i += 1;
             continue;
         }
         
-        // Detect closing fence (single backtick, triple backtick, or triple+ backtick)
+        // === Existing: Detect closing fence ===
         if in_code_fence && (trimmed == "`" || trimmed.starts_with("```")) {
-            // Extract any text that was merged with closing fence
             let after_fence = if trimmed.starts_with("```") {
                 trimmed.strip_prefix("```").unwrap_or("")
             } else {
                 trimmed.strip_prefix("`").unwrap_or("")
             };
             
-            // Write proper closing fence (exactly 3 backticks)
-            let indent = &line[..line.len() - trimmed.len()];
+            // Write proper closing fence
             result.push_str(indent);
             result.push_str("```\n");
             in_code_fence = false;
             
             // If text was merged with fence, add it as separate paragraph
             if !after_fence.is_empty() {
-                result.push('\n'); // Blank line before paragraph
+                result.push('\n');
                 result.push_str(after_fence);
                 result.push('\n');
                 
@@ -745,27 +844,174 @@ pub fn normalize_code_fences(markdown: &str) -> String {
                     after_fence.chars().take(30).collect::<String>(),
                     after_fence.len()
                 );
-            } else {
-                tracing::debug!("Normalized closing fence: {} backticks → 3 backticks",
-                    trimmed.chars().take_while(|&c| c == '`').count()
-                );
             }
+            
+            i += 1;
             continue;
         }
         
-        // Handle orphaned fence markers (fence marker outside code blocks)
-        // These are lines with ONLY ``` or similar that don't open/close properly
+        // === Existing: Handle orphaned fence markers ===
         if !in_code_fence && trimmed == "```" {
-            // This is an orphaned fence marker - skip it
             tracing::debug!("Removed orphaned fence marker");
+            i += 1;
             continue;
         }
         
         // Preserve all other lines
         result.push_str(line);
         result.push('\n');
+        i += 1;
     }
     
+    // Remove trailing newline to match join() behavior
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
+/// Matches consecutive commas with optional whitespace between them
+///
+/// Pattern: `,\s*,` - comma, optional whitespace (including newlines), comma
+///
+/// Rationale:
+/// - `\s*` matches zero or more whitespace characters (space, tab, newline)
+/// - Greedy but bounded by surrounding comma characters
+/// - Efficient: O(n) single-pass replacement
+///
+/// Matches:
+/// - `, ,` (single space)
+/// - `,  ,` (multiple spaces)
+/// - `,\n,` (newline)
+/// - `,,` (no space - edge case)
+///
+/// Does NOT match:
+/// - `,a,` (content between commas)
+/// - `",,""` (commas inside strings - but we can't reliably detect this in all languages)
+///
+/// Performance: Regex replacement is O(n) where n = line length. Only operates
+/// on lines inside code blocks, skipping the majority of content.
+static CONSECUTIVE_COMMAS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r",\s*,")
+        .expect("CONSECUTIVE_COMMAS_RE: hardcoded regex is statically valid")
+});
+
+/// Fix consecutive commas in code blocks
+///
+/// Removes double comma patterns (`, ,`) that appear when HTML elements
+/// wrapping code tokens are stripped during HTML cleaning.
+///
+/// This is a defensive fix that cleans up syntax artifacts from the
+/// HTML-to-markdown conversion pipeline. Only operates inside code blocks.
+///
+/// # Root Cause
+///
+/// When HTML contains code with linked elements like:
+/// `<code>trait Foo<a href="...">Bar</a>, Baz</code>`
+///
+/// The cleaning pipeline removes the `<a>` tag but leaves punctuation:
+/// `trait Foo, Baz` (missing `Bar`)
+///
+/// This function cannot restore the missing content, but it can clean up
+/// the syntax error (consecutive commas) to produce valid code.
+///
+/// # Algorithm
+///
+/// 1. Track code fence state (in/out of code block)
+/// 2. For lines inside code blocks, replace `,\s*,` patterns with `,`
+/// 3. Preserve all lines outside code blocks unchanged
+/// 4. Preserve fence lines and indentation exactly
+///
+/// # Edge Cases
+///
+/// - **String literals**: Cannot reliably detect string context across all languages.
+///   Consecutive commas in strings are extremely rare in practice.
+/// - **Multi-language support**: Works with any programming language (language-agnostic).
+/// - **Nested fences**: Not possible in standard markdown (fences cannot nest).
+/// - **Empty code blocks**: No-op, handled gracefully.
+///
+/// # Performance
+///
+/// - Fast path: Skips lines outside code blocks (majority of content)
+/// - Regex replacement: O(n) where n = line length
+/// - Single allocation: Pre-allocated String with capacity
+///
+/// # Arguments
+///
+/// * `markdown` - Markdown content potentially containing consecutive commas
+///
+/// # Returns
+///
+/// * Cleaned markdown with consecutive commas fixed in code blocks
+///
+/// # Examples
+///
+/// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::code_block_cleaning::fix_consecutive_commas;
+/// let markdown = "```rust\n#[derive(Debug, Clone, , PartialEq)]\n```";
+/// let result = fix_consecutive_commas(markdown);
+/// assert!(result.contains("#[derive(Debug, Clone, PartialEq)]"));
+/// ```
+///
+/// ```rust
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::code_block_cleaning::fix_consecutive_commas;
+/// // Preserves content outside code blocks
+/// let markdown = "Text with, , commas\n```rust\ncode, , here\n```";
+/// let result = fix_consecutive_commas(markdown);
+/// assert!(result.contains("Text with, , commas")); // Outside - unchanged
+/// assert!(result.contains("code, here")); // Inside - fixed
+/// ```
+pub fn fix_consecutive_commas(markdown: &str) -> String {
+    let mut result = String::with_capacity(markdown.len());
+    let mut fence_stack: Option<CodeFence> = None;
+
+    for (line_num, line) in markdown.lines().enumerate() {
+        let trimmed = line.trim_start();
+
+        // Track code fence state
+        if let Some((fence_char, fence_count)) = detect_code_fence(trimmed) {
+            if let Some(ref current_fence) = fence_stack {
+                // Check if this closes the current fence
+                if fence_char == current_fence.char && fence_count >= current_fence.count {
+                    fence_stack = None;
+                }
+            } else {
+                // Open a new code fence
+                fence_stack = Some(CodeFence {
+                    char: fence_char,
+                    count: fence_count,
+                    line_number: line_num,
+                });
+            }
+            // Always preserve fence lines unchanged
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Fix logic: Only fix inside code blocks
+        if fence_stack.is_some() {
+            // Inside a code block - fix consecutive commas
+            let fixed_line = CONSECUTIVE_COMMAS_RE.replace_all(line, ",");
+            
+            if fixed_line != line {
+                tracing::debug!(
+                    "Fixed consecutive commas at line {}: '{}' → '{}'",
+                    line_num + 1,
+                    line.chars().take(60).collect::<String>(),
+                    fixed_line.chars().take(60).collect::<String>()
+                );
+            }
+            
+            result.push_str(&fixed_line);
+            result.push('\n');
+        } else {
+            // Outside code block - preserve unchanged
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
     // Remove trailing newline to match join() behavior
     if result.ends_with('\n') {
         result.pop();
