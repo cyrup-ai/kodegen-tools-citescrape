@@ -12,6 +12,51 @@ use tokio::task::JoinHandle;
 
 use crate::crawl_engine::rate_limiter::{check_http_rate_limit, extract_domain, RateLimitDecision};
 
+/// Normalize URL for consistent cache key generation
+/// 
+/// This function ensures that semantically identical URLs produce the same cache key,
+/// preventing cache misses due to minor string variations (trailing slashes, port numbers,
+/// URL encoding differences, etc.).
+/// 
+/// # Normalization steps:
+/// - Parse URL and serialize back to canonical form
+/// - Remove default ports (80 for http, 443 for https)
+/// - Remove trailing slashes from paths (except root "/")
+/// - Ensure consistent percent-encoding
+fn normalize_url_for_cache(url: &str) -> String {
+    // If parsing fails, return original URL (defensive programming)
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        log::warn!("Failed to parse URL for normalization: {}", url);
+        return url.to_string();
+    };
+    
+    // Remove default ports to ensure "http://example.com" == "http://example.com:80"
+    if let Some(port) = parsed.port() {
+        let scheme = parsed.scheme();
+        if (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
+            let _ = parsed.set_port(None);
+        }
+    }
+    
+    // Remove trailing slash from path (except for root path "/")
+    let path = parsed.path().to_string();
+    if path.len() > 1 && path.ends_with('/') {
+        parsed.set_path(path.trim_end_matches('/'));
+    }
+    
+    // url::Url's to_string() already ensures consistent percent-encoding
+    parsed.to_string()
+}
+
+/// Cached response type - stores either successful content or error status
+#[derive(Debug, Clone)]
+pub enum CachedResponse {
+    /// Successful download with content bytes
+    Success(Vec<u8>),
+    /// HTTP error with status code
+    Error(u16),
+}
+
 /// Error type for download failures
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum DownloadError {
@@ -54,7 +99,7 @@ impl DomainDownloadQueue {
         client: Client,
         rate_rps: Option<f64>,
         user_agent: String,
-        http_error_cache: Arc<DashMap<String, u16>>,
+        http_error_cache: Arc<DashMap<String, CachedResponse>>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         
@@ -88,25 +133,41 @@ impl DomainDownloadQueue {
         client: Client,
         rate_rps: Option<f64>,
         user_agent: String,
-        http_error_cache: Arc<DashMap<String, u16>>,
+        http_error_cache: Arc<DashMap<String, CachedResponse>>,
         mut rx: mpsc::UnboundedReceiver<DownloadRequest>,
     ) {
         log::debug!("Started download worker for domain: {domain}");
         
         while let Some(request) = rx.recv().await {
             let url = request.url.clone();
+            let cache_key = normalize_url_for_cache(&url);
+            
+            // DIAGNOSTIC: Log cache state and URL being checked
+            log::info!("[CACHE-DIAG] worker_loop checking URL: {} | Normalized: {} | Cache size: {} | Cache contains: {}", 
+                url, cache_key, http_error_cache.len(), http_error_cache.contains_key(&cache_key));
             
             // Check cache HERE - this is the only serialization point where the check works
             // All requests are queued before any processing starts, so the cache check in
             // submit_download() always sees an empty cache. Only here can we catch duplicates.
-            if let Some(status_code) = http_error_cache.get(&url) {
-                log::debug!("Skipping queued request for cached error (HTTP {}): {}", status_code.value(), url);
-                let _ = request.response_tx.send(Err(DownloadError::HttpError {
-                    url,
-                    status: *status_code.value(),
-                }));
-                continue;
+            if let Some(cached) = http_error_cache.get(&cache_key) {
+                match cached.value() {
+                    CachedResponse::Success(bytes) => {
+                        log::info!("[CACHE-HIT] worker_loop Success: {} ({} bytes)", url, bytes.len());
+                        let _ = request.response_tx.send(Ok(bytes.clone()));
+                        continue;
+                    }
+                    CachedResponse::Error(status) => {
+                        log::info!("[CACHE-HIT] worker_loop Error (HTTP {}): {}", status, url);
+                        let _ = request.response_tx.send(Err(DownloadError::HttpError {
+                            url,
+                            status: *status,
+                        }));
+                        continue;
+                    }
+                }
             }
+            
+            log::info!("[CACHE-MISS] worker_loop will download: {}", url);
             
             // Check rate limit (single point of serialization)
             if let Some(rate) = rate_rps {
@@ -140,7 +201,7 @@ impl DomainDownloadQueue {
         client: &Client,
         url: &str,
         user_agent: &str,
-        http_error_cache: &DashMap<String, u16>,
+        http_error_cache: &DashMap<String, CachedResponse>,
     ) -> Result<Vec<u8>, DownloadError> {
         let response = client
             .get(url)
@@ -153,11 +214,15 @@ impl DomainDownloadQueue {
         
         // Cache all 4XX and 5XX errors
         if status.is_client_error() || status.is_server_error() {
-            log::info!("Caching HTTP {} error for URL: {}", status.as_u16(), url);
-            http_error_cache.insert(url.to_string(), status.as_u16());
+            let url_string = url.to_string();
+            let cache_key = normalize_url_for_cache(&url_string);
+            log::info!("[CACHE-INSERT] Caching HTTP {} error for URL: {} | Normalized: {} | Key length: {} bytes", 
+                status.as_u16(), url_string, cache_key, cache_key.len());
+            http_error_cache.insert(cache_key, CachedResponse::Error(status.as_u16()));
+            log::info!("[CACHE-INSERT] Cache size after insert: {}", http_error_cache.len());
             
             return Err(DownloadError::HttpError {
-                url: url.to_string(),
+                url: url_string,
                 status: status.as_u16(),
             });
         }
@@ -176,7 +241,13 @@ impl DomainDownloadQueue {
             .await
             .map_err(|e| DownloadError::RequestFailed(format!("Failed to read bytes: {e}")))?;
         
-        Ok(bytes.to_vec())
+        // NEW: Cache successful downloads
+        let cache_key = normalize_url_for_cache(url);
+        let bytes_vec = bytes.to_vec();
+        log::info!("[CACHE-INSERT] Success: {} ({} bytes)", url, bytes_vec.len());
+        http_error_cache.insert(cache_key, CachedResponse::Success(bytes_vec.clone()));
+        
+        Ok(bytes_vec)
     }
 }
 
@@ -189,7 +260,7 @@ pub struct DomainQueueManager {
     client: Client,
     rate_rps: Option<f64>,
     user_agent: String,
-    http_error_cache: Arc<DashMap<String, u16>>,
+    http_error_cache: Arc<DashMap<String, CachedResponse>>,
     /// Track URLs currently being downloaded to coalesce duplicate requests
     in_flight: Arc<DashMap<String, watch::Sender<InFlightResult>>>,
 }
@@ -207,7 +278,7 @@ impl DomainQueueManager {
         client: Client,
         rate_rps: Option<f64>,
         user_agent: String,
-        http_error_cache: Arc<DashMap<String, u16>>,
+        http_error_cache: Arc<DashMap<String, CachedResponse>>,
         queues: Arc<DashMap<String, Arc<DomainDownloadQueue>>>,
     ) -> Self {
         Self {
@@ -226,18 +297,34 @@ impl DomainQueueManager {
     /// downloaded, subsequent callers will wait for and share the result instead
     /// of making a new HTTP request.
     pub async fn submit_download(&self, url: String) -> Result<Vec<u8>, DownloadError> {
+        let cache_key = normalize_url_for_cache(&url);
+        
+        // DIAGNOSTIC: Log cache check at manager level
+        log::info!("[CACHE-DIAG] DomainQueueManager checking URL: {} | Normalized: {} | Cache size: {} | Contains: {}", 
+            url, cache_key, self.http_error_cache.len(), self.http_error_cache.contains_key(&cache_key));
+        
         // Check HTTP error cache first (before any expensive operations)
-        if let Some(status_code) = self.http_error_cache.get(&url) {
-            log::debug!("Skipping previously failed URL (HTTP {}): {}", status_code.value(), url);
-            return Err(DownloadError::HttpError {
-                url: url.clone(),
-                status: *status_code.value(),
-            });
+        if let Some(cached) = self.http_error_cache.get(&cache_key) {
+            match cached.value() {
+                CachedResponse::Success(bytes) => {
+                    log::info!("[CACHE-HIT] DomainQueueManager Success: {} ({} bytes)", url, bytes.len());
+                    return Ok(bytes.clone());
+                }
+                CachedResponse::Error(status) => {
+                    log::info!("[CACHE-HIT] DomainQueueManager Error (HTTP {}): {}", status, url);
+                    return Err(DownloadError::HttpError {
+                        url: url.clone(),
+                        status: *status,
+                    });
+                }
+            }
         }
+        
+        log::info!("[CACHE-MISS] DomainQueueManager will queue: {}", url);
         
         // Check if this URL is already being downloaded by another caller
         // If so, subscribe to the result instead of making a new request
-        if let Some(sender) = self.in_flight.get(&url) {
+        if let Some(sender) = self.in_flight.get(&cache_key) {
             log::debug!("URL already in-flight, waiting for result: {url}");
             let mut rx = sender.subscribe();
             drop(sender); // Release DashMap lock before awaiting
@@ -260,7 +347,7 @@ impl DomainQueueManager {
         // Register this URL as in-flight BEFORE starting the download
         // Use a watch channel so multiple receivers can get the result
         let (tx, _rx) = watch::channel(None);
-        self.in_flight.insert(url.clone(), tx.clone());
+        self.in_flight.insert(cache_key.clone(), tx.clone());
         
         // Extract domain from URL
         let domain = extract_domain(&url)
@@ -286,7 +373,7 @@ impl DomainQueueManager {
         
         // Broadcast result to all waiters and remove from in-flight
         let _ = tx.send(Some(result.clone()));
-        self.in_flight.remove(&url);
+        self.in_flight.remove(&cache_key);
         
         result
     }

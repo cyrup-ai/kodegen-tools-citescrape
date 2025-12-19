@@ -2,7 +2,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use crate::inline_css::domain_queue::DomainDownloadQueue;
+use crate::inline_css::domain_queue::{CachedResponse, DomainDownloadQueue};
 use crate::page_extractor::schema::ResourceInfo;
 use crate::utils::{ensure_domain_gitignore, get_mirror_path};
 
@@ -82,7 +82,7 @@ pub async fn save_html_content_with_resources(
     rate_rps: Option<f64>,
     compression_threshold: usize,
     user_agent: &str,
-    http_error_cache: Arc<DashMap<String, u16>>,
+    http_error_cache: Arc<DashMap<String, CachedResponse>>,
     domain_queues: Arc<DashMap<String, Arc<DomainDownloadQueue>>>,
 ) -> Result<()> {
     let html_content = html_content.to_string();

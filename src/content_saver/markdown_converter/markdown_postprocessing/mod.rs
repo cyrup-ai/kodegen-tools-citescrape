@@ -68,9 +68,18 @@ static SYSTEM_MESSAGE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 /// # Examples
 ///
 /// ```rust
-/// let input = "Description text:CopyAsk AI\n\n```rust\ncode\n```";
+/// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::filter_ui_artifacts;
+/// let input = r#"Description text:CopyAsk AI
+///
+/// ```rust
+/// code
+/// ```"#;
 /// let output = filter_ui_artifacts(input);
-/// assert_eq!(output, "Description text:\n\n```rust\ncode\n```");
+/// assert_eq!(output, r#"Description text:
+///
+/// ```rust
+/// code
+/// ```"#);
 /// ```
 pub fn filter_ui_artifacts(markdown: &str) -> String {
     // Fast path: if markdown doesn't contain any likely UI patterns, return as-is

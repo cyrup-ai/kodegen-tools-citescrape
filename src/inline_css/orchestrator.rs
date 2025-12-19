@@ -4,7 +4,7 @@
 //! downloading and inlining of CSS, image, and SVG resources.
 
 use super::css_downloader::download_all_css;
-use super::domain_queue::{DomainDownloadQueue, DomainQueueManager};
+use super::domain_queue::{CachedResponse, DomainDownloadQueue, DomainQueueManager};
 use super::downloaders::InlineConfig;
 use super::image_downloader::download_all_images;
 use super::svg_downloader::download_all_svgs;
@@ -122,7 +122,7 @@ pub async fn inline_resources_from_info(
     resources: ResourceInfo,
     max_inline_image_size_bytes: Option<usize>,
     rate_rps: Option<f64>,
-    http_error_cache: Arc<DashMap<String, u16>>,
+    http_error_cache: Arc<DashMap<String, CachedResponse>>,
     domain_queues: Arc<DashMap<String, Arc<DomainDownloadQueue>>>,
 ) -> Result<InliningResult> {
     let _config = config.clone();

@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use std::sync::Arc;
 
 use crate::content_saver;
-use crate::inline_css::domain_queue::DomainDownloadQueue;
+use crate::inline_css::domain_queue::{CachedResponse, DomainDownloadQueue};
 
 use super::extractors::{
     extract_headings, extract_interactive_elements, extract_links, extract_metadata,
@@ -26,7 +26,7 @@ pub struct ExtractPageDataConfig {
     /// User-Agent string extracted from browser (used for HTTP requests during resource inlining)
     pub user_agent: String,
     /// Shared cache for HTTP error responses (enables cross-page caching of failed URLs)
-    pub http_error_cache: Arc<DashMap<String, u16>>,
+    pub http_error_cache: Arc<DashMap<String, CachedResponse>>,
     /// Shared domain download queues (enables cross-page worker sharing)
     pub domain_queues: Arc<DashMap<String, Arc<DomainDownloadQueue>>>,
 }

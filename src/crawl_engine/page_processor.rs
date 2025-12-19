@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use super::content_validator::validate_page_content;
 use super::crawl_types::{CrawlQueue, FailureKind};
 use super::{CircuitBreaker, extract_domain};
+use crate::inline_css::domain_queue::CachedResponse;
 use super::page_timeout::with_page_timeout;
 use crate::config::CrawlConfig;
 use crate::content_saver;
@@ -196,7 +197,7 @@ pub struct PageProcessorContext {
     /// User-Agent string extracted from browser (used for HTTP requests during resource inlining)
     pub user_agent: String,
     /// Shared cache for HTTP error responses (enables cross-page caching of failed static asset URLs)
-    pub http_error_cache: Arc<DashMap<String, u16>>,
+    pub http_error_cache: Arc<DashMap<String, CachedResponse>>,
     /// Shared domain download queues (enables cross-page worker sharing for static assets)
     pub domain_queues: Arc<DashMap<String, Arc<crate::inline_css::domain_queue::DomainDownloadQueue>>>,
 }

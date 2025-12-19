@@ -522,9 +522,9 @@ pub fn fix_angle_bracket_spacing(markdown: &str) -> String {
 ///
 /// ```rust
 /// # use kodegen_tools_citescrape::content_saver::markdown_converter::markdown_postprocessing::fix_html_tag_spacing;
-/// let broken = r#"<span style = "color:red" > text < /span >"#;
+/// let broken = r##"<span style = "color:red" > text < /span >"##;
 /// let fixed = fix_html_tag_spacing(broken);
-/// assert_eq!(fixed, r#"<span style="color:red"> text </span>"#);
+/// assert_eq!(fixed, r##"<span style="color:red"> text </span>"##);
 /// ```
 pub fn fix_html_tag_spacing(markdown: &str) -> String {
     use regex::Regex;

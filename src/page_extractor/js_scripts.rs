@@ -258,7 +258,7 @@ pub const LINKS_SCRIPT: &str = r"
 ///   3. Build ordinal from counters[0..level] excluding zeros
 ///
 /// Example progression:
-/// ```
+/// ```text
 /// H1 "Introduction"     → counters = [1,0,0,0,0,0] → ordinal = [1]
 /// H2 "Overview"         → counters = [1,1,0,0,0,0] → ordinal = [1,1]
 /// H2 "Details"          → counters = [1,2,0,0,0,0] → ordinal = [1,2]

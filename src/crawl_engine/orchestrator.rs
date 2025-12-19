@@ -28,6 +28,7 @@ use super::retry_queue::RetryQueue;
 use super::progress::ProgressReporter;
 use crate::browser_setup::launch_browser;
 use crate::config::CrawlConfig;
+use crate::inline_css::domain_queue::CachedResponse;
 use crate::crawl_events::{
     CrawlEventBus,
     types::CrawlEvent,
@@ -196,7 +197,7 @@ pub async fn crawl_pages<P: ProgressReporter>(
     // Session-level HTTP error cache for static asset downloads
     // This cache persists across all pages in this crawl session, preventing
     // repeated failed requests to the same broken URLs (404s, 400s, etc.)
-    let http_error_cache: Arc<DashMap<String, u16>> = Arc::new(DashMap::new());
+    let http_error_cache: Arc<DashMap<String, CachedResponse>> = Arc::new(DashMap::new());
 
     // Session-level domain download queues for static asset downloads
     // Sharing queues across pages ensures ONE worker per domain (serial downloads)
