@@ -6,6 +6,7 @@ use super::super::{
     text_util::concat_strings,
 };
 use super::{HandlerResult, Handlers};
+use html5ever::Attribute;
 use html5ever::serialize::{HtmlSerializer, SerializeOpts, Serializer, TraversalScope, serialize};
 
 use markup5ever_rcdom::{NodeData, SerializableHandle};
@@ -425,4 +426,57 @@ fn is_punctuation_pair(prev: char, next: char) -> bool {
         ('+', c) | (c, '+') if c.is_alphanumeric() || c == '+' => true,
         _ => false,
     }
+}
+
+/// Get attribute value from element, filtering empty values
+pub(super) fn get_attr(attrs: &[Attribute], name: &str) -> Option<String> {
+    attrs
+        .iter()
+        .find(|attr| &*attr.name.local == name)
+        .map(|attr| attr.value.to_string())
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// Check if element has widget-like class or id that should be skipped
+///
+/// This filters out common widget elements like:
+/// - Social media sharing buttons (class contains "social", "share", "follow")
+/// - Cookie consent notices (class/id contains "cookie", "popup", "modal", "overlay")
+/// - Advertisement containers (class/id contains "ad-", "ads-", "advertisement")
+///
+/// Returns `true` if the element should be skipped (not converted to markdown).
+pub(super) fn is_widget_element(attrs: &[Attribute]) -> bool {
+    // Check class attribute
+    if let Some(class) = get_attr(attrs, "class") {
+        let class_lower = class.to_lowercase();
+        if class_lower.contains("social")
+            || class_lower.contains("share")
+            || class_lower.contains("follow")
+            || class_lower.contains("cookie")
+            || class_lower.contains("popup")
+            || class_lower.contains("modal")
+            || class_lower.contains("overlay")
+            || class_lower.contains("ad-")
+            || class_lower.contains("ads-")
+            || class_lower.contains("advertisement")
+        {
+            return true;
+        }
+    }
+
+    // Check id attribute
+    if let Some(id) = get_attr(attrs, "id") {
+        let id_lower = id.to_lowercase();
+        if id_lower.contains("cookie")
+            || id_lower.contains("popup")
+            || id_lower.contains("modal")
+            || id_lower.contains("overlay")
+            || id_lower.contains("ad-")
+            || id_lower.contains("ads-")
+        {
+            return true;
+        }
+    }
+
+    false
 }

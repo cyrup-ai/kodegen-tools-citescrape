@@ -1,8 +1,10 @@
 mod anchor;
+mod aside;
 mod blockquote;
 mod br;
 mod caption;
 mod code;
+mod details;
 mod div;
 mod element_util;
 mod emphasis;
@@ -15,6 +17,7 @@ mod li;
 mod list;
 mod p;
 mod pre;
+mod section;
 mod span;
 mod table;
 mod tbody;
@@ -34,10 +37,12 @@ use self::element_util::serialize_element;
 
 use super::Element;
 use anchor::AnchorElementHandler;
+use aside::aside_handler;
 use blockquote::blockquote_handler;
 use br::br_handler;
 use caption::caption_handler;
 use code::code_handler;
+use details::{details_handler, summary_handler};
 use div::div_handler;
 use emphasis::emphasis_handler;
 use head_body::head_body_handler;
@@ -51,6 +56,7 @@ use list::list_handler;
 use markup5ever_rcdom::Node;
 use p::p_handler;
 use pre::pre_handler;
+use section::section_handler;
 use span::span_handler;
 use std::{collections::HashMap, rc::Rc};
 use table::table_handler;
@@ -198,7 +204,6 @@ impl ElementHandlers {
                 "col",
                 "colgroup",
                 "dd",
-                "details",
                 "dialog",
                 "dir",
                 "div",
@@ -227,7 +232,6 @@ impl ElementHandlers {
                 "search",
                 "section",
                 "style",
-                "summary",
                 "textarea",
                 "tfoot",
                 "title",
@@ -236,9 +240,21 @@ impl ElementHandlers {
             block_handler,
         );
 
-        // div - specialized handling for expressive-code wrappers
+        // details/summary - collapsible sections converted to markdown
+        handlers.add_handler(vec!["details"], details_handler);
+        handlers.add_handler(vec!["summary"], summary_handler);
+
+        // div - specialized handling for expressive-code wrappers and widget filtering
         // Must be registered AFTER block_handler to take priority
         handlers.add_handler(vec!["div"], div_handler);
+
+        // section - widget filtering for social/cookie/ad sections
+        // Must be registered AFTER block_handler to take priority
+        handlers.add_handler(vec!["section"], section_handler);
+
+        // aside - widget filtering for social/cookie/ad asides
+        // Must be registered AFTER block_handler to take priority
+        handlers.add_handler(vec!["aside"], aside_handler);
 
         handlers
     }

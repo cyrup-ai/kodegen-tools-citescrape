@@ -107,33 +107,34 @@ fn handle_code_block(
     }
 }
 
+/// Maximum fence length we'll ever generate.
+/// Content with 10+ consecutive backticks is extremely rare.
+/// Early termination at this threshold provides massive speedup for large files.
+const MAX_FENCE_LEN: usize = 10;
+
 fn get_code_fence_marker(symbol: &str, content: &str) -> String {
-    // Extract the first character of the symbol (` or ~)
-    let symbol_char = if let Some(c) = symbol.chars().next() {
-        c
-    } else {
-        // Fallback if symbol is empty (should never happen in practice)
-        return symbol.repeat(3);
-    };
-    
-    // Find the longest consecutive run of the symbol character in content
-    // Uses a fold with (max_count, current_count) tuple for single-pass O(n) efficiency
-    let max_consecutive = content
-        .chars()
-        .fold((0, 0), |(max, current), c| {
-            if c == symbol_char {
-                // Character matches: increment current run, update max
-                (max.max(current + 1), current + 1)
-            } else {
-                // Different character: reset current run to 0
-                (max, 0)
+    let symbol_char = symbol.chars().next().unwrap_or('`');
+
+    let mut max_consecutive: usize = 0;
+    let mut current: usize = 0;
+
+    for c in content.chars() {
+        if c == symbol_char {
+            current += 1;
+            if current > max_consecutive {
+                max_consecutive = current;
+                // Early termination - no need to scan further
+                if max_consecutive >= MAX_FENCE_LEN {
+                    break;
+                }
             }
-        })
-        .0;  // Extract the max count from the tuple
-    
-    // Use at least 3 characters (markdown standard minimum)
-    // but use more if needed to avoid collision
-    let fence_len = std::cmp::max(3, max_consecutive + 1);
+        } else {
+            current = 0;
+        }
+    }
+
+    // Minimum 3 (markdown standard), maximum MAX_FENCE_LEN, one more than found
+    let fence_len = (max_consecutive + 1).clamp(3, MAX_FENCE_LEN);
     symbol.repeat(fence_len)
 }
 

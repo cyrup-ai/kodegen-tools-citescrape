@@ -1,16 +1,22 @@
 //! Handler for <div> elements
 //!
 //! Provides specialized handling for:
+//! - Widget elements (social, cookie notices, ads) - filtered out
 //! - `<div class="expressive-code">` wrapper containers (Astro syntax highlighter)
 //! - Generic div elements with proper block spacing
 
-use html5ever::Attribute;
-
 use super::super::Element;
+use super::element_util::{get_attr, is_widget_element};
 use super::{HandlerResult, Handlers};
 use crate::serialize_if_faithful;
 
 pub(super) fn div_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    // Skip widget elements (social, cookie notices, ads)
+    // These are non-content elements that should not appear in markdown output
+    if is_widget_element(element.attrs) {
+        return None;
+    }
+
     // Check for expressive-code wrapper divs
     // These are the OUTER containers - the inner ec-line divs are handled by preprocessing
     // See: src/content_saver/markdown_converter/html_preprocessing/expressive_code.rs
@@ -35,13 +41,4 @@ pub(super) fn div_handler(handlers: &dyn Handlers, element: Element) -> Option<H
     }
 
     Some(format!("\n\n{}\n\n", content).into())
-}
-
-/// Get attribute value from element, filtering empty values
-fn get_attr(attrs: &[Attribute], name: &str) -> Option<String> {
-    attrs
-        .iter()
-        .find(|attr| &*attr.name.local == name)
-        .map(|attr| attr.value.to_string())
-        .filter(|v| !v.trim().is_empty())
 }

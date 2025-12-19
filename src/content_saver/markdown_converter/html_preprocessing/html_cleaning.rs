@@ -54,22 +54,12 @@ static IFRAME_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<iframe[^>]*>.*?</iframe>").expect("IFRAME_RE: hardcoded regex is valid")
 });
 
-static SOCIAL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<div[^>]*class="[^"]*(?:social|share|follow)[^"]*"[^>]*>.*?</div>"#)
-        .expect("SOCIAL_RE: hardcoded regex is valid")
-});
-
-static COOKIE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?s)<div[^>]*(?:id|class)="[^"]*(?:cookie|popup|modal|overlay)[^"]*"[^>]*>.*?</div>"#,
-    )
-    .expect("COOKIE_RE: hardcoded regex is valid")
-});
-
-static AD_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<div[^>]*(?:id|class)="[^"]*(?:ad-|ads-|advertisement)[^"]*"[^>]*>.*?</div>"#)
-        .expect("AD_RE: hardcoded regex is valid")
-});
+// NOTE: SOCIAL_RE, COOKIE_RE, AD_RE have been removed.
+// Widget filtering (social, cookie notices, ads) is now handled by htmd element handlers:
+// - src/content_saver/markdown_converter/htmd/element_handler/div.rs
+// - src/content_saver/markdown_converter/htmd/element_handler/section.rs
+// - src/content_saver/markdown_converter/htmd/element_handler/aside.rs
+// These handlers use is_widget_element() from element_util.rs to filter widget elements.
 
 // Matches elements with display:none in style attribute (supports single/double quotes)
 static HIDDEN_DISPLAY: LazyLock<Regex> = LazyLock::new(|| {
@@ -147,60 +137,6 @@ static IMG_TITLE_RE: LazyLock<Regex> = LazyLock::new(|| {
 // Special case: needs to be compiled for closure captures in details processing
 static SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<summary[^>]*>(.*?)</summary>").expect("SUMMARY_RE: hardcoded regex is valid")
-});
-
-/// Matches heading anchor links (Starlight/Astro documentation pattern)
-/// Removes anchor links with screen-reader text that appear after headings
-/// Pattern: <a class="sl-anchor-link">...</a> or similar variants
-static HEADING_ANCHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?s)<a[^>]*class="[^"]*(?:anchor-link|sl-anchor-link|heading-link)[^"]*"[^>]*>.*?</a>"#
-    ).expect("HEADING_ANCHOR_RE: hardcoded regex is valid")
-});
-
-/// Matches heading wrapper divs (Starlight/Astro documentation pattern)
-/// Unwraps wrapper divs that contain headings and anchor links
-/// Pattern: <div class="sl-heading-wrapper">...</div> or similar variants
-static HEADING_WRAPPER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?s)<div[^>]*class="[^"]*(?:heading-wrapper|sl-heading-wrapper)[^"]*"[^>]*>(.*?)</div>"#
-    ).expect("HEADING_WRAPPER_RE: hardcoded regex is valid")
-});
-
-// Matches permalink anchor links within headings (GitHub, Docusaurus, Jekyll, Eleventy style)
-// These anchors contain only permalink symbols: #, §, ¶ (and whitespace)
-// Examples:
-//   <a href="#section">#</a>
-//   <a href="#heading" class="anchor">§</a>
-//   <a href="#overview" aria-hidden="true">¶</a>
-static HEADING_ANCHOR_MARKERS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<a[^>]*href=["']#[^"']*["'][^>]*>\s*[#§¶]+\s*</a>"#)
-        .expect("HEADING_ANCHOR_MARKERS: hardcoded regex is valid")
-});
-
-/// Matches accessibility navigation anchor links with "Navigate to header" text
-/// These appear in various documentation sites as screen-reader navigation aids
-/// 
-/// Pattern: `(?s)<a[^>]*>\s*Navigate\s+to\s+header\s*</a>`
-/// 
-/// Matches:
-/// - `<a href="#section">Navigate to header</a>`
-/// - `<a href="#heading"> Navigate to header </a>` (leading/trailing spaces)
-/// - `<a href="#target">\n  Navigate\n  to\n  header\n</a>` (newlines and indentation)
-/// - `<a href="#overview">Navigate  to  header</a>` (multiple spaces between words)
-/// 
-/// Does NOT match:
-/// - `<a href="#section">Navigate header</a>` (missing "to")
-/// - `<a href="#section">Navigate to</a>` (incomplete text)
-/// - `<a href="#section">Please navigate to header</a>` (extra prefix text)
-/// 
-/// Whitespace handling:
-/// - `\s*` at start/end: Matches zero or more whitespace (spaces, newlines, tabs)
-/// - `\s+` between words: Matches one or more whitespace characters
-/// - `(?s)` flag: Enables dot-matches-newline mode (though not using dot here)
-static HEADING_NAVIGATE_TO_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<a[^>]*>\s*Navigate\s+to\s+header\s*</a>"#)
-        .expect("HEADING_NAVIGATE_TO_HEADER_RE: hardcoded regex is valid")
 });
 
 // ============================================================================
@@ -946,14 +882,9 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     // Remove iframes
     let result = IFRAME_RE.replace_all(&result, "");
 
-    // Remove social media widgets and buttons
-    let result = SOCIAL_RE.replace_all(&result, "");
-
-    // Remove cookie notices and popups
-    let result = COOKIE_RE.replace_all(&result, "");
-
-    // Remove ads
-    let result = AD_RE.replace_all(&result, "");
+    // NOTE: Social media widgets, cookie notices, and ads are now filtered
+    // by htmd element handlers (div.rs, section.rs, aside.rs) instead of regex.
+    // See is_widget_element() in element_util.rs for the filtering logic.
 
     // Remove hidden elements (multiple patterns for comprehensive matching)
     let result = HIDDEN_DISPLAY.replace_all(&result, "");
@@ -965,23 +896,6 @@ pub fn clean_html_content(html: &str) -> Result<String> {
     let result = EMPTY_PRE_CODE.replace_all(&result, "");
     let result = EMPTY_PRE.replace_all(&result, "");
     let result = EMPTY_CODE.replace_all(&result, "");
-
-    // Remove permalink anchor markers from headings (GitHub, Docusaurus, Jekyll, Eleventy)
-    // These are visual indicators for deep linking, not content
-    // Must happen before html2md conversion to prevent "## # Heading" duplication
-    let result = HEADING_ANCHOR_MARKERS.replace_all(&result, "");
-
-    // Remove "Navigate to header" accessibility links (Issue #007)
-    // These appear as literal text in anchor elements for screen reader navigation
-    // Must be removed before htmd conversion to prevent markdown link duplication
-    // Pattern: <a ...>Navigate to header</a>
-    let result = HEADING_NAVIGATE_TO_HEADER_RE.replace_all(&result, "");
-
-    // Unwrap heading wrapper divs (must be done before removing anchors)
-    let result = HEADING_WRAPPER_RE.replace_all(&result, "$1");
-
-    // Remove heading anchor links
-    let result = HEADING_ANCHOR_RE.replace_all(&result, "");
 
     // Handle HTML5 details/summary elements by extracting their content
     // These don't convert well to markdown

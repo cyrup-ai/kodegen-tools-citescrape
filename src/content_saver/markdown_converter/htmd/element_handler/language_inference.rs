@@ -2,11 +2,33 @@
 //!
 //! Weighted pattern scoring language detection inspired by GitHub Linguist
 //! and highlight.js. Uses pattern categorization with confidence thresholds.
+//!
+//! Performance optimizations:
+//! - Quick literal detection for definitive markers (O(1) on small prefix)
+//! - First-line analysis for shebangs and declarations
+//! - Representative sampling for large files (>50KB)
+//! - Early termination when high-confidence match found
 
 use once_cell::sync::Lazy;
 use regex::{Regex, RegexSet};
 
 use super::language_patterns::ALL_LANGUAGES;
+
+// ============================================================================
+// Performance Tuning Constants
+// ============================================================================
+
+/// Size limit for quick detection prefix scan (bytes)
+const QUICK_DETECT_PREFIX_SIZE: usize = 500;
+
+/// Threshold above which we sample instead of full scan (bytes)
+const SAMPLE_THRESHOLD: usize = 50_000; // 50KB
+
+/// Sample size from start of file (bytes)
+const HEAD_SAMPLE_SIZE: usize = 20_000; // 20KB
+
+/// Sample size from end of file (bytes)
+const TAIL_SAMPLE_SIZE: usize = 10_000; // 10KB
 
 // ============================================================================
 // Data Structures for Weighted Scoring
@@ -146,33 +168,151 @@ pub fn extract_language_from_class(class: &str) -> Option<String> {
     None
 }
 
-/// Main entry point for language inference from code content
-/// 
-/// Uses weighted pattern scoring to detect programming language.
-/// Returns None if confidence is too low or no patterns match.
-pub fn infer_language_from_content(code: &str) -> Option<String> {
-    // Skip empty or very short code (need enough context)
-    let trimmed = code.trim();
-    if trimmed.len() < 5 {
-        return None;
+// ============================================================================
+// Staged Detection Functions (Performance Optimization)
+// ============================================================================
+
+/// Get a safe UTF-8 prefix of a string up to max_bytes.
+/// Finds the largest valid char boundary at or before max_bytes.
+fn safe_prefix(s: &str, max_bytes: usize) -> &str {
+    if max_bytes >= s.len() {
+        return s;
     }
-    
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// O(1) checks for definitive language markers in first 500 bytes.
+/// Returns immediately on first match - no regex overhead.
+fn quick_literal_detection(code: &str) -> Option<&'static str> {
+    // Only check first 500 bytes for speed (safe UTF-8 boundary)
+    let prefix = safe_prefix(code, QUICK_DETECT_PREFIX_SIZE);
+
+    // Shebangs - definitive markers
+    if prefix.starts_with("#!/bin/bash") || prefix.starts_with("#!/usr/bin/env bash") {
+        return Some("bash");
+    }
+    if prefix.starts_with("#!/bin/sh") || prefix.starts_with("#!/usr/bin/env sh") {
+        return Some("sh");
+    }
+    if prefix.starts_with("#!/usr/bin/env python") || prefix.starts_with("#!/usr/bin/python") {
+        return Some("python");
+    }
+    if prefix.starts_with("#!/usr/bin/env node") {
+        return Some("javascript");
+    }
+    if prefix.starts_with("#!/usr/bin/env ruby") || prefix.starts_with("#!/usr/bin/ruby") {
+        return Some("ruby");
+    }
+
+    // Rust-unique patterns
+    if prefix.contains("fn main()") && (prefix.contains("println!") || prefix.contains("let ")) {
+        return Some("rust");
+    }
+    if prefix.contains("#[derive(") || (prefix.contains("impl ") && prefix.contains(" for ")) {
+        return Some("rust");
+    }
+
+    // Go-unique patterns
+    if prefix.contains("package main") && prefix.contains("func ") {
+        return Some("go");
+    }
+
+    // HTML/XML markers
+    if prefix.contains("<!DOCTYPE html") || prefix.starts_with("<html") {
+        return Some("html");
+    }
+    if prefix.starts_with("<?xml") {
+        return Some("xml");
+    }
+
+    None
+}
+
+/// Check first line for language indicators (shebangs, declarations)
+fn first_line_detection(code: &str) -> Option<&'static str> {
+    let first_line = match code.lines().next() {
+        Some(line) => line.trim(),
+        None => return None,
+    };
+
+    // TOML sections
+    if first_line == "[package]" || first_line == "[dependencies]" || first_line == "[workspace]" {
+        return Some("toml");
+    }
+
+    // YAML document marker - check second line for confirmation
+    if first_line == "---"
+        && let Some(second) = code.lines().nth(1)
+        && second.contains(": ")
+        && !second.trim_start().starts_with('{')
+    {
+        return Some("yaml");
+    }
+
+    // JSON detection - object or array at start
+    if first_line.starts_with('{') || first_line.starts_with('[') {
+        let trimmed = code.trim();
+        // Quick JSON validation: starts with { or [ and ends with } or ]
+        if (trimmed.ends_with('}') || trimmed.ends_with(']')) && trimmed.contains("\":") {
+            return Some("json");
+        }
+    }
+
+    // Dockerfile
+    if first_line.starts_with("FROM ") && (code.contains("RUN ") || code.contains("COPY ")) {
+        return Some("dockerfile");
+    }
+
+    None
+}
+
+/// Create a representative sample for large files.
+/// Most language signatures are at the top (imports, declarations).
+fn create_representative_sample(code: &str) -> String {
+    let len = code.len();
+    if len <= SAMPLE_THRESHOLD {
+        return code.to_string();
+    }
+
+    // Find line boundaries to avoid cutting mid-line
+    let head_end = code[..HEAD_SAMPLE_SIZE.min(len)]
+        .rfind('\n')
+        .unwrap_or(HEAD_SAMPLE_SIZE.min(len));
+
+    let tail_start_approx = len.saturating_sub(TAIL_SAMPLE_SIZE);
+    let tail_start = code[tail_start_approx..]
+        .find('\n')
+        .map(|i| tail_start_approx + i + 1)
+        .unwrap_or(tail_start_approx);
+
+    // Combine head and tail with separator
+    format!("{}\n...\n{}", &code[..head_end], &code[tail_start..])
+}
+
+/// Run full regex-based scoring against all languages.
+/// Called after quick checks fail.
+fn score_all_languages(code: &str) -> Option<String> {
     // Calculate scores for all languages
-    let mut scores: Vec<(&str, i32)> = COMPILED_LANGUAGES.iter()
-        .map(|lang| (lang.name, lang.score(trimmed)))
+    let mut scores: Vec<(&str, i32)> = COMPILED_LANGUAGES
+        .iter()
+        .map(|lang| (lang.name, lang.score(code)))
         .filter(|(_, score)| *score > 0)
         .collect();
-    
+
     // Sort by score descending
     scores.sort_by(|a, b| b.1.cmp(&a.1));
-    
+
     // No matches above 0
     if scores.is_empty() {
         return None;
     }
-    
+
     let (winner_lang, winner_score) = scores[0];
-    
+
     // Determine confidence level
     let confidence = match winner_score {
         s if s >= 20 => Confidence::High,
@@ -180,23 +320,21 @@ pub fn infer_language_from_content(code: &str) -> Option<String> {
         s if s >= 5 => Confidence::Low,
         _ => Confidence::None,
     };
-    
+
     // For Medium/Low confidence, require meaningful margin over second place
     if scores.len() > 1 && confidence != Confidence::High {
         let second_score = scores[1].1;
         let margin = winner_score - second_score;
-        
-        // Need at least 30% margin for confident detection
+
         let margin_ratio = if winner_score > 0 {
             margin as f32 / winner_score as f32
         } else {
             0.0
         };
-        
+
         if margin_ratio < 0.3 {
             match confidence {
                 Confidence::Medium => {
-                    // Still return if score is reasonable
                     if winner_score >= 10 {
                         return Some(winner_lang.to_string());
                     }
@@ -207,12 +345,48 @@ pub fn infer_language_from_content(code: &str) -> Option<String> {
             }
         }
     }
-    
+
     if confidence == Confidence::None {
         None
     } else {
         Some(winner_lang.to_string())
     }
+}
+
+/// Main entry point for language inference from code content.
+///
+/// Uses staged detection for optimal performance:
+/// 1. Quick literal checks (O(1) on first 500 bytes)
+/// 2. First-line analysis (O(1))
+/// 3. Sampling for large content (reduces O(n) to O(30KB))
+/// 4. Full weighted scoring on sample
+pub fn infer_language_from_content(code: &str) -> Option<String> {
+    let trimmed = code.trim();
+
+    // Skip empty or very short code
+    if trimmed.len() < 5 {
+        return None;
+    }
+
+    // Stage 1: Quick literal checks (O(1) on first 500 bytes)
+    if let Some(lang) = quick_literal_detection(trimmed) {
+        return Some(lang.to_string());
+    }
+
+    // Stage 2: First-line analysis
+    if let Some(lang) = first_line_detection(trimmed) {
+        return Some(lang.to_string());
+    }
+
+    // Stage 3: Create sample for large files
+    let sample = if trimmed.len() > SAMPLE_THRESHOLD {
+        create_representative_sample(trimmed)
+    } else {
+        trimmed.to_string()
+    };
+
+    // Stage 4: Full weighted scoring on sample
+    score_all_languages(&sample)
 }
 
 /// Check if content contains shell-specific patterns
@@ -243,6 +417,23 @@ fn has_shell_patterns(content: &str) -> bool {
         Regex::new(r"(?m)^\s*export\s+[A-Z_][A-Z_0-9]*=").expect("Invalid shell export regex")
     });
 
+    // Shell pipe detection - pipe followed by common shell utilities
+    static SHELL_PIPE_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"\|\s*(grep|awk|sed|cut|sort|uniq|head|tail|wc|less|more|tee|xargs|tr|cat|bash|sh|zsh|perl|ruby|python)\b"
+        ).expect("Invalid shell pipe regex")
+    });
+    
+    // Markdown table detection - lines that start and end with |
+    static MARKDOWN_TABLE_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?m)^\s*\|.*\|\s*$").expect("Invalid markdown table regex")
+    });
+    
+    // Table separator detection
+    static TABLE_SEPARATOR_REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\|[\s-]*\|").expect("Invalid table separator regex")
+    });
+
     // Check for shell commands at line start (works with or without spaces)
     if SHELL_COMMAND_REGEX.is_match(content) {
         return true;
@@ -264,20 +455,55 @@ fn has_shell_patterns(content: &str) -> bool {
     }
 
     // Check for shell-specific syntax patterns
-    // Detect operators WITHOUT spaces since HTML collapse is the bug we're fixing
     if content.contains("#!/bin/bash")
         || content.contains("#!/bin/sh")
         || content.contains("#!/usr/bin/env bash")
         || content.contains("#!/usr/bin/env sh")
-        || content.contains('|')        // DETECT PIPE WITHOUT SPACES
-        || content.contains("&&")       // DETECT AND WITHOUT SPACES
-        || content.contains(">>")       // DETECT APPEND WITHOUT SPACES
         || content.contains("$HOME")
         || content.contains("$PATH")
         || content.contains("${")
         || content.contains("2>&1")
+        || content.contains(">/dev/null")
+        || content.contains(">>")       // Append redirection
     {
         return true;
+    }
+    
+    // Smart pipe detection - only match shell-style pipes
+    // First exclude markdown tables
+    if content.contains('|') {
+        // If it looks like a markdown table, don't treat as shell
+        if MARKDOWN_TABLE_REGEX.is_match(content) || TABLE_SEPARATOR_REGEX.is_match(content) {
+            // Don't flag as shell based on pipe alone
+        } else if SHELL_PIPE_REGEX.is_match(content) {
+            // Pipe followed by shell utility = definitely shell
+            return true;
+        }
+        // Otherwise, pipe alone is not enough evidence
+    }
+    
+    // Smart && detection - only match shell-style usage
+    // Shell && typically appears after commands or at line boundaries
+    // JS/TS && appears in expressions like (a && b) or a && b ? x : y
+    if content.contains("&&") {
+        // Check if it looks like shell command chaining (command && command)
+        // vs JS/TS logical AND (within expressions)
+        static SHELL_AND_REGEX: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?m)^\s*\w+.*&&\s*\w+").expect("Invalid shell AND regex")
+        });
+        
+        // Only flag as shell if && looks like command chaining
+        // Exclude if it looks like JS/TS expression
+        if !content.contains("if ") 
+            && !content.contains("if(")
+            && !content.contains("while ")
+            && !content.contains("while(")
+            && !content.contains(" ? ")
+            && !content.contains("return ")
+            && SHELL_AND_REGEX.is_match(content) 
+        {
+            return true;
+        }
     }
 
     false
