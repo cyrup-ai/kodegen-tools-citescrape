@@ -56,6 +56,7 @@ pub fn resolve_url(base_url: &str, url: &str) -> Result<String> {
 /// compared to three separate parse/serialize cycles (from ~200ms to ~70ms).
 pub fn apply_all_replacements(
     html: String,
+    base_url: &str,
     css_replacements: Vec<(String, String)>,
     image_replacements: Vec<(String, String)>,
     svg_replacements: Vec<(String, String)>,
@@ -89,22 +90,30 @@ pub fn apply_all_replacements(
             let node = node_ref.as_node();
             let attrs = node_ref.attributes.borrow();
 
-            if let Some(href) = attrs.get("href")
-                && let Some(css_content) = css_map.get(href)
-            {
-                // Create style element with CSS content
-                let style_html = format!("<style type=\"text/css\">\n{css_content}\n</style>");
-                let style_fragment = kuchiki::parse_html().one(style_html);
+            if let Some(href) = attrs.get("href") {
+                // Resolve relative href to absolute URL before lookup
+                match resolve_url(base_url, href) {
+                    Ok(absolute_href) => {
+                        if let Some(css_content) = css_map.get(&absolute_href) {
+                            // Create style element with CSS content
+                            let style_html = format!("<style type=\"text/css\">\n{css_content}\n</style>");
+                            let style_fragment = kuchiki::parse_html().one(style_html);
 
-                // Insert style element before link
-                for child in style_fragment.children() {
-                    node.insert_before(child);
+                            // Insert style element before link
+                            for child in style_fragment.children() {
+                                node.insert_before(child);
+                            }
+
+                            // Remove link element
+                            node.detach();
+
+                            log::debug!("Replaced CSS link with inline style: {href} (resolved to {absolute_href})");
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to resolve CSS href '{href}' against base '{base_url}': {e}");
+                    }
                 }
-
-                // Remove link element
-                node.detach();
-
-                log::debug!("Replaced CSS link with inline style: {href}");
             }
         }
     }
@@ -133,28 +142,36 @@ pub fn apply_all_replacements(
             };
 
             if let Some(src) = src_value {
-                // Check for SVG replacement first (replaces entire img element)
-                if let Some(svg_content) = svg_map.get(&src) {
-                    // Parse SVG content as HTML fragment
-                    let svg_fragment = kuchiki::parse_html().one(svg_content.clone());
+                // Resolve relative src to absolute URL before lookup
+                match resolve_url(base_url, &src) {
+                    Ok(absolute_src) => {
+                        // Check for SVG replacement first (replaces entire img element)
+                        if let Some(svg_content) = svg_map.get(&absolute_src) {
+                            // Parse SVG content as HTML fragment
+                            let svg_fragment = kuchiki::parse_html().one(svg_content.clone());
 
-                    // Insert SVG children before img element
-                    for child in svg_fragment.children() {
-                        node.insert_before(child);
+                            // Insert SVG children before img element
+                            for child in svg_fragment.children() {
+                                node.insert_before(child);
+                            }
+
+                            // Remove original img element
+                            node.detach();
+
+                            log::debug!("Replaced img tag with inline SVG: {src} (resolved to {absolute_src})");
+                        }
+                        // Otherwise check for image src replacement (updates src attribute)
+                        else if let Some(data_url) = img_map.get(&absolute_src) {
+                            // Update src attribute to data URL
+                            let mut attrs = node_ref.attributes.borrow_mut();
+                            attrs.insert("src", data_url.clone());
+
+                            log::debug!("Replaced image src with data URL: {src} (resolved to {absolute_src})");
+                        }
                     }
-
-                    // Remove original img element
-                    node.detach();
-
-                    log::debug!("Replaced img tag with inline SVG: {src}");
-                }
-                // Otherwise check for image src replacement (updates src attribute)
-                else if let Some(data_url) = img_map.get(&src) {
-                    // Update src attribute to data URL
-                    let mut attrs = node_ref.attributes.borrow_mut();
-                    attrs.insert("src", data_url.clone());
-
-                    log::debug!("Replaced image src with data URL: {src}");
+                    Err(e) => {
+                        log::warn!("Failed to resolve image src '{src}' against base '{base_url}': {e}");
+                    }
                 }
             }
         }

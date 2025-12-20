@@ -88,6 +88,7 @@ pub async fn inline_all_resources(
     // This eliminates the performance bottleneck of parsing/serializing 3 times
     let html = super::utils::apply_all_replacements(
         html_content,
+        &base_url,
         css_replacements,
         image_replacements,
         svg_replacements,
@@ -366,6 +367,7 @@ pub async fn inline_resources_from_info(
     // This eliminates the performance bottleneck of parsing/serializing 3 times
     let html = super::utils::apply_all_replacements(
         html,
+        &base_url,
         css_replacements,
         image_replacements,
         svg_replacements,

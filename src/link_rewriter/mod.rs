@@ -166,9 +166,11 @@ impl LinkRewriter {
         let mut url_to_relative: HashMap<String, String> = HashMap::new();
 
         for url in destinations {
-            if let Some(dest_path) = self.index.get_local_path(url).await?
-                && let Some(relative) = compute_relative_path(file_path, &dest_path)
-            {
+            // FIX: Compute dest_path using get_mirror_path() instead of reading from DB
+            // This ensures BOTH paths use the SAME function with SAME output_dir, guaranteeing type consistency
+            let dest_path = crate::utils::get_mirror_path(url, &self.output_dir, "index.html").await?;
+            
+            if let Some(relative) = compute_relative_path(file_path, &dest_path) {
                 url_to_relative.insert(url.clone(), relative);
             }
         }
@@ -206,11 +208,15 @@ async fn rewrite_single_link(
     source_url: &str,
     source_path: &Path,
     target_url: &str,
-    target_local: &Path,
-    _index: &LinkIndex,
+    _target_local: &Path,
+    index: &LinkIndex,
 ) -> Result<()> {
-    let relative = compute_relative_path(source_path, target_local)
-        .ok_or_else(|| anyhow!("Cannot compute relative path from {:?} to {:?}", source_path, target_local))?;
+    // FIX: Compute target path using get_mirror_path() for consistency
+    // The target_local parameter is now unused but kept for API compatibility
+    let target_path = crate::utils::get_mirror_path(target_url, index.output_dir(), "index.html").await?;
+    
+    let relative = compute_relative_path(source_path, &target_path)
+        .ok_or_else(|| anyhow!("Cannot compute relative path from {:?} to {:?}", source_path, target_path))?;
 
     let html = tokio::fs::read_to_string(source_path)
         .await
