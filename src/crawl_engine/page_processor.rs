@@ -808,6 +808,7 @@ pub async fn process_single_page(
     // This happens AFTER HTML is saved to disk (in extract_page_data)
     if ctx.config.save_raw_html() {
         // Get the local path where HTML was saved
+        // storage_dir is guaranteed absolute by CrawlConfigBuilder
         if let Ok(local_path) = crate::utils::get_mirror_path(&item.url, &ctx.config.storage_dir, "index.html").await {
             // Extract outbound links from the HTML content
             let outbound_links = crate::link_rewriter::extract_links_from_html(&page_data.content, &item.url);

@@ -6,7 +6,7 @@
 use crate::utils::{
     DEFAULT_CRAWL_RATE_RPS, DEFAULT_MAX_DEPTH, SCREENSHOT_QUALITY, SEARCH_BATCH_SIZE,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use std::marker::PhantomData;
 use std::path::PathBuf;
@@ -272,10 +272,22 @@ impl CrawlConfigBuilder<WithStartUrl> {
         #[cfg(debug_assertions)]
         let headless = self.headless;
 
+        // Normalize storage_dir to absolute path for consistent path operations
+        // This ensures LinkIndex, LinkRewriter, and all other consumers get absolute paths
+        let storage_dir = self
+            .storage_dir
+            .ok_or_else(|| anyhow!("storage_dir is required"))?;
+
+        let storage_dir = if storage_dir.is_absolute() {
+            storage_dir
+        } else {
+            std::env::current_dir()
+                .context("Failed to get current directory for storage_dir normalization")?
+                .join(storage_dir)
+        };
+
         Ok(CrawlConfig {
-            storage_dir: self
-                .storage_dir
-                .ok_or_else(|| anyhow!("storage_dir is required"))?,
+            storage_dir,
             start_url: self
                 .start_url
                 .ok_or_else(|| anyhow!("start_url is required"))?,

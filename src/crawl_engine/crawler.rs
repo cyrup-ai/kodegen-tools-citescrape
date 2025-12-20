@@ -50,6 +50,7 @@ impl ChromiumoxideCrawler {
         );
 
         // Create LinkRewriter with the index
+        // storage_dir is guaranteed absolute by CrawlConfigBuilder
         let link_rewriter = LinkRewriter::new(link_index, config.storage_dir().to_path_buf());
 
         let chrome_data_dir_path =

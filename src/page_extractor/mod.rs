@@ -6,7 +6,6 @@
 // Sub-modules
 pub mod extractors;
 pub mod js_scripts;
-pub mod link_rewriter;
 pub mod page_data;
 pub mod schema;
 

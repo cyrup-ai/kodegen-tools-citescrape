@@ -10,6 +10,11 @@ use std::sync::Arc;
 /// Main configuration struct for web crawling operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawlConfig {
+    /// Storage directory for crawled content.
+    ///
+    /// **INVARIANT:** Always an absolute path (normalized in builder).
+    /// This ensures consistent path operations across LinkIndex, LinkRewriter,
+    /// and all content saving operations.
     pub(crate) storage_dir: PathBuf,
     pub(crate) only_html: bool,
     pub(crate) full_resources: bool,

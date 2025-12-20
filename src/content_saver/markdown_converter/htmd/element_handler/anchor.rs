@@ -85,6 +85,35 @@ fn is_heading_anchor_link(attrs: &[Attribute], node: &Rc<Node>) -> bool {
         && text_trimmed.chars().all(is_invisible_unicode)
 }
 
+/// Check if an anchor element is a skip navigation link.
+///
+/// Skip navigation links (WCAG 2.4.1: Bypass Blocks) allow keyboard/screen
+/// reader users to bypass repetitive navigation. They are UI chrome, not
+/// document content, and should be filtered from markdown output.
+///
+/// Detection uses EXACT text matching of WCAG-standardized phrases because
+/// modern frameworks (Astro, Next.js, Tailwind) use auto-generated class
+/// names with no semantic meaning.
+///
+/// Example that this catches:
+/// ```html
+/// <a class="astro-7q3lir66" href="index.html">Skip to content</a>
+/// ```
+fn is_skip_navigation_link(node: &Rc<Node>) -> bool {
+    let text = get_anchor_text_content(node);
+    let text_lower = text.trim().to_lowercase();
+    
+    matches!(text_lower.as_str(),
+        "skip to content" |
+        "skip to main content" |
+        "skip navigation" |
+        "skip to main" |
+        "jump to content" |
+        "jump to main content" |
+        "jump to main"
+    )
+}
+
 /// Get text content of an anchor node (recursive).
 ///
 /// Filters out invisible Unicode characters during collection to get
@@ -146,6 +175,12 @@ impl ElementHandler for AnchorElementHandler {
         
         // Skip heading permalink/anchor links
         if is_heading_anchor_link(element.attrs, element.node) {
+            return Some("".into());
+        }
+        
+        // Skip navigation links - detect by text content since modern frameworks
+        // (Astro, Next.js) use auto-generated class names like "astro-7q3lir66"
+        if is_skip_navigation_link(element.node) {
             return Some("".into());
         }
         

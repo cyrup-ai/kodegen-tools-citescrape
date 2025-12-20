@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use lol_html::{HtmlRewriter, Settings, element};
 use tokio::sync::Semaphore;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 
 use crate::link_index::{LinkIndex, normalize_url};
 
@@ -190,6 +191,30 @@ impl LinkRewriter {
             tokio::fs::write(file_path, rewritten)
                 .await
                 .context("Failed to write rewritten HTML")?;
+            
+            // RESTORE: Markdown link rewriting (broken in original implementation)
+            // HTML and markdown share directory: /path/page/index.{html,md}
+            let md_path = file_path.with_extension("md");
+            if md_path.exists() {
+                match rewrite_links_in_markdown(&md_path, &url_to_relative).await {
+                    Ok(md_count) if md_count > 0 => {
+                        log::debug!(
+                            "Markdown link rewriting: {} links rewritten in {:?}",
+                            md_count,
+                            md_path
+                        );
+                    }
+                    Ok(_) => {}, // No markdown links needed rewriting
+                    Err(e) => {
+                        log::warn!(
+                            "Markdown link rewriting failed for {:?}: {}",
+                            md_path,
+                            e
+                        );
+                        // Non-fatal: HTML is rewritten, markdown rewrite is best-effort
+                    }
+                }
+            }
         }
 
         Ok(count)
@@ -223,7 +248,7 @@ async fn rewrite_single_link(
         .context("Failed to read source file")?;
 
     let mut url_map = HashMap::new();
-    url_map.insert(normalize_url(target_url), relative);
+    url_map.insert(normalize_url(target_url), relative.clone());
 
     let (rewritten, count) = rewrite_links_in_html(&html, source_url, &url_map)?;
 
@@ -231,6 +256,24 @@ async fn rewrite_single_link(
         tokio::fs::write(source_path, rewritten)
             .await
             .context("Failed to write rewritten source file")?;
+        
+        // RESTORE: Retroactive markdown inbound link updates
+        // When page B is saved, update all pages that link TO page B (including markdown)
+        let md_path = source_path.with_extension("md");
+        if md_path.exists() {
+            // Build single-entry map for this specific link update
+            let mut md_url_map = HashMap::new();
+            md_url_map.insert(normalize_url(target_url), relative.clone());
+            
+            // Non-blocking: failure to update markdown is logged but not fatal
+            if let Err(e) = rewrite_links_in_markdown(&md_path, &md_url_map).await {
+                log::warn!(
+                    "Retroactive markdown link update failed for {:?}: {}",
+                    md_path,
+                    e
+                );
+            }
+        }
     }
 
     Ok(())
@@ -309,6 +352,98 @@ fn rewrite_links_in_html(
     let count = rewrite_count.load(std::sync::atomic::Ordering::Relaxed);
 
     Ok((result, count))
+}
+
+/// Restore markdown link rewriting via constant-space streaming I/O.
+///
+/// Architecture:
+/// - Reads file line-by-line with O(1) memory footprint
+/// - Deterministic pattern matching without regex backtracking
+/// - Atomic file replacement via POSIX rename(2) syscall
+/// - Non-blocking async I/O maintains event loop responsiveness
+///
+/// # Arguments
+/// * `file_path` - Path to markdown file requiring link rewriting
+/// * `url_to_relative` - Map of normalized URL → relative path (reused from HTML rewriting)
+///
+/// # Returns
+/// Number of links successfully rewritten
+///
+/// # Guarantees
+/// - Memory usage bounded by single line length (typically < 1KB)
+/// - Crash-safe: original file unchanged until atomic rename
+/// - Idempotent: can be called multiple times safely
+async fn rewrite_links_in_markdown(
+    file_path: &Path,
+    url_to_relative: &HashMap<String, String>,
+) -> Result<usize> {
+    use tokio::fs::File;
+    
+    // Open input file for streaming read
+    let input_file = File::open(file_path).await
+        .context("Failed to open markdown file for reading")?;
+    let reader = BufReader::new(input_file);
+    
+    // Create temporary output file for atomic replacement
+    let temp_path = file_path.with_extension("md.tmp");
+    let output_file = File::create(&temp_path).await
+        .context("Failed to create temporary markdown file")?;
+    let mut writer = BufWriter::new(output_file);
+    
+    let mut rewrite_count = 0;
+    let mut lines = reader.lines();
+    
+    // Stream through file one line at a time (O(1) memory)
+    while let Some(line_result) = lines.next_line().await? {
+        let mut line = line_result;
+        
+        // Check each known URL for matches in current line
+        for (url, html_relative) in url_to_relative {
+            // Transform HTML path to markdown path
+            // Examples:
+            //   overview/index.html → overview/index.md
+            //   ../docs/guide.html → ../docs/guide.md
+            let md_relative = html_relative
+                .replace("/index.html", "/index.md")
+                .replace(".html", ".md");
+            
+            // Pattern 1: Standard markdown link ](url)
+            let pattern = format!("]({})", url);
+            let replacement = format!("]({})", md_relative);
+            if line.contains(&pattern) {
+                line = line.replace(&pattern, &replacement);
+                rewrite_count += 1;
+            }
+            
+            // Pattern 2: Titled markdown link ](url "title") or ](url 'title')
+            // Handle space-prefixed patterns to catch titled links
+            let pattern_space = format!("]({} ", url);
+            let replacement_space = format!("]({} ", md_relative);
+            if line.contains(&pattern_space) {
+                line = line.replace(&pattern_space, &replacement_space);
+                // Don't increment count - same logical link, different syntax
+            }
+        }
+        
+        // Write rewritten line to temporary file
+        writer.write_all(line.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+    
+    // Flush buffer to ensure all data written
+    writer.flush().await?;
+    drop(writer);  // Explicit close before rename
+    
+    // Atomic file replacement (crash-safe)
+    if rewrite_count > 0 {
+        tokio::fs::rename(&temp_path, file_path).await
+            .context("Failed to atomically replace markdown file")?;
+    } else {
+        // No rewrites performed - cleanup temporary file
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+    
+    Ok(rewrite_count)
 }
 
 /// Extract all HTTP/HTTPS links from HTML.
