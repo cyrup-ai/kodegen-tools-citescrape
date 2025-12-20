@@ -191,6 +191,30 @@ fn is_document_whitespace(c: char) -> bool {
     matches!(c, '\t' | '\n' | '\r' | ' ')
 }
 
+/// Check if a character is an invisible Unicode character.
+///
+/// Invisible Unicode characters should be stripped from markdown output
+/// to prevent malformed syntax, especially in heading anchor links.
+///
+/// Covers:
+/// - Zero-width spaces (U+200B, U+200C, U+200D)
+/// - Zero-width no-break space / BOM (U+FEFF)
+/// - Word joiner (U+2060)
+/// - Mongolian vowel separator (U+180E, deprecated)
+/// - Soft hyphen (U+00AD)
+#[inline]
+pub(crate) fn is_invisible_unicode(c: char) -> bool {
+    matches!(c,
+        '\u{200B}' |  // Zero-width space (ZWSP)
+        '\u{200C}' |  // Zero-width non-joiner (ZWNJ)
+        '\u{200D}' |  // Zero-width joiner (ZWJ)
+        '\u{FEFF}' |  // Zero-width no-break space (BOM)
+        '\u{2060}' |  // Word joiner
+        '\u{180E}' |  // Mongolian vowel separator
+        '\u{00AD}'    // Soft hyphen
+    )
+}
+
 pub(crate) fn indent_text_except_first_line(
     text: &str,
     indent: usize,

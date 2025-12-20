@@ -8,9 +8,20 @@ pub(super) fn emphasis_handler(
     marker: &str,
 ) -> Option<HandlerResult> {
     serialize_if_faithful!(handlers, element, 0);
-    let content = handlers.walk_children(element.node, element.is_pre).content;
+    
+    // Try standard handler approach first
+    let mut content = handlers.walk_children(element.node, element.is_pre).content;
+    
+    // FALLBACK: If walk_children returns empty but element has text content,
+    // extract it directly from the DOM. This handles cases where the element
+    // hasn't been properly traversed yet (e.g., in list_processing context).
     if content.is_empty() {
-        return None;
+        let raw_text = extract_element_text_content(element.node);
+        if !raw_text.trim().is_empty() {
+            content = raw_text;
+        } else {
+            return None;  // Truly empty element
+        }
     }
     // Note: this is whitespace, NOT document whitespace, per the
     // [Commonmark spec](https://spec.commonmark.org/0.31.2/#emphasis-and-strong-emphasis).
@@ -47,4 +58,25 @@ pub(super) fn emphasis_handler(
         trailing_whitespace.unwrap_or("")
     );
     Some(content.into())
+}
+
+/// Extract text content directly from element's DOM tree
+///
+/// Bypasses the handler system for recovery when walk_children() fails.
+/// This is a fallback mechanism to ensure text content is never lost due to
+/// handler traversal issues.
+fn extract_element_text_content(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> String {
+    use markup5ever_rcdom::NodeData;
+    
+    match &node.data {
+        NodeData::Text { contents } => contents.borrow().to_string(),
+        NodeData::Element { .. } => {
+            let mut text = String::new();
+            for child in node.children.borrow().iter() {
+                text.push_str(&extract_element_text_content(child));
+            }
+            text
+        }
+        _ => String::new(),
+    }
 }

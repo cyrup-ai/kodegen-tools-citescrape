@@ -47,6 +47,9 @@ pub(crate) fn walk_node(
                 // Handle other elements - start with borrowed, allocate only if needed
                 let text = escape_if_needed(Cow::Borrowed(text));
                 let text = compress_whitespace(&text);
+                
+                // UI chrome filtering happens at element level via is_widget_element()
+                // Text nodes inside semantic content elements (h1-h6, p, li) are content
 
                 // Use starts_with/ends_with instead of iterator methods
                 if trim_leading_spaces || (text.starts_with(' ') && buffer.ends_with(' ')) {

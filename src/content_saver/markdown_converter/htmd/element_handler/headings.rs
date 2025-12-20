@@ -8,6 +8,7 @@ use markup5ever_rcdom::{Node, NodeData};
 use super::super::{Element, text_util::TrimDocumentWhitespace};
 use super::{HandlerResult, Handlers};
 use crate::serialize_if_faithful;
+use super::super::text_util::is_invisible_unicode;
 
 // ============================================================================
 // Permalink Anchor Detection
@@ -69,6 +70,14 @@ fn is_permalink_anchor(node: &Rc<Node>) -> bool {
         return true;
     }
     
+    // Check if anchor text contains only invisible Unicode characters
+    // This catches anchors like <a href="#id">​</a> where ​ is U+200B
+    let has_only_invisible = !text_trimmed.is_empty() 
+        && text_trimmed.chars().all(is_invisible_unicode);
+    if has_only_invisible {
+        return true;
+    }
+    
     // "Navigate to header" accessibility text (case-insensitive)
     let text_lower = text_trimmed.to_lowercase();
     // Normalize whitespace for comparison
@@ -119,10 +128,18 @@ fn get_text_content(node: &Rc<Node>) -> String {
 }
 
 /// Recursively collect text content from a node tree.
+///
+/// Strips invisible Unicode characters during collection to prevent
+/// them from appearing in the final markdown output.
 fn collect_text(node: &Rc<Node>, buffer: &mut String) {
     match &node.data {
         NodeData::Text { contents } => {
-            buffer.push_str(&contents.borrow());
+            // Filter out invisible Unicode characters during text extraction
+            let text: String = contents.borrow()
+                .chars()
+                .filter(|c| !is_invisible_unicode(*c))
+                .collect();
+            buffer.push_str(&text);
         }
         NodeData::Element { .. } => {
             for child in node.children.borrow().iter() {

@@ -2,11 +2,23 @@ use cssparser::{Parser, ParserInput, Token};
 use html5ever::Attribute;
 use markup5ever_rcdom::NodeData;
 
-use super::super::{Element, text_util::{StripWhitespace, concat_strings}};
+use super::super::{Element, text_util::{StripWhitespace, concat_strings}, node_util::get_parent_node};
+use super::super::node_util::get_node_tag_name;
 use super::{HandlerResult, Handlers};
+use super::element_util::is_widget_element_with_context;
 use crate::serialize_if_faithful;
 
 pub(super) fn span_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    // Get parent tag name for context-aware filtering
+    let parent_node = get_parent_node(element.node);
+    let parent_tag = parent_node.as_ref()
+        .and_then(|parent| get_node_tag_name(parent));
+    
+    // Skip widget elements (but preserve accessibility in table contexts)
+    if is_widget_element_with_context(element.attrs, parent_tag) {
+        return Some("".into());
+    }
+    
     // Math notation support (existing functionality)
     if element.attrs.len() == 1
         && let attr = &element.attrs[0]

@@ -202,6 +202,7 @@ struct MarkdownNormalizer {
     prev_type: LineType,
     consecutive_blanks: u8,
     in_code_fence: bool,
+    prev_was_heading: bool,  // Track if previous non-blank line was a heading
 }
 
 impl MarkdownNormalizer {
@@ -212,6 +213,7 @@ impl MarkdownNormalizer {
             prev_type: LineType::Blank,
             consecutive_blanks: 0,
             in_code_fence: false,
+            prev_was_heading: false,
         };
 
         for line in input.lines() {
@@ -254,6 +256,18 @@ impl MarkdownNormalizer {
             return;
         }
 
+        // Skip redundant "Section titled" links after headings
+        // Pattern: Heading → Blank → [Section titled "..."](...) 
+        if self.prev_was_heading 
+            && self.prev_type == LineType::Blank 
+            && line_type == LineType::Paragraph 
+            && Self::is_section_titled_link(line) 
+        {
+            // Skip this line entirely - it's a redundant self-referential link
+            self.prev_was_heading = false;  // Reset flag
+            return;
+        }
+
         // Ensure blank line before block elements
         if line_type.needs_blank_before() && self.prev_type != LineType::Blank {
             self.write_line("");
@@ -263,6 +277,16 @@ impl MarkdownNormalizer {
         match line_type {
             LineType::Heading => self.write_line(&Self::normalize_heading(line)),
             _ => self.write_line(line),
+        }
+
+        // Update heading state tracking
+        match line_type {
+            LineType::Heading => self.prev_was_heading = true,
+            LineType::Blank => {
+                // Keep prev_was_heading if we just saw a heading
+                // This allows detecting: Heading → Blank → Link pattern
+            }
+            _ => self.prev_was_heading = false,
         }
 
         self.consecutive_blanks = 0;
@@ -290,6 +314,38 @@ impl MarkdownNormalizer {
         } else {
             format!("{}{} {}", indent, "#".repeat(hash_count), rest)
         }
+    }
+
+    /// Check if line is a redundant "Section titled" self-referential link.
+    ///
+    /// These appear immediately after headings in the format:
+    /// `[Section titled "Heading Text"](#anchor)`
+    ///
+    /// Pattern:
+    /// - Starts with `[Section titled "`
+    /// - Contains quoted text (the heading)
+    /// - Ends with `"](#` followed by anchor and `)`
+    fn is_section_titled_link(line: &str) -> bool {
+        let trimmed = line.trim();
+        
+        // Quick prefix check
+        if !trimmed.starts_with("[Section titled \"") {
+            return false;
+        }
+        
+        // Must have the pattern: [Section titled "..."](#...)
+        // Find the closing quote after "Section titled "
+        let after_prefix = &trimmed["[Section titled \"".len()..];
+        
+        if let Some(quote_pos) = after_prefix.find('"') {
+            let after_quote = &after_prefix[quote_pos + 1..];
+            // Check for "](#anchor) pattern
+            if after_quote.starts_with("](#") && after_quote.ends_with(')') {
+                return true;
+            }
+        }
+        
+        false
     }
 }
 

@@ -5,15 +5,25 @@
 //! - Generic aside elements treated as block elements
 
 use super::super::Element;
-use super::element_util::is_widget_element;
+use super::super::node_util::{get_parent_node, get_node_tag_name};
+use super::element_util::{is_widget_element_with_context, detect_and_format_admonition};
 use super::{HandlerResult, Handlers};
 use crate::serialize_if_faithful;
 
 pub(super) fn aside_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
-    // Skip widget elements (social, cookie notices, ads)
-    // These are non-content elements that should not appear in markdown output
-    if is_widget_element(element.attrs) {
+    // Get parent tag name for context-aware filtering
+    let parent_node = get_parent_node(element.node);
+    let parent_tag = parent_node.as_ref()
+        .and_then(|parent| get_node_tag_name(parent));
+    
+    // Skip widget elements (but preserve accessibility in table contexts)
+    if is_widget_element_with_context(element.attrs, parent_tag) {
         return None;
+    }
+
+    // Check for admonition blocks
+    if let Some(admonition) = detect_and_format_admonition(handlers, &element) {
+        return Some(admonition);
     }
 
     // Faithful mode: serialize as HTML

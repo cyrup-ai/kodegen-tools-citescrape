@@ -1,4 +1,4 @@
-use super::element_util::serialize_element;
+use super::element_util::{serialize_element, get_attr};
 use super::super::Element;
 use super::{HandlerResult, Handlers};
 use super::super::node_util::get_node_tag_name;
@@ -158,6 +158,21 @@ pub(crate) fn table_handler(handlers: &dyn Handlers, element: Element) -> Option
         return Some(concat_strings!("\n\n", content, "\n\n").into());
     }
 
+    // Column count validation - detect header/data mismatches
+    if !headers.is_empty() && !rows.is_empty() {
+        let header_count = headers.len();
+        let max_row_cols = rows.iter().map(|row| row.len()).max().unwrap_or(0);
+        
+        if header_count != max_row_cols {
+            log::warn!(
+                "Table column count mismatch: {} headers, {} max data columns. \
+                This may indicate missing or hidden column headers.",
+                header_count,
+                max_row_cols
+            );
+        }
+    }
+
     // Build the Markdown table
     let mut table_md = String::from("\n\n");
 
@@ -179,6 +194,48 @@ pub(crate) fn table_handler(handlers: &dyn Handlers, element: Element) -> Option
     Some(table_md.into())
 }
 
+/// Extract header text from a th element, checking ARIA and data attributes
+/// for cases where visible content is empty
+fn extract_header_text(
+    cell_content: String,
+    cell_node: &Rc<markup5ever_rcdom::Node>,
+) -> String {
+    // If cell has visible content, use it
+    let trimmed = cell_content.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    
+    // Cell is empty - check for ARIA/data attributes
+    if let NodeData::Element { attrs, .. } = &cell_node.data {
+        let attrs = attrs.borrow();
+        
+        // Check aria-label
+        if let Some(label) = get_attr(&attrs, "aria-label")
+            && !label.trim().is_empty()
+        {
+            return label.trim().to_string();
+        }
+        
+        // Check data-label
+        if let Some(label) = get_attr(&attrs, "data-label")
+            && !label.trim().is_empty()
+        {
+            return label.trim().to_string();
+        }
+        
+        // Check title attribute
+        if let Some(title) = get_attr(&attrs, "title")
+            && !title.trim().is_empty()
+        {
+            return title.trim().to_string();
+        }
+    }
+    
+    // Fallback: preserve empty header as column marker
+    String::new()
+}
+
 /// Extract cells from a row node
 fn extract_row_cells(
     handlers: &dyn Handlers,
@@ -198,8 +255,17 @@ fn extract_row_cells(
             if !res.markdown_translated {
                 all_translated = false;
             }
+            
             let cell_content = res.content.trim_document_whitespace().to_string();
-            cells.push(cell_content);
+            
+            // Extract header text, checking ARIA attributes if content is empty
+            let final_content = if cell_tag == "th" {
+                extract_header_text(cell_content, cell_node)
+            } else {
+                cell_content
+            };
+            
+            cells.push(final_content);
         }
     }
 

@@ -249,6 +249,21 @@ fn process_li_children(
                         if !content.is_empty() {
                             inline_parts.push(content.to_string());
                         }
+                    } else {
+                        // FALLBACK: If handler returns None, extract raw text
+                        // This handles cases where emphasis_handler fails due to empty walk_children()
+                        let raw_text = extract_raw_text_from_node(child);
+                        let trimmed = raw_text.trim();
+                        if !trimmed.is_empty() {
+                            // Apply markdown formatting based on tag
+                            let formatted = match &*name.local {
+                                "strong" | "b" => format!("**{}**", trimmed),
+                                "em" | "i" => format!("*{}*", trimmed),
+                                "code" => format!("`{}`", trimmed),
+                                _ => trimmed.to_string(),
+                            };
+                            inline_parts.push(formatted);
+                        }
                     }
                 }
             }
@@ -379,4 +394,22 @@ fn is_block_element(tag: &str) -> bool {
         "figcaption" | "figure" | "footer" | "form" | "header" | "main" | "nav" |
         "section" | "table"
     )
+}
+
+/// Extract raw text from a node when handlers fail
+///
+/// This bypasses the htmd handler system and directly extracts text content.
+/// Used as a fallback when emphasis_handler returns None for elements with valid content.
+fn extract_raw_text_from_node(node: &Rc<Node>) -> String {
+    match &node.data {
+        NodeData::Text { contents } => contents.borrow().to_string(),
+        NodeData::Element { .. } => {
+            let mut text = String::new();
+            for child in node.children.borrow().iter() {
+                text.push_str(&extract_raw_text_from_node(child));
+            }
+            text
+        }
+        _ => String::new(),
+    }
 }

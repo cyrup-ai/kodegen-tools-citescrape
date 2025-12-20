@@ -9,15 +9,25 @@ use std::rc::Rc;
 use markup5ever_rcdom::{Node, NodeData};
 
 use super::super::Element;
-use super::element_util::{get_attr, is_widget_element, extract_raw_text};
+use super::super::node_util::{get_parent_node, get_node_tag_name};
+use super::element_util::{get_attr, is_widget_element_with_context, extract_raw_text, detect_and_format_admonition};
 use super::{HandlerResult, Handlers};
 use crate::serialize_if_faithful;
 
 pub(super) fn div_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
-    // Skip widget elements (social, cookie notices, ads, toolbars, etc.)
-    // CRITICAL FIX: Return Some("".into()) not None to actually skip the element
-    if is_widget_element(element.attrs) {
+    // Get parent tag name for context-aware filtering
+    let parent_node = get_parent_node(element.node);
+    let parent_tag = parent_node.as_ref()
+        .and_then(|parent| get_node_tag_name(parent));
+    
+    // Skip widget elements (but preserve accessibility in table contexts)
+    if is_widget_element_with_context(element.attrs, parent_tag) {
         return Some("".into());
+    }
+
+    // Check for admonition blocks BEFORE other special handling
+    if let Some(admonition) = detect_and_format_admonition(handlers, &element) {
+        return Some(admonition);
     }
 
     // Check for expressive-code wrapper divs

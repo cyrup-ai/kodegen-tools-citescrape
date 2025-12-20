@@ -1,8 +1,14 @@
 use super::super::{Element, text_util::{JoinOnStringIterator, TrimDocumentWhitespace, concat_strings}};
 use super::{HandlerResult, Handlers};
+use super::element_util::is_theme_variant_image;
 use crate::serialize_if_faithful;
 
 pub(super) fn img_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    // Skip theme variant images (light/dark mode duplicates)
+    if is_theme_variant_image(element.attrs) {
+        return Some("".into());
+    }
+    
     let mut src: Option<String> = None;  // ✅ Clear naming - this is the src attribute
     let mut alt: Option<String> = None;
     let mut title: Option<String> = None;

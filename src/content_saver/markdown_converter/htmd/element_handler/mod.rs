@@ -31,6 +31,7 @@ mod section;
 mod span;
 mod strikethrough;
 mod media;
+mod svg;
 mod technical;
 mod semantic;
 mod subscript_superscript;
@@ -78,7 +79,7 @@ use img::img_handler;
 use li::list_item_handler;
 use list::list_handler;
 use mark::mark_handler;
-use markup5ever_rcdom::Node;
+use markup5ever_rcdom::{Node, NodeData};
 use nav::nav_handler;
 use p::p_handler;
 use pre::pre_handler;
@@ -86,6 +87,7 @@ use section::section_handler;
 use span::span_handler;
 use strikethrough::strikethrough_handler;
 use media::{video_handler, audio_handler, source_handler, track_handler};
+use svg::{svg_handler, canvas_handler};
 use technical::{samp_handler, var_handler, output_handler};
 use semantic::{abbr_handler, cite_handler, time_handler, dfn_handler, address_handler};
 use subscript_superscript::{sub_handler, sup_handler};
@@ -160,6 +162,9 @@ impl ElementHandlers {
 
         // img
         handlers.add_handler(vec!["img"], img_handler);
+
+        // picture element - extract default img only, skip source variants
+        handlers.add_handler(vec!["picture"], picture_handler);
 
         // a
         handlers.add_handler(vec!["a"], AnchorElementHandler::new());
@@ -296,6 +301,13 @@ impl ElementHandlers {
             ],
             block_handler,
         );
+
+        // svg, canvas - skip visual elements (no meaningful markdown representation)
+        // Text extraction from SVG produces garbled output (coordinates lost)
+        // Canvas has no DOM children (rendered via JavaScript)
+        // Must be registered AFTER block_handler to override it
+        handlers.add_handler(vec!["svg"], svg_handler);
+        handlers.add_handler(vec!["canvas"], canvas_handler);
 
         // track - discard metadata content
         // Must be registered AFTER block_handler to override it
@@ -507,6 +519,26 @@ impl Handlers for ElementHandlers {
     fn options(&self) -> &Options {
         &self.options
     }
+}
+
+/// Handle `<picture>` element -> extract default <img>, skip <source> variants
+/// 
+/// Picture elements contain multiple image sources for different media conditions
+/// (e.g., light/dark theme via prefers-color-scheme). We extract only the default
+/// <img> fallback element, which is the light mode image by convention.
+fn picture_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+    // Find the <img> child (default/fallback image)
+    for child in element.node.children.borrow().iter() {
+        if let NodeData::Element { name, .. } = &child.data
+            && name.local.as_ref() == "img"
+            && let Some(result) = handlers.handle(child)
+        {
+            return Some(result);
+        }
+    }
+    
+    // No <img> found, return empty
+    Some("".into())
 }
 
 fn block_handler(handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {

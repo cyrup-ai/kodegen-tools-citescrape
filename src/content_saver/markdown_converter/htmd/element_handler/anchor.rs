@@ -1,12 +1,122 @@
 use parking_lot::Mutex;
+use std::rc::Rc;
 
 use super::super::{
     Element,
+    node_util::{get_parent_node, get_node_tag_name},
     options::{LinkReferenceStyle, LinkStyle},
-    text_util::{JoinOnStringIterator, StripWhitespace, TrimDocumentWhitespace, concat_strings},
+    text_util::{JoinOnStringIterator, StripWhitespace, TrimDocumentWhitespace, concat_strings, is_invisible_unicode},
 };
 use super::{ElementHandler, HandlerResult, Handlers};
+use super::element_util::is_widget_element_with_context;
 use crate::serialize_if_faithful;
+use html5ever::Attribute;
+use markup5ever_rcdom::{Node, NodeData};
+
+/// Check if an anchor element is a heading permalink/anchor link.
+///
+/// Returns true if ANY of these conditions are met:
+///
+/// 1. **CLASS-BASED**: `<a>` with class containing:
+///    - "anchor", "permalink", "header-link", "heading-link", "hash-link"
+///
+/// 2. **ARIA-HIDDEN**: `<a>` with `aria-hidden="true"`
+///    (often used for icon-only permalink anchors)
+///
+/// 3. **ARIA-LABEL**: `<a>` with `aria-label` containing "Navigate to header"
+///    (accessibility text pattern)
+///
+/// 4. **CONTENT-BASED**: Anchor text content is ONLY:
+///    - "#", "§" (section sign), "¶" (pilcrow)
+///    - Invisible Unicode characters (U+200B, U+200C, U+200D, U+FEFF, etc.)
+///
+/// This function uses the same proven detection logic from `headings.rs` but
+/// applies it to anchor elements processed as siblings rather than children.
+fn is_heading_anchor_link(attrs: &[Attribute], node: &Rc<Node>) -> bool {
+    // Check for permalink anchor classes
+    for attr in attrs.iter() {
+        let attr_name = &attr.name.local;
+        
+        if attr_name == "class" {
+            let class_value = attr.value.to_lowercase();
+            if class_value.contains("anchor")
+                || class_value.contains("permalink")
+                || class_value.contains("header-link")
+                || class_value.contains("heading-link")
+                || class_value.contains("hash-link")
+            {
+                return true;
+            }
+        }
+        
+        // aria-hidden anchors are typically icon-only permalinks
+        if attr_name == "aria-hidden" && &*attr.value == "true" {
+            return true;
+        }
+        
+        // aria-label with accessibility text
+        if attr_name == "aria-label" {
+            let label_lower = attr.value.to_lowercase();
+            let normalized: String = label_lower
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if normalized.contains("navigate to header") 
+                || normalized.contains("permalink")
+                || normalized.contains("anchor link")
+            {
+                return true;
+            }
+        }
+    }
+    
+    // Check text content for common permalink symbols or invisible Unicode
+    let text = get_anchor_text_content(node);
+    let text_trimmed = text.trim();
+    
+    // Exact match for permalink symbols
+    if text_trimmed == "#" || text_trimmed == "§" || text_trimmed == "¶" {
+        return true;
+    }
+    
+    // Check if anchor text contains only invisible Unicode characters
+    // This catches anchors like <a href="#id">​</a> where ​ is U+200B
+    !text_trimmed.is_empty() 
+        && text_trimmed.chars().all(is_invisible_unicode)
+}
+
+/// Get text content of an anchor node (recursive).
+///
+/// Filters out invisible Unicode characters during collection to get
+/// the actual visible text content.
+fn get_anchor_text_content(node: &Rc<Node>) -> String {
+    let mut text = String::new();
+    collect_anchor_text(node, &mut text);
+    text
+}
+
+/// Recursively collect text content from an anchor node tree.
+///
+/// Filters invisible Unicode characters to determine if the anchor
+/// has any visible text content.
+fn collect_anchor_text(node: &Rc<Node>, buffer: &mut String) {
+    match &node.data {
+        NodeData::Text { contents } => {
+            // Filter out invisible Unicode characters during text extraction
+            let text: String = contents.borrow()
+                .chars()
+                .filter(|c| !is_invisible_unicode(*c))
+                .collect();
+            buffer.push_str(&text);
+        }
+        NodeData::Element { .. } => {
+            for child in node.children.borrow().iter() {
+                collect_anchor_text(child, buffer);
+            }
+        }
+        _ => {}
+    }
+}
 
 pub(super) struct AnchorElementHandler {
     links: Mutex<Vec<String>>,
@@ -24,6 +134,21 @@ impl ElementHandler for AnchorElementHandler {
     }
 
     fn handle(&self, handlers: &dyn Handlers, element: Element) -> Option<HandlerResult> {
+        // Get parent tag name for context-aware filtering
+        let parent_node = get_parent_node(element.node);
+        let parent_tag = parent_node.as_ref()
+            .and_then(|parent| get_node_tag_name(parent));
+        
+        // Skip widget elements (but preserve accessibility in table contexts)
+        if is_widget_element_with_context(element.attrs, parent_tag) {
+            return Some("".into());
+        }
+        
+        // Skip heading permalink/anchor links
+        if is_heading_anchor_link(element.attrs, element.node) {
+            return Some("".into());
+        }
+        
         let mut link: Option<String> = None;
         let mut title: Option<String> = None;
         for attr in element.attrs.iter() {
