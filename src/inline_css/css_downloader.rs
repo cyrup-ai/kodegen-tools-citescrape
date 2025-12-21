@@ -31,7 +31,7 @@ pub async fn download_all_css(
                         return Err(InliningError {
                             url: css_url_for_error,
                             resource_type: ResourceType::Css,
-                            error: error_msg,
+                            error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                         });
                     }
                     crate::crawl_engine::rate_limiter::RateLimitDecision::Allow => {
@@ -48,7 +48,7 @@ pub async fn download_all_css(
                     Err(InliningError {
                         url: css_url_for_error,
                         resource_type: ResourceType::Css,
-                        error: error_msg,
+                        error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                     })
                 }
             }

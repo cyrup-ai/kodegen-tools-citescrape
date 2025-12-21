@@ -163,7 +163,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: href_clone,
                             resource_type: ResourceType::Css,
-                            error: e.to_string(),
+                            error: e.into(),
                         });
                     }
                 };
@@ -177,7 +177,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: css_url,
                             resource_type: ResourceType::Css,
-                            error: e.to_string(),
+                            error: e.into(),
                         });
                     }
                 };
@@ -192,7 +192,7 @@ pub async fn inline_resources_from_info(
                     Err(e) => Err(InliningError {
                         url: css_url,
                         resource_type: ResourceType::Css,
-                        error: format!("CSS content is not valid UTF-8: {e}"),
+                        error: super::domain_queue::DownloadError::RequestFailed(format!("CSS content is not valid UTF-8: {e}")),
                     }),
                 }
             });
@@ -219,7 +219,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: src,
                             resource_type: ResourceType::Svg,
-                            error: e.to_string(),
+                            error: e.into(),
                         });
                     }
                 };
@@ -233,7 +233,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: svg_url,
                             resource_type: ResourceType::Svg,
-                            error: e.to_string(),
+                            error: e.into(),
                         });
                     }
                 };
@@ -259,7 +259,7 @@ pub async fn inline_resources_from_info(
                     Err(e) => Err(InliningError {
                         url: svg_url,
                         resource_type: ResourceType::Svg,
-                        error: format!("SVG content is not valid UTF-8: {e}"),
+                        error: super::domain_queue::DownloadError::RequestFailed(format!("SVG content is not valid UTF-8: {e}")),
                     }),
                 }
             });
@@ -275,7 +275,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: src,
                             resource_type: ResourceType::Image,
-                            error: e.to_string(),
+                            error: e.into(),
                         });
                     }
                 };
@@ -289,7 +289,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: image_url,
                             resource_type: ResourceType::Image,
-                            error: e.to_string(),
+                            error: e.into(),
                         });
                     }
                 };
@@ -349,12 +349,22 @@ pub async fn inline_resources_from_info(
                 }
             },
             Err(inlining_error) => {
-                log::warn!(
-                    "Failed to download {} from {}: {}",
-                    inlining_error.resource_type,
-                    inlining_error.url,
-                    inlining_error.error
-                );
+                // Only warn on actual HTTP failures, not cached errors
+                if !inlining_error.error.is_from_cache() {
+                    log::warn!(
+                        "Failed to download {} from {}: {}",
+                        inlining_error.resource_type,
+                        inlining_error.url,
+                        inlining_error.error
+                    );
+                } else {
+                    log::debug!(
+                        "Cached failure for {} from {}: {}",
+                        inlining_error.resource_type,
+                        inlining_error.url,
+                        inlining_error.error
+                    );
+                }
                 failures.push(inlining_error);
             }
         }

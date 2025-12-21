@@ -33,7 +33,7 @@ pub async fn download_all_images(
                         return Err(InliningError {
                             url: image_url_for_error,
                             resource_type: ResourceType::Image,
-                            error: error_msg,
+                            error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                         });
                     }
                     crate::crawl_engine::rate_limiter::RateLimitDecision::Allow => {
@@ -57,7 +57,7 @@ pub async fn download_all_images(
                     Err(InliningError {
                         url: image_url_for_error,
                         resource_type: ResourceType::Image,
-                        error: error_msg,
+                        error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                     })
                 }
             }

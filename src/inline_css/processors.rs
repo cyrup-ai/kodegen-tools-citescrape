@@ -51,7 +51,7 @@ pub fn extract_css_links(document: &Html, base_url: &str) -> ExtractionResult {
                     failures.push(InliningError {
                         url: href.to_string(),
                         resource_type: ResourceType::Css,
-                        error: error_msg,
+                        error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                     });
                 }
             }
@@ -83,7 +83,7 @@ pub fn extract_images(document: &Html, base_url: &str) -> ExtractionResult {
                     failures.push(InliningError {
                         url: src.to_string(),
                         resource_type: ResourceType::Image,
-                        error: error_msg,
+                        error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                     });
                 }
             }
@@ -116,7 +116,7 @@ pub fn extract_svgs(document: &Html, base_url: &str) -> ExtractionResult {
                     failures.push(InliningError {
                         url: src.to_string(),
                         resource_type: ResourceType::Svg,
-                        error: error_msg,
+                        error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                     });
                 }
             }
@@ -155,7 +155,7 @@ pub async fn process_css_links_internal(
                         failures.push(InliningError {
                             url: href.to_string(),
                             resource_type: ResourceType::Css,
-                            error: error_msg,
+                            error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                         });
                     }
                 }
@@ -179,7 +179,7 @@ pub async fn process_css_links_internal(
                 failures.push(InliningError {
                     url: css_url_for_error,
                     resource_type: ResourceType::Css,
-                    error: error_msg,
+                    error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                 });
             }
         }
@@ -263,7 +263,7 @@ pub async fn process_images_internal(
                         failures.push(InliningError {
                             url: src.to_string(),
                             resource_type: ResourceType::Image,
-                            error: error_msg,
+                            error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                         });
                     }
                 }
@@ -287,7 +287,7 @@ pub async fn process_images_internal(
                 failures.push(InliningError {
                     url: image_url_for_error,
                     resource_type: ResourceType::Image,
-                    error: error_msg,
+                    error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                 });
             }
         }
@@ -371,7 +371,7 @@ pub async fn process_svgs_internal(
                         failures.push(InliningError {
                             url: src.to_string(),
                             resource_type: ResourceType::Svg,
-                            error: error_msg,
+                            error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                         });
                     }
                 }
@@ -395,7 +395,7 @@ pub async fn process_svgs_internal(
                 failures.push(InliningError {
                     url: svg_url_for_error,
                     resource_type: ResourceType::Svg,
-                    error: error_msg,
+                    error: super::domain_queue::DownloadError::RequestFailed(error_msg),
                 });
             }
         }

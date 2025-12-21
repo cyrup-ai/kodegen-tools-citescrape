@@ -31,7 +31,7 @@ pub type ResourceFuture = std::pin::Pin<
 pub struct InliningError {
     pub url: String,
     pub resource_type: ResourceType,
-    pub error: String,
+    pub error: super::domain_queue::DownloadError,
 }
 
 /// Result of resource inlining with success and failure tracking

@@ -58,7 +58,7 @@ pub enum CachedResponse {
 }
 
 /// Error type for download failures
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, serde::Serialize, serde::Deserialize)]
 pub enum DownloadError {
     #[error("Download failed: {0}")]
     RequestFailed(String),
@@ -70,12 +70,27 @@ pub enum DownloadError {
     NotFound(String),
     
     #[error("HTTP error {status}: {url}")]
-    HttpError { url: String, status: u16 },
+    HttpError {
+        url: String,
+        status: u16,
+        #[serde(default)]
+        from_cache: bool,
+    },
 }
 
 impl From<anyhow::Error> for DownloadError {
     fn from(e: anyhow::Error) -> Self {
         DownloadError::RequestFailed(e.to_string())
+    }
+}
+
+impl DownloadError {
+    /// Returns true if this error came from cache (no HTTP request was made)
+    pub fn is_from_cache(&self) -> bool {
+        match self {
+            DownloadError::HttpError { from_cache, .. } => *from_cache,
+            _ => false,
+        }
     }
 }
 
@@ -161,6 +176,7 @@ impl DomainDownloadQueue {
                         let _ = request.response_tx.send(Err(DownloadError::HttpError {
                             url,
                             status: *status,
+                            from_cache: true,
                         }));
                         continue;
                     }
@@ -222,6 +238,7 @@ impl DomainDownloadQueue {
             return Err(DownloadError::HttpError {
                 url: url_string,
                 status: status.as_u16(),
+                from_cache: false,
             });
         }
         
@@ -313,6 +330,7 @@ impl DomainQueueManager {
                     return Err(DownloadError::HttpError {
                         url: url.clone(),
                         status: *status,
+                        from_cache: true,
                     });
                 }
             }
