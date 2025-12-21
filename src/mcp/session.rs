@@ -4,9 +4,10 @@ use crate::ChromiumoxideCrawler;
 use crate::Crawler;  // Import the Crawler trait
 use crate::config::CrawlConfig;
 use crate::mcp::manager::SearchEngineCache;
+use crate::utils::get_mirror_path;
 use anyhow::Result;
 use kodegen_mcp_schema::citescrape::{ScrapeSearchResult, ScrapeUrlOutput};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
@@ -52,6 +53,26 @@ impl CrawlSession {
             engine_cache,
             browser_pool,
         }
+    }
+
+    /// Get content directory from URL and parent output_dir
+    ///
+    /// Uses `get_mirror_path` to calculate where content actually lives.
+    /// Parent output_dir contains `.search_index/`, but AI agents need the actual content directory.
+    ///
+    /// # Example
+    /// - Parent: `/docs/ratatui.rs` (has `.search_index/`)
+    /// - Content: `/docs/ratatui.rs/ratatui.rs` (has actual markdown/html files)
+    async fn get_content_dir(url: &str, parent_output_dir: &Path) -> Result<String> {
+        // Use get_mirror_path to calculate where a root file would be saved
+        let sample_path = get_mirror_path(url, parent_output_dir, "index.md").await?;
+        
+        // Go up one level from file to get the content directory
+        let content_dir = sample_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get parent directory"))?;
+        
+        Ok(content_dir.to_string_lossy().to_string())
     }
 
     /// Execute crawl with timeout support
@@ -148,7 +169,9 @@ impl CrawlSession {
 
         // Handle timeout
         let start = Instant::now();
-        let output_dir_str = self.output_dir.to_string_lossy().to_string();
+        
+        // Get content directory where AI agents can actually find files
+        let content_dir = Self::get_content_dir(&url, &self.output_dir).await?;
 
         if await_completion_ms == 0 {
             // Fire-and-forget: spawn and return immediately
@@ -159,10 +182,10 @@ impl CrawlSession {
             Ok(ScrapeUrlOutput {
                 crawl_id: self.crawl_id,
                 status: "background".to_string(),
-                url: Some(url),
+                url: Some(url.clone()),
                 pages_crawled: 0,
                 pages_queued: 0,
-                output_dir: Some(output_dir_str),
+                output_dir: Some(content_dir.clone()),
                 elapsed_ms: 0,
                 completed: false,
                 error: None,
@@ -180,10 +203,10 @@ impl CrawlSession {
                     Ok(ScrapeUrlOutput {
                         crawl_id: self.crawl_id,
                         status: "completed".to_string(),
-                        url: Some(url),
+                        url: Some(url.clone()),
                         pages_crawled: state.pages_crawled,
                         pages_queued: 0,
-                        output_dir: Some(output_dir_str),
+                        output_dir: Some(content_dir.clone()),
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         completed: true,
                         error: None,
@@ -205,10 +228,10 @@ impl CrawlSession {
                     Ok(ScrapeUrlOutput {
                         crawl_id: self.crawl_id,
                         status: "timeout".to_string(),
-                        url: Some(url),
+                        url: Some(url.clone()),
                         pages_crawled: state.pages_crawled,
                         pages_queued: 0,
-                        output_dir: Some(output_dir_str),
+                        output_dir: Some(content_dir.clone()),
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         completed: false,
                         error: None,
@@ -226,13 +249,20 @@ impl CrawlSession {
     pub async fn read_current_state(&self) -> Result<ScrapeUrlOutput> {
         let state = self.state.lock().await;
 
+        // Get content directory if URL is available
+        let output_dir_str = if let Some(ref url_str) = state.current_url {
+            Self::get_content_dir(url_str, &self.output_dir).await.ok()
+        } else {
+            Some(self.output_dir.to_string_lossy().to_string())
+        };
+
         Ok(ScrapeUrlOutput {
             crawl_id: self.crawl_id,
             status: state.status.clone(),
             url: state.current_url.clone(),
             pages_crawled: state.pages_crawled,
             pages_queued: 0,
-            output_dir: Some(self.output_dir.to_string_lossy().to_string()),
+            output_dir: output_dir_str,
             elapsed_ms: state.start_time.map_or(0, |t| t.elapsed().as_millis() as u64),
             completed: state.status == "completed",
             error: None,
@@ -318,13 +348,20 @@ impl CrawlSession {
             })
             .collect();
 
+        // Get content directory if URL is available
+        let output_dir_str = if let Some(ref url_str) = url {
+            Self::get_content_dir(url_str, &self.output_dir).await.ok()
+        } else {
+            Some(self.output_dir.to_string_lossy().to_string())
+        };
+
         Ok(ScrapeUrlOutput {
             crawl_id: self.crawl_id,
             status: "search".to_string(),
             url,
             pages_crawled: 0,
             pages_queued: 0,
-            output_dir: Some(self.output_dir.to_string_lossy().to_string()),
+            output_dir: output_dir_str,
             elapsed_ms: 0,
             completed: true,
             error: None,
