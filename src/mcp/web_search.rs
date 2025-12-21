@@ -66,7 +66,7 @@ impl Tool for WebSearchTool {
         true
     }
 
-    async fn execute(&self, args: Self::Args, _ctx: ToolExecutionContext) -> Result<ToolResponse<WebSearchOutput>, McpError> {
+    async fn execute(&self, args: Self::Args, _ctx: ToolExecutionContext) -> Result<ToolResponse<<Self::Args as kodegen_mcp_schema::ToolArgs>::Output>, McpError> {
         // Validate query is not empty
         if args.query.trim().is_empty() {
             return Err(McpError::invalid_arguments("Search query cannot be empty"));
