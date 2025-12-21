@@ -20,13 +20,13 @@ const ANSI_RESET: &str = "\x1b[0m";
 
 #[derive(Clone)]
 pub struct WebSearchTool {
-    browser_manager: Arc<crate::web_search::BrowserManager>,
+    browser_pool: Arc<crate::browser_pool::BrowserPool>,
 }
 
 impl WebSearchTool {
     #[must_use]
-    pub fn new(browser_manager: Arc<crate::web_search::BrowserManager>) -> Self {
-        Self { browser_manager }
+    pub fn new(browser_pool: Arc<crate::browser_pool::BrowserPool>) -> Self {
+        Self { browser_pool }
     }
 }
 
@@ -72,8 +72,8 @@ impl Tool for WebSearchTool {
             return Err(McpError::invalid_arguments("Search query cannot be empty"));
         }
 
-        // Perform search
-        let results = crate::web_search::search_with_manager(&self.browser_manager, args.query)
+        // Perform search using browser pool
+        let results = crate::web_search::search_with_pool(&self.browser_pool, args.query)
             .await
             .map_err(McpError::Other)?;
 

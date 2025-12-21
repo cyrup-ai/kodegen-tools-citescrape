@@ -177,7 +177,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: css_url,
                             resource_type: ResourceType::Css,
-                            error: e.into(),
+                            error: e,
                         });
                     }
                 };
@@ -233,7 +233,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: svg_url,
                             resource_type: ResourceType::Svg,
-                            error: e.into(),
+                            error: e,
                         });
                     }
                 };
@@ -289,7 +289,7 @@ pub async fn inline_resources_from_info(
                         return Err(InliningError {
                             url: image_url,
                             resource_type: ResourceType::Image,
-                            error: e.into(),
+                            error: e,
                         });
                     }
                 };

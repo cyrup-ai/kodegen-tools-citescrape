@@ -5,8 +5,10 @@
 //! Usage:
 //!   cargo run --package `kodegen_tools_citescrape` --example `web_search`
 
-use kodegen_tools_citescrape::web_search::{self, BrowserManager};
+use kodegen_tools_citescrape::web_search;
+use kodegen_tools_citescrape::{BrowserPool, BrowserPoolConfig};
 use std::io::Write;
+use std::sync::Arc;
 use std::time::Instant;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
@@ -29,8 +31,10 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
 
-    // Create browser manager for proper lifecycle management
-    let browser_manager = BrowserManager::new();
+    // Create browser pool with pre-warmed browsers
+    let pool_config = BrowserPoolConfig::default();
+    let browser_pool = Arc::new(BrowserPool::new(pool_config));
+    browser_pool.start().await?;
 
     let mut stdout = StandardStream::stdout(ColorChoice::Auto);
 
@@ -52,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     stdout.reset()?;
 
     let start = Instant::now();
-    match web_search::search_with_manager(&browser_manager, "rust async programming").await {
+    match web_search::search_with_pool(&browser_pool, "rust async programming").await {
         Ok(results) => {
             let elapsed = start.elapsed();
             stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
@@ -106,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     stdout.reset()?;
 
     let start = Instant::now();
-    match web_search::search_with_manager(&browser_manager, "tokio rust tutorial").await {
+    match web_search::search_with_pool(&browser_pool, "tokio rust tutorial").await {
         Ok(results) => {
             let elapsed = start.elapsed();
             stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
@@ -163,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
     stdout.reset()?;
 
     let start = Instant::now();
-    match web_search::search_with_manager(&browser_manager, "serde json rust").await {
+    match web_search::search_with_pool(&browser_pool, "serde json rust").await {
         Ok(results) => {
             let elapsed = start.elapsed();
             stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
@@ -265,8 +269,8 @@ async fn main() -> anyhow::Result<()> {
     )?;
     stdout.reset()?;
 
-    // Shutdown browser to clean up Chrome processes
-    browser_manager.shutdown().await?;
+    // Shutdown browser pool to clean up Chrome processes
+    browser_pool.shutdown().await?;
 
     Ok(())
 }

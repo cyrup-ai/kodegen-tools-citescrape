@@ -11,18 +11,6 @@ use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
 
-// Wrapper to impl ShutdownHook for Arc<BrowserManager>
-struct BrowserManagerWrapper(Arc<kodegen_tools_citescrape::BrowserManager>);
-
-impl ShutdownHook for BrowserManagerWrapper {
-    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
-        let manager = self.0.clone();
-        Box::pin(async move {
-            manager.shutdown().await
-        })
-    }
-}
-
 // Wrapper to impl ShutdownHook for Arc<BrowserPool>
 struct BrowserPoolWrapper(Arc<kodegen_tools_citescrape::BrowserPool>);
 
@@ -46,7 +34,6 @@ async fn main() -> Result<()> {
 
             // Create managers
             let engine_cache = Arc::new(kodegen_tools_citescrape::SearchEngineCache::new());
-            let browser_manager = Arc::new(kodegen_tools_citescrape::BrowserManager::new());
 
             // Create browser pool for pre-warmed Chrome instances
             let pool_config = kodegen_tools_citescrape::BrowserPoolConfig::default();
@@ -62,9 +49,6 @@ async fn main() -> Result<()> {
                 browser_pool.clone(),
             ));
 
-            // Register browser manager for shutdown (closes Chrome)
-            managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
-
             // Register browser pool for graceful shutdown
             managers.register(BrowserPoolWrapper(browser_pool.clone())).await;
 
@@ -78,11 +62,11 @@ async fn main() -> Result<()> {
                 ScrapeUrlTool::new(crawl_registry.clone()),
             );
 
-            // Keep web_search tool (unchanged)
+            // web_search tool now uses shared browser pool
             (tool_router, prompt_router) = register_tool(
                 tool_router,
                 prompt_router,
-                WebSearchTool::new(browser_manager.clone()),
+                WebSearchTool::new(browser_pool.clone()),
             );
 
             // Register fetch tool (simplified single-page fetcher)

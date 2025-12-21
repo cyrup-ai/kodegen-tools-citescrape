@@ -1,94 +1,71 @@
 //! Web search functionality using browser automation
 //!
-//! This module provides a clean API for performing web searches and extracting
-//! results. It orchestrates browser management, search execution, and result
-//! extraction with automatic retry logic.
-//!
-//! # Architecture
-//! - `types` - Data structures and constants
-//! - `browser` - Browser lifecycle management
-//! - `search` - Search execution and result extraction
-//!
-//! # Usage Patterns
-//!
-//! ## Standalone Scripts
-//! ```no_run
-//! use kodegen_tools_citescrape::web_search;
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let results = web_search::search("rust programming").await?;
-//!     println!("Found {} results", results.results.len());
-//!     
-//!     // Clean up browser before exit
-//!     web_search::shutdown_standalone().await?;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## MCP Tools (Managed Lifecycle)
-//! ```no_run
-//! use kodegen_tools_citescrape::web_search::{BrowserManager, search_with_manager};
-//!
-//! async fn tool_execute(manager: &BrowserManager) -> anyhow::Result<()> {
-//!     let results = search_with_manager(manager, "query").await?;
-//!     // Manager is shut down by tool_registry on server shutdown
-//!     Ok(())
-//! }
-//! ```
+//! Performs DuckDuckGo searches using pre-warmed browsers from the pool.
+//! Returns structured results with titles, URLs, and snippets.
 
-mod browser;
-mod manager;
 mod search;
 mod types;
 
 // Re-export public types
-pub use manager::BrowserManager;
 pub use types::{MAX_RESULTS, MAX_RETRIES, SearchResult, SearchResults};
 
-use anyhow::Result;
-use once_cell::sync::OnceCell;
+use anyhow::{Context, Result};
+use std::sync::Arc;
 use tracing::info;
 
-/// Standalone browser manager for convenience API
+/// Perform web search using BrowserPool
 ///
-/// Used by `search()` and `shutdown_standalone()` functions.
-/// MCP tools should NOT use this - they get a manager from `tool_registry`.
-static STANDALONE_MANAGER: OnceCell<BrowserManager> = OnceCell::new();
-
-/// Perform web search using provided `BrowserManager`
-///
-/// This is the function used by MCP tools. The manager is passed in from
-/// the server's tool registry, allowing proper lifecycle management.
+/// Acquires a pre-warmed browser from the pool, performs the search,
+/// and automatically returns the browser to the pool when done.
 ///
 /// # Arguments
-/// * `browser_manager` - Shared browser manager from tool registry
+/// * `pool` - Shared browser pool reference
 /// * `query` - Search query string
 ///
-/// # Implementation
-/// Uses manager instead of global static for browser access.
-pub async fn search_with_manager(
-    browser_manager: &BrowserManager,
+/// # Returns
+/// `SearchResults` with up to 10 results containing titles, URLs, and snippets
+///
+/// # Example
+/// ```no_run
+/// use kodegen_tools_citescrape::{BrowserPool, BrowserPoolConfig};
+/// use std::sync::Arc;
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let pool = BrowserPool::new(BrowserPoolConfig::default());
+///     pool.start().await?;
+///     
+///     let results = kodegen_tools_citescrape::web_search::search_with_pool(
+///         &pool,
+///         "rust async programming"
+///     ).await?;
+///     
+///     println!("Found {} results", results.results.len());
+///     pool.shutdown().await?;
+///     Ok(())
+/// }
+/// ```
+pub async fn search_with_pool(
+    pool: &Arc<crate::browser_pool::BrowserPool>,
     query: impl Into<String>,
 ) -> Result<SearchResults> {
     let query = query.into();
     info!("Starting web search for query: {}", query);
 
-    // Get browser from manager (NOT global static)
-    let browser_arc = browser_manager.get_or_launch().await?;
-    let browser_lock = browser_arc.lock().await;
+    // Acquire pre-warmed browser from pool
+    let guard = pool.acquire().await
+        .context("Failed to acquire browser from pool")?;
+    let browser_arc = guard.browser_arc();
+    
+    info!("Acquired pre-warmed browser from pool (id={})", guard.id());
 
-    let browser_wrapper = browser_lock
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Browser not available"))?;
+    // Create blank page for stealth injection
+    let page = browser_arc
+        .new_page("about:blank")
+        .await
+        .context("Failed to create blank page")?;
 
-    // Create fresh page for this search
-    let page = browser::create_blank_page(browser_wrapper).await?;
-
-    // Release lock before performing search
-    drop(browser_lock);
-
-    // Perform search with retry logic (unchanged from current implementation)
+    // Perform search with retry logic
     let results = search::retry_with_backoff(
         || async {
             search::perform_search(&page, &query).await?;
@@ -99,59 +76,13 @@ pub async fn search_with_manager(
     )
     .await?;
 
-    info!(
-        "Search completed successfully with {} results",
-        results.len()
-    );
-    Ok(SearchResults::new(query, results))
-}
+    info!("Search completed successfully with {} results", results.len());
 
-/// Perform web search (convenience function for standalone scripts)
-///
-/// For MCP tools, use `search_with_manager()` instead.
-/// For standalone scripts, call `shutdown_standalone()` before exiting to clean up browser.
-///
-/// # Example
-/// ```no_run
-/// use kodegen_tools_citescrape::web_search;
-///
-/// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
-///     let results = web_search::search("rust programming").await?;
-///     println!("Found {} results", results.results.len());
-///     
-///     // Clean up browser before exit
-///     web_search::shutdown_standalone().await?;
-///     Ok(())
-/// }
-/// ```
-pub async fn search(query: impl Into<String>) -> Result<SearchResults> {
-    let manager = STANDALONE_MANAGER.get_or_init(BrowserManager::new);
-    search_with_manager(manager, query).await
-}
-
-/// Shutdown the standalone browser instance
-///
-/// Call this before exiting your program to properly clean up the browser
-/// process and prevent zombie Chrome processes.
-///
-/// Safe to call even if no searches have been performed (no-op).
-/// Safe to call multiple times (subsequent calls are no-ops).
-///
-/// # Example
-/// ```no_run
-/// use kodegen_tools_citescrape::web_search;
-///
-/// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
-///     web_search::search("query").await?;
-///     web_search::shutdown_standalone().await?;
-///     Ok(())
-/// }
-/// ```
-pub async fn shutdown_standalone() -> Result<()> {
-    if let Some(manager) = STANDALONE_MANAGER.get() {
-        manager.shutdown().await?;
+    // Clean up page
+    if let Err(e) = page.close().await {
+        tracing::warn!("Failed to close search page: {}", e);
     }
-    Ok(())
+
+    Ok(SearchResults::new(query, results))
+    // Browser automatically returns to pool when guard drops
 }

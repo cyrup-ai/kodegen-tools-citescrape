@@ -65,8 +65,7 @@
 //! // Create tools
 //! let scrape_tool = ScrapeUrlTool::new(registry.clone());
 //! let fetch_tool = FetchTool::new(registry.clone());
-//! let browser_manager = Arc::new(kodegen_tools_citescrape::web_search::BrowserManager::new());
-//! let search_tool = WebSearchTool::new(browser_manager);
+//! let search_tool = WebSearchTool::new(browser_pool.clone());
 //!
 //! // Tools are ready to use
 //! # Ok(())

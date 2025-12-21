@@ -30,7 +30,6 @@ pub use crawl_engine::{
 pub use page_extractor::schema::*;
 pub use runtime::{AsyncJsonSave, AsyncStream, BrowserAction, CrawlRequest};
 pub use utils::{get_mirror_path, get_uri_from_path};
-pub use web_search::BrowserManager;
 pub use imurl::ImUrl;
 pub use browser_pool::{BrowserPool, BrowserPoolConfig, PooledBrowserGuard};
 pub use browser_profile::{
@@ -100,18 +99,6 @@ macro_rules! on_error {
 pub async fn crawl(config: CrawlConfig) -> Result<(), CrawlError> {
     let crawler = ChromiumoxideCrawler::new(config);
     crawler.crawl().await
-}
-
-// Shutdown hook wrapper for BrowserManager
-struct BrowserManagerWrapper(std::sync::Arc<crate::BrowserManager>);
-
-impl kodegen_server_http::ShutdownHook for BrowserManagerWrapper {
-    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
-        let manager = self.0.clone();
-        Box::pin(async move {
-            manager.shutdown().await
-        })
-    }
 }
 
 // Shutdown hook wrapper for BrowserPool
@@ -192,7 +179,6 @@ pub async fn start_server_with_listener(
 
             // Create managers
             let engine_cache = Arc::new(crate::SearchEngineCache::new());
-            let browser_manager = Arc::new(crate::BrowserManager::new());
 
             // Create crawl registry with browser pool
             let crawl_registry = Arc::new(crate::CrawlRegistry::new(
@@ -203,9 +189,6 @@ pub async fn start_server_with_listener(
             // Register browser pool for shutdown
             managers.register(BrowserPoolWrapper(browser_pool.clone())).await;
 
-            // Register browser manager for shutdown (still used by WebSearchTool)
-            managers.register(BrowserManagerWrapper(browser_manager.clone())).await;
-
             // Register tools
             // Register unified scrape_url tool with registry
             (tool_router, prompt_router) = register_tool(
@@ -214,11 +197,11 @@ pub async fn start_server_with_listener(
                 crate::ScrapeUrlTool::new(crawl_registry.clone()),
             );
 
-            // Keep web_search tool (unchanged)
+            // web_search tool now uses shared browser pool
             (tool_router, prompt_router) = register_tool(
                 tool_router,
                 prompt_router,
-                crate::WebSearchTool::new(browser_manager.clone()),
+                crate::WebSearchTool::new(browser_pool.clone()),
             );
 
             // Register fetch tool (simplified single-page fetcher)
