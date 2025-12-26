@@ -9,13 +9,51 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
 use lol_html::{HtmlRewriter, Settings, element};
-use tokio::sync::Semaphore;
+use dashmap::DashMap;
+use regex::Regex;
+use tokio::sync::{Mutex, Semaphore};
+#[allow(unused_imports)]  // Used by rewrite_single_link_in_markdown (Aho-Corasick for single-link case)
+use aho_corasick::AhoCorasick;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 
 use crate::link_index::{LinkIndex, normalize_url};
+
+// =============================================================================
+// MARKDOWN LINK PATTERNS - Regex for comprehensive link rewriting
+// =============================================================================
+
+/// Matches inline markdown links: ](url) or ](url "title") or ](<url>)
+/// Captures the URL in group 1
+/// Bounded quantifiers prevent catastrophic backtracking (max 2000 char URL)
+static INLINE_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Pattern breakdown:
+    // \]\(       - literal ](
+    // <?         - optional opening angle bracket
+    // ([^>\s\)"']{1,2000}) - capture URL (bounded, no whitespace/>/)/"/') 
+    // >?         - optional closing angle bracket
+    // (?:[\s\t]+["'][^"']*["'])? - optional title with quotes
+    // \)         - literal )
+    Regex::new(r#"\]\(<?([^>\s\)"']{1,2000})>?(?:[\s\t]+["'][^"']*["'])?\)"#)
+        .expect("INLINE_LINK_RE: hardcoded regex is valid")
+});
+
+/// Matches reference-style link definitions: [ref]: url or [ref]: <url> "title"
+/// Captures: group 1 = reference label, group 2 = URL
+static REFERENCE_DEF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^\[([^\]]{1,200})\]:\s*<?([^>\s]{1,2000})>?(?:\s+["'][^"']*["'])?$"#)
+        .expect("REFERENCE_DEF_RE: hardcoded regex is valid")
+});
+
+/// Matches autolinks: <https://example.com> or <http://example.com>
+/// Captures the URL in group 1
+static AUTOLINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<(https?://[^>]{1,2000})>")
+        .expect("AUTOLINK_RE: hardcoded regex is valid")
+});
 
 /// Result of a link rewriting operation.
 #[derive(Debug, Clone, Default)]
@@ -39,6 +77,9 @@ pub struct LinkRewriter {
     output_dir: PathBuf,
     /// Limit concurrent file rewrites to prevent fd exhaustion
     rewrite_semaphore: Arc<Semaphore>,
+    /// Per-file locks to serialize concurrent rewrites to the SAME file
+    /// Key: Canonical file path, Value: Mutex guard for that file
+    file_locks: Arc<DashMap<PathBuf, Arc<Mutex<()>>>>,
 }
 
 impl LinkRewriter {
@@ -53,7 +94,24 @@ impl LinkRewriter {
             output_dir,
             // Limit to 32 concurrent file rewrites to avoid fd exhaustion
             rewrite_semaphore: Arc::new(Semaphore::new(32)),
+            file_locks: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Acquire a mutex lock for a specific file path.
+    ///
+    /// Uses DashMap for lock-free concurrent access to DIFFERENT files,
+    /// while serializing access to the SAME file via per-path Mutex.
+    ///
+    /// # Lock Semantics
+    /// - First access to a path creates a new Mutex (lazy initialization)
+    /// - Subsequent accesses return the same Mutex (via Arc clone)
+    /// - Lock must be held across entire read-modify-write cycle
+    fn get_file_lock(&self, path: &Path) -> Arc<Mutex<()>> {
+        self.file_locks
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Get the count of pages registered in the index.
@@ -105,22 +163,31 @@ impl LinkRewriter {
         // 4. Find all pages that link TO this newly saved page
         let inbound = self.index.get_inbound_links(page_url).await?;
 
-        // 5. Rewrite link to this page in all those files (parallel, bounded)
+        // 5. Rewrite link to this page in all those files (parallel, bounded, file-locked)
         if !inbound.is_empty() {
             let page_url = page_url.to_string();
-            let local_path = local_path.to_path_buf();
 
             let update_futures: Vec<_> = inbound
                 .into_iter()
                 .map(|(source_url, source_path)| {
                     let sem = self.rewrite_semaphore.clone();
                     let page_url = page_url.clone();
-                    let local_path = local_path.clone();
                     let index = self.index.clone();
+                    let file_locks = self.file_locks.clone();
 
                     async move {
+                        // 1. Acquire global concurrency permit (limits total parallel I/O)
                         let _permit = sem.acquire().await.map_err(|e| anyhow!("Semaphore error: {}", e))?;
-                        rewrite_single_link(&source_url, &source_path, &page_url, &local_path, &index).await
+
+                        // 2. Acquire per-file lock (serializes access to same file)
+                        let file_lock = file_locks
+                            .entry(source_path.clone())
+                            .or_insert_with(|| Arc::new(Mutex::new(())))
+                            .clone();
+                        let _file_guard = file_lock.lock().await;
+
+                        // 3. Perform rewrite while holding both locks
+                        rewrite_single_link(&source_url, &source_path, &page_url, &index).await
                     }
                 })
                 .collect();
@@ -180,7 +247,11 @@ impl LinkRewriter {
             return Ok(0);
         }
 
-        // Read, rewrite, write
+        // Acquire file lock before any file I/O
+        let file_lock = self.get_file_lock(file_path);
+        let _guard = file_lock.lock().await;
+
+        // Read, rewrite, write (now protected by lock)
         let html = tokio::fs::read_to_string(file_path)
             .await
             .context("Failed to read HTML file")?;
@@ -195,7 +266,7 @@ impl LinkRewriter {
             // RESTORE: Markdown link rewriting (broken in original implementation)
             // HTML and markdown share directory: /path/page/index.{html,md}
             let md_path = file_path.with_extension("md");
-            if md_path.exists() {
+            if tokio::fs::try_exists(&md_path).await.unwrap_or(false) {
                 match rewrite_links_in_markdown(&md_path, &url_to_relative).await {
                     Ok(md_count) if md_count > 0 => {
                         log::debug!(
@@ -229,17 +300,16 @@ impl LinkRewriter {
 /// Rewrite a single link in a source file to point to a newly saved target.
 ///
 /// This is used for retroactive inbound link updates.
+/// Optimized to avoid HashMap overhead for the common single-link case.
 async fn rewrite_single_link(
     source_url: &str,
     source_path: &Path,
     target_url: &str,
-    _target_local: &Path,
     index: &LinkIndex,
 ) -> Result<()> {
-    // FIX: Compute target path using get_mirror_path() for consistency
-    // The target_local parameter is now unused but kept for API compatibility
+    // Compute target path deterministically from URL for consistency
     let target_path = crate::utils::get_mirror_path(target_url, index.output_dir(), "index.html").await?;
-    
+
     let relative = compute_relative_path(source_path, &target_path)
         .ok_or_else(|| anyhow!("Cannot compute relative path from {:?} to {:?}", source_path, target_path))?;
 
@@ -247,26 +317,22 @@ async fn rewrite_single_link(
         .await
         .context("Failed to read source file")?;
 
-    let mut url_map = HashMap::new();
-    url_map.insert(normalize_url(target_url), relative.clone());
+    // Pre-normalize target_url ONCE (eliminates redundant normalization)
+    let normalized_target = normalize_url(target_url);
 
-    let (rewritten, count) = rewrite_links_in_html(&html, source_url, &url_map)?;
+    // Use optimized single-link function - NO HASHMAP ALLOCATION
+    let (rewritten, count) = rewrite_single_link_in_html(&html, source_url, &normalized_target, &relative)?;
 
     if count > 0 {
         tokio::fs::write(source_path, rewritten)
             .await
             .context("Failed to write rewritten source file")?;
-        
-        // RESTORE: Retroactive markdown inbound link updates
-        // When page B is saved, update all pages that link TO page B (including markdown)
+
+        // Retroactive markdown inbound link updates (also optimized)
         let md_path = source_path.with_extension("md");
-        if md_path.exists() {
-            // Build single-entry map for this specific link update
-            let mut md_url_map = HashMap::new();
-            md_url_map.insert(normalize_url(target_url), relative.clone());
-            
-            // Non-blocking: failure to update markdown is logged but not fatal
-            if let Err(e) = rewrite_links_in_markdown(&md_path, &md_url_map).await {
+        if tokio::fs::try_exists(&md_path).await.unwrap_or(false) {
+            // Use optimized single-link markdown function - NO HASHMAP
+            if let Err(e) = rewrite_single_link_in_markdown(&md_path, &normalized_target, &relative).await {
                 log::warn!(
                     "Retroactive markdown link update failed for {:?}: {}",
                     md_path,
@@ -354,30 +420,132 @@ fn rewrite_links_in_html(
     Ok((result, count))
 }
 
-/// Restore markdown link rewriting via constant-space streaming I/O.
+/// Optimized single-link HTML rewriting without HashMap overhead.
+///
+/// For retroactive inbound link updates where exactly one link needs rewriting,
+/// this avoids the ~48+ byte HashMap allocation overhead by using direct
+/// string comparison instead of HashMap lookup.
+///
+/// # Arguments
+/// * `html` - The HTML content to rewrite
+/// * `base_url` - The URL of the page being rewritten (for resolving relative links)
+/// * `target_url` - The normalized URL to match (caller must pre-normalize)
+/// * `replacement` - The relative local path to substitute
+///
+/// # Returns
+/// Tuple of (rewritten HTML, number of links rewritten)
+fn rewrite_single_link_in_html(
+    html: &str,
+    base_url: &str,
+    target_url: &str,
+    replacement: &str,
+) -> Result<(String, usize)> {
+    let mut output = Vec::with_capacity(html.len());
+    let rewrite_count = std::sync::atomic::AtomicUsize::new(0);
+
+    let mut rewriter = HtmlRewriter::new(
+        Settings {
+            element_content_handlers: vec![
+                element!("a[href]", |el| {
+                    if let Some(href) = el.get_attribute("href") {
+                        // Resolve relative URLs against base before normalizing
+                        let absolute_url = if let Ok(base) = url::Url::parse(base_url) {
+                            match base.join(&href) {
+                                Ok(resolved) => resolved.to_string(),
+                                Err(_) => href.clone(),
+                            }
+                        } else {
+                            href.clone()
+                        };
+
+                        let normalized = normalize_url(&absolute_url);
+                        // DIRECT STRING COMPARISON - no HashMap lookup overhead
+                        if normalized == target_url {
+                            el.set_attribute("href", replacement)?;
+                            rewrite_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    Ok(())
+                }),
+            ],
+            ..Settings::default()
+        },
+        |c: &[u8]| output.extend_from_slice(c),
+    );
+
+    rewriter
+        .write(html.as_bytes())
+        .map_err(|e| anyhow!("HTML rewrite error: {}", e))?;
+    rewriter
+        .end()
+        .map_err(|e| anyhow!("HTML rewrite finalization error: {}", e))?;
+
+    let result = String::from_utf8(output).context("Invalid UTF-8 in rewritten HTML")?;
+    let count = rewrite_count.load(std::sync::atomic::Ordering::Relaxed);
+
+    Ok((result, count))
+}
+
+/// Normalize URL for lookup - strips fragment and normalizes for consistent matching.
+/// 
+/// This addresses the root cause: URLs like `https://example.com/page#section` 
+/// must match `https://example.com/page` in the url_to_relative map.
+fn normalize_url_for_lookup(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            parsed.set_fragment(None);
+            normalize_url(parsed.as_ref())
+        }
+        Err(_) => normalize_url(url)
+    }
+}
+
+/// Convert HTML-relative path to markdown-relative path.
+/// 
+/// The url_to_relative map contains HTML paths; markdown files need .md extensions.
+#[inline]
+fn html_path_to_markdown(html_path: &str) -> String {
+    html_path
+        .replace("/index.html", "/index.md")
+        .replace(".html", ".md")
+}
+
+/// Rewrite markdown links via regex-based pattern matching with URL normalization.
 ///
 /// Architecture:
 /// - Reads file line-by-line with O(1) memory footprint
-/// - Deterministic pattern matching without regex backtracking
+/// - Uses static compiled regexes for pattern matching
+/// - Normalizes URLs before lookup (strips fragments, normalizes case)
 /// - Atomic file replacement via POSIX rename(2) syscall
-/// - Non-blocking async I/O maintains event loop responsiveness
+///
+/// Handles all markdown link patterns:
+/// - Inline links: `](url)`, `](url "title")`, `](<url>)`
+/// - Reference definitions: `[ref]: url`, `[ref]: url "title"`
+/// - Autolinks: `<https://example.com>`
 ///
 /// # Arguments
 /// * `file_path` - Path to markdown file requiring link rewriting
-/// * `url_to_relative` - Map of normalized URL → relative path (reused from HTML rewriting)
+/// * `url_to_relative` - Map of normalized URL -> relative HTML path (reused from HTML rewriting)
 ///
 /// # Returns
 /// Number of links successfully rewritten
-///
-/// # Guarantees
-/// - Memory usage bounded by single line length (typically < 1KB)
-/// - Crash-safe: original file unchanged until atomic rename
-/// - Idempotent: can be called multiple times safely
 async fn rewrite_links_in_markdown(
     file_path: &Path,
     url_to_relative: &HashMap<String, String>,
 ) -> Result<usize> {
     use tokio::fs::File;
+    
+    // Pre-compute normalized lookup map: normalize URLs + convert HTML paths to markdown
+    let normalized_map: HashMap<String, String> = url_to_relative
+        .iter()
+        .map(|(url, html_path)| {
+            (normalize_url_for_lookup(url), html_path_to_markdown(html_path))
+        })
+        .collect();
+    
+    if normalized_map.is_empty() {
+        return Ok(0);
+    }
     
     // Open input file for streaming read
     let input_file = File::open(file_path).await
@@ -397,33 +565,47 @@ async fn rewrite_links_in_markdown(
     while let Some(line_result) = lines.next_line().await? {
         let mut line = line_result;
         
-        // Check each known URL for matches in current line
-        for (url, html_relative) in url_to_relative {
-            // Transform HTML path to markdown path
-            // Examples:
-            //   overview/index.html → overview/index.md
-            //   ../docs/guide.html → ../docs/guide.md
-            let md_relative = html_relative
-                .replace("/index.html", "/index.md")
-                .replace(".html", ".md");
-            
-            // Pattern 1: Standard markdown link ](url)
-            let pattern = format!("]({})", url);
-            let replacement = format!("]({})", md_relative);
-            if line.contains(&pattern) {
-                line = line.replace(&pattern, &replacement);
-                rewrite_count += 1;
+        // Pattern 1: Inline links ](url) or ](url "title") or ](<url>)
+        let mut inline_count = 0;
+        line = INLINE_LINK_RE.replace_all(&line, |caps: &regex::Captures| {
+            let url = &caps[1];
+            let normalized = normalize_url_for_lookup(url);
+            if let Some(md_relative) = normalized_map.get(&normalized) {
+                inline_count += 1;
+                format!("]({})", md_relative)
+            } else {
+                caps[0].to_string()
             }
-            
-            // Pattern 2: Titled markdown link ](url "title") or ](url 'title')
-            // Handle space-prefixed patterns to catch titled links
-            let pattern_space = format!("]({} ", url);
-            let replacement_space = format!("]({} ", md_relative);
-            if line.contains(&pattern_space) {
-                line = line.replace(&pattern_space, &replacement_space);
-                // Don't increment count - same logical link, different syntax
+        }).to_string();
+        rewrite_count += inline_count;
+        
+        // Pattern 2: Reference definitions [ref]: url (only at start of line)
+        if let Some(caps) = REFERENCE_DEF_RE.captures(&line) {
+            let ref_label = &caps[1];
+            let url = &caps[2];
+            let normalized = normalize_url_for_lookup(url);
+            if let Some(md_relative) = normalized_map.get(&normalized) {
+                rewrite_count += 1;
+                line = format!("[{}]: {}", ref_label, md_relative);
             }
         }
+        
+        // Pattern 3: Autolinks <https://...>
+        let mut autolink_count = 0;
+        line = AUTOLINK_RE.replace_all(&line, |caps: &regex::Captures| {
+            let url = &caps[1];
+            let normalized = normalize_url_for_lookup(url);
+            if let Some(md_relative) = normalized_map.get(&normalized) {
+                autolink_count += 1;
+                // Autolinks become regular markdown links when rewritten to local paths
+                // Use filename as link text for readability
+                let link_text = md_relative.rsplit('/').next().unwrap_or(md_relative);
+                format!("[{}]({})", link_text, md_relative)
+            } else {
+                caps[0].to_string()
+            }
+        }).to_string();
+        rewrite_count += autolink_count;
         
         // Write rewritten line to temporary file
         writer.write_all(line.as_bytes()).await?;
@@ -443,6 +625,86 @@ async fn rewrite_links_in_markdown(
         let _ = tokio::fs::remove_file(&temp_path).await;
     }
     
+    Ok(rewrite_count)
+}
+
+/// Optimized single-link markdown rewriting without HashMap overhead.
+///
+/// For retroactive inbound link updates where exactly one link needs rewriting,
+/// this avoids HashMap allocation and iteration overhead.
+///
+/// # Arguments
+/// * `file_path` - Path to markdown file requiring link rewriting
+/// * `target_url` - The normalized URL to match (caller must pre-normalize)
+/// * `html_relative` - The HTML-style relative path (will be converted to .md)
+///
+/// # Returns
+/// Number of links successfully rewritten
+async fn rewrite_single_link_in_markdown(
+    file_path: &Path,
+    target_url: &str,
+    html_relative: &str,
+) -> Result<usize> {
+    use tokio::fs::File;
+
+    // Transform HTML path to markdown path once (not per-URL like HashMap version)
+    let md_relative = html_relative
+        .replace("/index.html", "/index.md")
+        .replace(".html", ".md");
+
+    // Open input file for streaming read
+    let input_file = File::open(file_path)
+        .await
+        .context("Failed to open markdown file for reading")?;
+    let reader = BufReader::new(input_file);
+
+    // Create temporary output file for atomic replacement
+    let temp_path = file_path.with_extension("md.tmp");
+    let output_file = File::create(&temp_path)
+        .await
+        .context("Failed to create temporary markdown file")?;
+    let mut writer = BufWriter::new(output_file);
+
+    let mut rewrite_count = 0;
+    let mut lines = reader.lines();
+
+    // Build patterns once (not per-line like HashMap iteration)
+    let pattern = format!("]({})", target_url);
+    let replacement = format!("]({})", md_relative);
+    let pattern_space = format!("]({} ", target_url);
+    let replacement_space = format!("]({} ", md_relative);
+
+    // Stream through file one line at a time (O(1) memory)
+    while let Some(line_result) = lines.next_line().await? {
+        let mut line = line_result;
+
+        // Direct pattern matching - no HashMap iteration
+        if line.contains(&pattern) {
+            line = line.replace(&pattern, &replacement);
+            rewrite_count += 1;
+        }
+        if line.contains(&pattern_space) {
+            line = line.replace(&pattern_space, &replacement_space);
+        }
+
+        writer.write_all(line.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+
+    // Flush buffer to ensure all data written
+    writer.flush().await?;
+    drop(writer); // Explicit close before rename
+
+    // Atomic file replacement (crash-safe)
+    if rewrite_count > 0 {
+        tokio::fs::rename(&temp_path, file_path)
+            .await
+            .context("Failed to atomically replace markdown file")?;
+    } else {
+        // No rewrites performed - cleanup temporary file
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+
     Ok(rewrite_count)
 }
 

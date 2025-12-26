@@ -50,3 +50,6 @@ pub use crawl_types::{CrawlError, CrawlProgress, CrawlQueue, CrawlResult, Crawle
 
 // Re-export page enhancer
 pub use page_enhancer::*;
+
+// Re-export PageGuard for RAII page cleanup
+pub use page_processor::PageGuard;

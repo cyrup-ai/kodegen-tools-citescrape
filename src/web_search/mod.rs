@@ -5,9 +5,10 @@
 
 mod search;
 mod types;
+mod page_helpers;
 
 // Re-export public types
-pub use types::{MAX_RESULTS, MAX_RETRIES, SearchResult, SearchResults};
+pub use types::{MAX_QUERY_LENGTH, MAX_RESULTS, MAX_RETRIES, SearchResult, SearchResults};
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -50,27 +51,62 @@ pub async fn search_with_pool(
     query: impl Into<String>,
 ) -> Result<SearchResults> {
     let query = query.into();
-    info!("Starting web search for query: {}", query);
+    
+    // Validate query before acquiring browser resources
+    let trimmed_query = query.trim();
+    
+    // Check for empty query
+    if trimmed_query.is_empty() {
+        anyhow::bail!(
+            "Search query cannot be empty or whitespace-only. \
+             Please provide a valid search term."
+        );
+    }
+    
+    // Check query length
+    if trimmed_query.len() > types::MAX_QUERY_LENGTH {
+        anyhow::bail!(
+            "Search query is too long ({} characters). \
+             Maximum allowed: {} characters. \
+             Please shorten your query.",
+            trimmed_query.len(),
+            types::MAX_QUERY_LENGTH
+        );
+    }
+    
+    // Convert to owned String for use in closure
+    let query = trimmed_query.to_string();
+    
+    info!("Starting web search for query: '{}' ({} chars)", query, query.len());
 
     // Acquire pre-warmed browser from pool
     let guard = pool.acquire().await
         .context("Failed to acquire browser from pool")?;
-    let browser_arc = guard.browser_arc();
     
     info!("Acquired pre-warmed browser from pool (id={})", guard.id());
 
-    // Create blank page for stealth injection
-    let page = browser_arc
-        .new_page("about:blank")
-        .await
-        .context("Failed to create blank page")?;
+    // Get browser reference for use in retry closure
+    let browser = guard.browser();
 
-    // Perform search with retry logic
+    // Perform search with retry logic - fresh page per attempt
+    // Each retry creates a new page to ensure clean stealth injection state
     let results = search::retry_with_backoff(
-        || async {
-            search::perform_search(&page, &query).await?;
-            search::wait_for_results(&page).await?;
-            search::extract_results(&page).await
+        || {
+            let query = query.clone();
+            async move {
+                // Create fresh page for each attempt (critical for stealth retry)
+                // PageGuard ensures page.close() is called on ANY exit path
+                let page_guard = crate::crawl_engine::page_processor::PageGuard::new(
+                    browser.new_page("about:blank").await
+                        .context("Failed to create blank page")?,
+                    format!("web_search:{}", query),
+                );
+                
+                // Execute search operations
+                search::perform_search(&page_guard, &query).await?;
+                search::extract_results(&page_guard).await
+                // PageGuard dropped here - spawns async page.close()
+            }
         },
         MAX_RETRIES,
     )
@@ -78,11 +114,8 @@ pub async fn search_with_pool(
 
     info!("Search completed successfully with {} results", results.len());
 
-    // Clean up page
-    if let Err(e) = page.close().await {
-        tracing::warn!("Failed to close search page: {}", e);
-    }
-
+    // page_guard dropped here on success path
+    // Drop::drop spawns async page.close() - guaranteed cleanup
     Ok(SearchResults::new(query, results))
     // Browser automatically returns to pool when guard drops
 }

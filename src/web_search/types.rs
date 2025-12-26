@@ -13,26 +13,43 @@ pub const SEARCH_URL: &str = "https://duckduckgo.com";
 /// `DuckDuckGo` uses article elements with data-testid="result"
 pub const SEARCH_RESULT_SELECTOR: &str = "article[data-testid='result']";
 
-/// CSS selector for result titles (also contains the URL)
-/// `DuckDuckGo` uses h2 > a structure for title links
-pub const TITLE_SELECTOR: &str = "h2 > a";
+/// CSS selector for the title/link element in DuckDuckGo search results
+///
+/// In DuckDuckGo's DOM structure, title and URL share the same element:
+/// ```html
+/// <h2><a href="https://example.com">Page Title</a></h2>
+/// ```
+///
+/// Extract title via `.inner_text()` and URL via `.attribute("href")`.
+pub const TITLE_LINK_SELECTOR: &str = "h2 > a";
 
 /// CSS selector for result snippets/descriptions
 /// `DuckDuckGo` uses div with data-result="snippet" attribute
 pub const SNIPPET_SELECTOR: &str = "div[data-result='snippet']";
-
-/// CSS selector for result links (same as title selector)
-/// The title link contains the href attribute with the URL
-pub const LINK_SELECTOR: &str = "h2 > a";
-
-/// Maximum time to wait for search results (seconds)
-pub const SEARCH_RESULTS_WAIT_TIMEOUT: u64 = 10;
 
 /// Maximum number of retry attempts
 pub const MAX_RETRIES: u32 = 3;
 
 /// Maximum number of results to extract
 pub const MAX_RESULTS: usize = 10;
+
+/// Polling interval in milliseconds for waiting on DOM elements
+///
+/// 100ms provides good responsiveness without excessive CDP overhead.
+/// Used by both perform_search and wait_for_results polling loops.
+pub const POLL_INTERVAL_MS: u64 = 100;
+
+/// Maximum query length for DuckDuckGo searches
+///
+/// DuckDuckGo's practical query limit is approximately 1000 characters.
+/// Longer queries may be truncated or cause navigation errors.
+///
+/// Conservative limit based on:
+/// - Browser URL length limits (~2048 chars total)
+/// - DuckDuckGo URL structure overhead (~50 chars)
+/// - URL encoding expansion (up to 3x for special characters)
+/// - Safe buffer for reliable operation
+pub const MAX_QUERY_LENGTH: usize = 1000;
 
 // =============================================================================
 // Data Structures

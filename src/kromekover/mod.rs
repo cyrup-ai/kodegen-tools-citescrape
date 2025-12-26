@@ -37,7 +37,7 @@ const EVASION_SCRIPTS: &[&str] = &[
     "evasions/chrome_runtime.js", // Runtime API
 ];
 
-pub async fn inject(page: Page) -> Result<()> {
+pub async fn inject(page: &Page) -> Result<()> {
     // Generate per-session seed for canvas fingerprinting
     let session_seed: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
     let session_seed_hex = hex::encode(&session_seed);

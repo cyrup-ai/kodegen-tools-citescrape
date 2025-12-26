@@ -9,7 +9,7 @@ use chromiumoxide::{Page, cdp};
 /// Enhance a page with stealth features and optimizations
 pub async fn enhance_page(page: Page) -> Result<()> {
     // Apply elite kromekover stealth features
-    match crate::kromekover::inject(page.clone()).await {
+    match crate::kromekover::inject(&page).await {
         Ok(()) => {
             log::debug!("Kromekover stealth evasions injected successfully");
         }

@@ -138,13 +138,30 @@ impl PageGuard {
     /// Returns error if CDP close command fails. Non-critical - page
     /// will still be cleaned up by browser, but may leave zombie resources.
     pub async fn close(mut self) -> Result<()> {
+        use std::time::Duration;
+        
         if let Some(page) = self.page.take() {
-            if let Err(e) = page.close().await {
-                warn!("Failed to close page for {}: {}", self.url, e);
-                // Non-fatal: browser will eventually clean up, but we tried
-                return Err(e.into());
-            } else {
-                debug!("Page explicitly closed for {}", self.url);
+            // Wrap page.close() with timeout to prevent indefinite hangs
+            // 5 seconds matches BrowserPoolConfig::health_check_timeout
+            match tokio::time::timeout(Duration::from_secs(5), page.close()).await {
+                Ok(Ok(())) => {
+                    debug!("Page explicitly closed for {}", self.url);
+                }
+                Ok(Err(e)) => {
+                    warn!("Failed to close page for {}: {}", self.url, e);
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    error!(
+                        "Timeout closing page for {} after 5s. \
+                         Browser may be hung. Page will be abandoned.",
+                        self.url
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Timeout closing page for {} after 5 seconds", 
+                        self.url
+                    ));
+                }
             }
         }
         Ok(())
@@ -166,18 +183,29 @@ impl Deref for PageGuard {
 
 impl Drop for PageGuard {
     fn drop(&mut self) {
+        use std::time::Duration;
+        
         if let Some(page) = self.page.take() {
             let url = std::mem::take(&mut self.url);
             
-            // Spawn fire-and-forget cleanup task
+            // Spawn fire-and-forget cleanup task with timeout protection
             // This ensures cleanup happens even on error paths, though we can't
             // await it from synchronous Drop. The tokio runtime will execute it.
             self.runtime_handle.spawn(async move {
-                if let Err(e) = page.close().await {
-                    // Just log - nothing we can do from Drop
-                    log::warn!("PageGuard drop cleanup failed for {}: {}", url, e);
-                } else {
-                    log::trace!("PageGuard drop cleanup succeeded for {}", url);
+                match tokio::time::timeout(Duration::from_secs(5), page.close()).await {
+                    Ok(Ok(())) => {
+                        log::trace!("PageGuard drop cleanup succeeded for {}", url);
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("PageGuard drop cleanup failed for {}: {}", url, e);
+                    }
+                    Err(_) => {
+                        log::error!(
+                            "PageGuard drop cleanup timeout for {} after 5s. \
+                             Browser may be hung. Page abandoned.",
+                            url
+                        );
+                    }
                 }
             });
         }

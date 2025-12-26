@@ -5,16 +5,18 @@
 
 use anyhow::{Context, Result, anyhow};
 use chromiumoxide::page::Page;
+use once_cell::sync::Lazy;
 use rand::Rng;
+use regex::Regex;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use url::Url;
 
 use super::types::{
-    LINK_SELECTOR, MAX_RESULTS, SEARCH_RESULT_SELECTOR, SEARCH_RESULTS_WAIT_TIMEOUT, SEARCH_URL,
-    SNIPPET_SELECTOR, SearchResult, TITLE_SELECTOR,
+    MAX_RESULTS, POLL_INTERVAL_MS, SEARCH_RESULT_SELECTOR, SEARCH_URL, SNIPPET_SELECTOR,
+    SearchResult, TITLE_LINK_SELECTOR,
 };
-use crate::crawl_engine::page_enhancer;
+use super::page_helpers::get_page_url_with_fallback;
 
 /// Perform a search with kromekover stealth injection
 ///
@@ -30,20 +32,33 @@ use crate::crawl_engine::page_enhancer;
 /// - packages/citescrape/src/crawl_engine/core.rs:231-259 (stealth pattern)
 /// - `DuckDuckGo` DOM analysis from `tasks/DUCK_DUCK_GO_DOM_PARSING.md`
 pub async fn perform_search(page: &Page, query: &str) -> Result<()> {
-    // Apply kromekover stealth injection BEFORE navigation
+    // Apply kromekover stealth injection BEFORE navigation - FAIL on error
+    // Stealth is CRITICAL for web search (DuckDuckGo will CAPTCHA without it)
     info!("Applying kromekover stealth injection");
-
-    // Wait for stealth injection with timeout
-    match tokio::time::timeout(
+    
+    tokio::time::timeout(
         Duration::from_secs(5),
-        page_enhancer::enhance_page(page.clone()),
+        crate::kromekover::inject(page),
     )
     .await
-    {
-        Ok(Ok(())) => info!("Stealth injection complete"),
-        Ok(Err(e)) => warn!("Stealth injection failed: {}", e),
-        Err(_) => warn!("Stealth injection timeout"),
-    }
+    .context("Stealth injection timeout after 5s")?
+    .context("Stealth injection failed")?;
+    
+    info!("Stealth injection complete");
+
+    // Set viewport for consistent desktop rendering (extracted from page_enhancer)
+    use chromiumoxide::cdp;
+    page.execute(
+        cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams::builder()
+            .width(1920)
+            .height(1080)
+            .device_scale_factor(1.0)
+            .mobile(false)
+            .build()
+            .map_err(anyhow::Error::msg)?,
+    )
+    .await
+    .context("Failed to set viewport dimensions")?;
 
     // Navigate directly to DuckDuckGo search results with proper URL encoding
     let mut search_url = Url::parse(SEARCH_URL).context("Failed to parse DuckDuckGo base URL")?;
@@ -66,7 +81,7 @@ pub async fn perform_search(page: &Page, query: &str) -> Result<()> {
     // This is faster when results load quickly, but waits up to 5s if needed
     let poll_start = Instant::now();
     let max_wait = Duration::from_secs(5);
-    let poll_interval = Duration::from_millis(200);
+    let poll_interval = Duration::from_millis(POLL_INTERVAL_MS);
 
     info!("Waiting for React to render search results...");
     loop {
@@ -83,7 +98,7 @@ pub async fn perform_search(page: &Page, query: &str) -> Result<()> {
         // Check timeout
         if poll_start.elapsed() >= max_wait {
             // Check if we got a CAPTCHA or error page
-            let url = page.url().await.ok().flatten().unwrap_or_default();
+            let url = get_page_url_with_fallback(page).await;
             if url.contains("/sorry/") || url.contains("captcha") {
                 return Err(anyhow!(
                     "DuckDuckGo presented a CAPTCHA page. Try again later or use a different network."
@@ -103,76 +118,6 @@ pub async fn perform_search(page: &Page, query: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Wait for search results to appear in the DOM
-///
-/// Polls the page for `SEARCH_RESULT_SELECTOR` elements with a 100ms interval,
-/// timing out after `SEARCH_RESULTS_WAIT_TIMEOUT` seconds.
-///
-/// This is necessary because `page.wait_for_navigation()` returns when the HTTP
-/// response arrives, but Google renders search results via JavaScript afterward.
-/// We must verify the DOM actually contains result elements before scraping.
-///
-/// # Arguments
-/// * `page` - Page to monitor for search result loading
-pub async fn wait_for_results(page: &Page) -> Result<()> {
-    let timeout_duration = Duration::from_secs(SEARCH_RESULTS_WAIT_TIMEOUT);
-    let start = Instant::now();
-    let poll_interval = Duration::from_millis(100);
-
-    info!("Waiting for search results to appear in DOM");
-
-    loop {
-        // Try to find search result elements in DOM
-        match page.find_element(SEARCH_RESULT_SELECTOR).await {
-            Ok(_) => {
-                info!("Search results found in DOM after {:?}", start.elapsed());
-                return Ok(());
-            }
-            Err(_) if start.elapsed() >= timeout_duration => {
-                // Timeout - provide diagnostic info including full HTML
-                let url = page
-                    .url()
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                // Log timeout with structured logging
-                tracing::debug!(
-                    url = %url,
-                    selector = SEARCH_RESULT_SELECTOR,
-                    "Timeout waiting for search results - selector not found"
-                );
-
-                // Only save HTML at TRACE level for deep debugging
-                if tracing::enabled!(tracing::Level::TRACE)
-                    && let Ok(html) = page.content().await
-                {
-                    use chrono::Utc;
-                    let timestamp = Utc::now().timestamp();
-                    let debug_path = std::env::temp_dir()
-                        .join(format!("search_debug_{timestamp}.html"));
-                    
-                    if let Err(e) = tokio::fs::write(&debug_path, &html).await {
-                        tracing::trace!("Failed to write debug HTML: {e}");
-                    } else {
-                        tracing::trace!(path = %debug_path.display(), "Debug HTML saved");
-                    }
-                }
-
-                return Err(anyhow!(
-                    "Timeout waiting for search results. Page URL: {url}. \
-                     Expected selector '{SEARCH_RESULT_SELECTOR}' not found after {timeout_duration:?}"
-                ));
-            }
-            Err(_) => {
-                // Not found yet, wait and retry
-                tokio::time::sleep(poll_interval).await;
-            }
-        }
-    }
 }
 
 /// Extract search results from the page
@@ -204,7 +149,7 @@ pub async fn extract_results(page: &Page) -> Result<Vec<SearchResult>> {
     // Fail fast if no results (likely CAPTCHA, error page, or DuckDuckGo DOM change)
     if search_results.is_empty() {
         // Get current URL for diagnostics
-        let url = page.url().await.ok().flatten().unwrap_or_default();
+        let url = get_page_url_with_fallback(page).await;
 
         // Check for known error conditions
         if url.contains("/sorry/") || url.contains("captcha") {
@@ -237,47 +182,40 @@ pub async fn extract_results(page: &Page) -> Result<Vec<SearchResult>> {
     let mut results = Vec::new();
 
     for (index, result) in search_results.into_iter().enumerate().take(MAX_RESULTS) {
-        // Extract title - REQUIRED
-        let title = result
-            .find_element(TITLE_SELECTOR)
+        // Find title/link element ONCE (contains both title text and href)
+        let title_link = result
+            .find_element(TITLE_LINK_SELECTOR)
             .await
             .with_context(|| {
                 format!(
-                    "DuckDuckGo result {}: Title element not found with selector '{}'. \
-                 DOM structure may have changed.",
+                    "DuckDuckGo result {}: Title/link element not found with selector '{}'. \
+                     DOM structure may have changed.",
                     index + 1,
-                    TITLE_SELECTOR
+                    TITLE_LINK_SELECTOR
                 )
-            })?
+            })?;
+
+        // Extract title from the element
+        let title = title_link
             .inner_text()
             .await
             .with_context(|| format!("Failed to get title text for result {}", index + 1))?
             .unwrap_or_else(|| format!("Untitled Result {}", index + 1));
 
-        // Extract URL - CRITICAL, must succeed
-        let url = result
-            .find_element(LINK_SELECTOR)
-            .await
-            .with_context(|| {
-                format!(
-                    "DuckDuckGo result {}: Link element not found with selector '{}'. \
-                 DOM structure may have changed.",
-                    index + 1,
-                    LINK_SELECTOR
-                )
-            })?
+        // Extract URL from the SAME element (no additional DOM query)
+        let url = title_link
             .attribute("href")
             .await
             .with_context(|| format!("Failed to get href attribute for result {}", index + 1))?
             .ok_or_else(|| {
                 anyhow!(
                     "DuckDuckGo result {}: Link href attribute is empty. \
-                 This shouldn't happen - may indicate a DuckDuckGo UI change.",
+                     This shouldn't happen - may indicate a DuckDuckGo UI change.",
                     index + 1
                 )
             })?;
 
-        // Extract snippet - OPTIONAL, can fallback
+        // Extract snippet - separate element, unchanged
         let snippet = match result.find_element(SNIPPET_SELECTOR).await {
             Ok(el) => el
                 .inner_text()
@@ -299,58 +237,109 @@ pub async fn extract_results(page: &Page) -> Result<Vec<SearchResult>> {
     Ok(results)
 }
 
+/// Regex patterns for permanent browser errors (non-retryable)
+///
+/// These indicate the browser/page/session state is broken and cannot recover.
+/// Patterns are compiled once at first use via `once_cell::sync::Lazy`.
+static PERMANENT_ERROR_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
+        // Browser lifecycle errors
+        Regex::new(r"browser (closed|disconnected|crashed)").unwrap(),
+        Regex::new(r"page (closed|crashed)").unwrap(),
+        Regex::new(r"target (closed|crashed|destroyed)").unwrap(),
+        // Session/connection errors
+        Regex::new(r"session (not found|closed|disconnected)").unwrap(),
+        Regex::new(r"no response from.*chromium").unwrap(),
+        Regex::new(r"channel (closed|disconnected|error)").unwrap(),
+        // CDP/WebSocket specific
+        Regex::new(r"websocket (closed|error|disconnected)").unwrap(),
+        Regex::new(r"cdp.*(disconnect|closed)").unwrap(),
+        // Frame/DOM errors
+        Regex::new(r"frame.*not found").unwrap(),
+        // Anti-bot detection
+        Regex::new(r"captcha").unwrap(),
+    ]
+});
+
+/// Regex patterns for transient errors (retryable)
+///
+/// These indicate temporary failures that may succeed on retry.
+/// Patterns are compiled once at first use via `once_cell::sync::Lazy`.
+static RETRYABLE_ERROR_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
+        // Stealth injection failures - RETRYABLE (fresh page can succeed)
+        // These errors indicate transient CDP or script loading issues
+        Regex::new(r"stealth injection").unwrap(),
+        // Timeout errors
+        Regex::new(r"timeout|timed out").unwrap(),
+        // Network errors (specific, not just "network")
+        Regex::new(r"network (error|timeout|unreachable)").unwrap(),
+        Regex::new(r"connection (refused|reset|closed)").unwrap(),
+        Regex::new(r"dns.*(fail|error|timeout)").unwrap(),
+        // Rate limiting
+        Regex::new(r"rate limit|too many requests").unwrap(),
+        Regex::new(r"(http[: ])?429").unwrap(),
+        // Temporary resource issues
+        Regex::new(r"temporarily unavailable").unwrap(),
+    ]
+});
+
 /// Classify errors into retryable vs permanent failures
 ///
-/// Based on chromiumoxide error patterns from browser automation.
+/// Uses regex pattern matching for precise error classification.
+/// Logs classification decisions for debugging.
 ///
 /// # Permanent Errors (return false)
 /// - Browser/page closed or disconnected
 /// - Session terminated
 /// - Frame/target not found
 /// - CAPTCHA detected
+/// - WebSocket/CDP connection lost
 ///
-/// # Transient Errors (return true)  
+/// # Transient Errors (return true)
 /// - Network timeouts
 /// - Connection refused (temporary)
-/// - Rate limiting
+/// - Rate limiting (429)
+/// - DNS failures
 ///
-/// # Unknown Errors (return true)
-/// - Default to retrying for safety
+/// # Unknown Errors (return false)
+/// - Fail fast on unknown errors (conservative approach)
+/// - Logs warning to help identify patterns to add
 fn is_retryable_error(error: &anyhow::Error) -> bool {
     let error_str = error.to_string().to_lowercase();
 
-    // Permanent errors - browser/page state is broken, retry won't help
-    if error_str.contains("browser closed")
-        || error_str.contains("browser disconnected")
-        || error_str.contains("page closed")
-        || error_str.contains("target closed")
-        || error_str.contains("session not found")
-        || error_str.contains("session closed")
-        || error_str.contains("no response from the chromium instance")
-        || error_str.contains("channel")  // Channel errors = browser died
-        || error_str.contains("frame") && error_str.contains("not found")
-        || error_str.contains("captcha")
-        || error_str.contains("websocket")
-    // WebSocket errors = connection lost
-    {
-        return false;
+    // Check permanent patterns first (non-retryable)
+    for pattern in PERMANENT_ERROR_PATTERNS.iter() {
+        if pattern.is_match(&error_str) {
+            tracing::debug!(
+                error = %error_str,
+                pattern = %pattern.as_str(),
+                "Classified as permanent (non-retryable)"
+            );
+            return false;
+        }
     }
 
-    // Transient errors - safe to retry, might succeed next time
-    if error_str.contains("timeout")
-        || error_str.contains("timed out")
-        || error_str.contains("network")
-        || error_str.contains("connection refused")
-        || error_str.contains("connection reset")
-        || error_str.contains("rate limit")
-        || error_str.contains("429")
-    // HTTP 429 Too Many Requests
-    {
-        return true;
+    // Check retryable patterns
+    for pattern in RETRYABLE_ERROR_PATTERNS.iter() {
+        if pattern.is_match(&error_str) {
+            tracing::debug!(
+                error = %error_str,
+                pattern = %pattern.as_str(),
+                "Classified as transient (retryable)"
+            );
+            return true;
+        }
     }
 
-    // Unknown errors - retry conservatively (better safe than sorry)
-    true
+    // Unknown errors - fail fast (truly conservative approach)
+    // Log at warn level so developers can identify patterns to add
+    tracing::warn!(
+        error = %error_str,
+        "Unknown error classification - failing fast. \
+         If this should be retryable, add pattern to RETRYABLE_ERROR_PATTERNS in search.rs"
+    );
+    false
 }
 
 /// Retry a search operation with exponential backoff and error classification

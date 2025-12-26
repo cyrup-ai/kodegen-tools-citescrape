@@ -16,7 +16,7 @@ async fn test_evasions() -> Result<()> {
     let page = browser.new_page("about:blank").await?;
 
     // Inject our evasion scripts (registers them for new documents)
-    inject(page.clone()).await?;
+    inject(&page).await?;
 
     // Navigate to trigger script execution (mirrors real crawler behavior)
     page.goto("data:text/html,<html><body></body></html>").await?;

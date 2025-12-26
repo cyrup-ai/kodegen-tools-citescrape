@@ -68,8 +68,22 @@ impl Tool for WebSearchTool {
 
     async fn execute(&self, args: Self::Args, _ctx: ToolExecutionContext) -> Result<ToolResponse<<Self::Args as kodegen_mcp_schema::ToolArgs>::Output>, McpError> {
         // Validate query is not empty
-        if args.query.trim().is_empty() {
-            return Err(McpError::invalid_arguments("Search query cannot be empty"));
+        let query = args.query.trim();
+        if query.is_empty() {
+            return Err(McpError::invalid_arguments(
+                "Search query cannot be empty or whitespace-only"
+            ));
+        }
+
+        // Validate query length
+        if query.len() > crate::web_search::MAX_QUERY_LENGTH {
+            return Err(McpError::invalid_arguments(
+                format!(
+                    "Search query is too long ({} characters). Maximum allowed: {} characters",
+                    query.len(),
+                    crate::web_search::MAX_QUERY_LENGTH
+                )
+            ));
         }
 
         // Perform search using browser pool
