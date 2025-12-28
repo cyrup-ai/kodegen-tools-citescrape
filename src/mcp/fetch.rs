@@ -16,7 +16,6 @@ use syntect::util::as_24_bit_terminal_escaped;
 
 use super::registry::CrawlRegistry;
 use super::start_crawl::ScrapeUrlTool;
-use crate::utils::get_mirror_path;
 
 /// Global syntax set for markdown highlighting (loaded once)
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
@@ -143,10 +142,10 @@ impl Tool for FetchTool {
             McpError::Other(anyhow::anyhow!("No output directory returned from scrape"))
         })?;
 
-        // Use deterministic path calculation (same as crawler uses to save)
-        let md_path = get_mirror_path(&args.url, std::path::Path::new(&output_dir), "index.md")
-            .await
-            .map_err(|e| McpError::Other(anyhow::anyhow!("Failed to calculate markdown path: {}", e)))?;
+        // output_dir from scrape_url is already the content directory
+        // (computed by get_content_dir which calls get_mirror_path internally)
+        // Just append the filename directly - do NOT call get_mirror_path again
+        let md_path = std::path::PathBuf::from(&output_dir).join("index.md");
 
         let md_path_str = md_path.to_string_lossy().to_string();
 
